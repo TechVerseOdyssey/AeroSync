@@ -28,6 +28,12 @@ impl EguiApp {
         let (config_cache, server_config_cache) = rt.block_on(async {
             let config = state.config.read().await.clone();
             let server_config = state.server_config.read().await.clone();
+            
+            // Start the transfer engine
+            if let Err(e) = state.transfer_engine.start().await {
+                tracing::error!("Failed to start transfer engine: {}", e);
+            }
+            
             (config, server_config)
         });
         
@@ -62,13 +68,33 @@ impl EguiApp {
     }
 
     fn select_files(&mut self) {
-        if let Some(files) = FileDialog::new()
-            .add_filter("All Files", &["*"])
-            .set_directory(".")
-            .pick_files()
+        // Try multiple files selection with better configuration
+        match FileDialog::new().pick_files()
         {
-            self.selected_files = files;
-            self.transfer_status = format!("Selected {} files", self.selected_files.len());
+            Some(files) if !files.is_empty() => {
+                self.selected_files = files;
+                self.transfer_status = format!("Selected {} files", self.selected_files.len());
+            }
+            _ => {
+                // Fallback to single file selection if multiple selection fails or is empty
+                if let Some(file) = FileDialog::new()
+                    .pick_file()
+                {
+                    self.selected_files = vec![file];
+                    self.transfer_status = "Selected 1 file".to_string();
+                } else {
+                    self.transfer_status = "No files selected".to_string();
+                }
+            }
+        }
+    }
+
+    fn select_single_file(&mut self) {
+        if let Some(file) = FileDialog::new().pick_file() {
+            self.selected_files = vec![file];
+            self.transfer_status = "Selected 1 file".to_string();
+        } else {
+            self.transfer_status = "No file selected".to_string();
         }
     }
 
@@ -250,7 +276,11 @@ impl eframe::App for EguiApp {
             ui.group(|ui| {
                 ui.label("📁 File Selection");
                 ui.horizontal(|ui| {
-                    if ui.button("📄 Select Files").clicked() {
+                    if ui.button("📄 Select File").clicked() {
+                        self.select_single_file();
+                    }
+                    
+                    if ui.button("📄📄 Select Files").clicked() {
                         self.select_files();
                     }
                     
@@ -497,7 +527,7 @@ impl eframe::App for EguiApp {
                             for url in &urls {
                                 ui.horizontal(|ui| {
                                     ui.label("  •");
-                                    ui.selectable_label(false, url);
+                                    let _ = ui.selectable_label(false, url);
                                     if ui.small_button("📋").clicked() {
                                         ui.output_mut(|o| o.copied_text = url.clone());
                                         self.server_status = "URL copied to clipboard".to_string();
