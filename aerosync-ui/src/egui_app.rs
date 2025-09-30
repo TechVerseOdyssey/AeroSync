@@ -250,7 +250,15 @@ impl EguiApp {
             .set_directory(".")
             .pick_folder()
         {
-            self.server_config_cache.receive_directory = folder;
+            self.server_config_cache.receive_directory = folder.clone();
+            
+            // Ensure the directory exists
+            self.rt.spawn(async move {
+                if let Err(e) = tokio::fs::create_dir_all(&folder).await {
+                    tracing::error!("Failed to create receive directory: {}", e);
+                }
+            });
+            
             self.server_status = "Receive directory updated".to_string();
         }
     }
@@ -629,11 +637,13 @@ impl eframe::App for EguiApp {
                             let mut config_guard = state_config.write().await;
                             *config_guard = config.clone();
                             
-                            let receiver_guard = receiver.read().await;
-                            let _ = receiver_guard.update_config(config).await;
+                            let mut receiver_guard = receiver.write().await;
+                            if let Err(e) = receiver_guard.update_config_and_restart(config).await {
+                                tracing::error!("Failed to update server config: {}", e);
+                            }
                         });
                         
-                        self.server_status = "Server configuration saved".to_string();
+                        self.server_status = "Server configuration saved and applied".to_string();
                         close_server_panel = true;
                     }
                 });
