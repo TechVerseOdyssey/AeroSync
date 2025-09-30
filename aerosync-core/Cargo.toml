@@ -1,0 +1,20 @@
+[package]
+name = "aerosync-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+crossbeam-channel = { workspace = true }
+futures = { workspace = true }
+warp = "0.3"
+quinn = { workspace = true }
+rustls = { workspace = true }
+rcgen = "0.11"
+bytes = "1.0"

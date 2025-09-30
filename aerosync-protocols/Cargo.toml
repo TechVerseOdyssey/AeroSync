@@ -1,0 +1,19 @@
+[package]
+name = "aerosync-protocols"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aerosync-core = { path = "../aerosync-core" }
+tokio = { workspace = true }
+quinn = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+bytes = "1.0"
+rustls = "0.21"
+async-trait = "0.1"

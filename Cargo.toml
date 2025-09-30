@@ -1,0 +1,47 @@
+[package]
+name = "aerosync"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "aerosync"
+path = "src/main.rs"
+
+[features]
+default = []
+egui = ["aerosync-ui/egui"]
+
+[dependencies]
+aerosync-core = { path = "aerosync-core" }
+aerosync-protocols = { path = "aerosync-protocols" }
+aerosync-ui = { path = "aerosync-ui" }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[workspace]
+members = [
+    "aerosync-core",
+    "aerosync-protocols", 
+    "aerosync-ui"
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1.0", features = ["full"] }
+quinn = "0.10"
+reqwest = { version = "0.11", features = ["json", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1.0", features = ["v4"] }
+crossbeam-channel = "0.5"
+futures = "0.3"
+rustls = "0.21"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

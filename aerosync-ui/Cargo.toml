@@ -1,0 +1,39 @@
+[package]
+name = "aerosync-ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aerosync-core = { path = "../aerosync-core" }
+aerosync-protocols = { path = "../aerosync-protocols" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+# Cross-platform UI dependencies (to be selected based on final choice)
+# Options: egui, tauri, flutter_rust_bridge, etc.
+# For now, we'll prepare for multiple options
+
+[features]
+default = ["cli"]
+cli = []
+egui = ["eframe", "egui_extras", "rfd"]
+tauri = ["tauri-build"]
+
+[dependencies.eframe]
+version = "0.23"
+optional = true
+
+[dependencies.egui_extras]
+version = "0.23"
+optional = true
+
+[dependencies.rfd]
+version = "0.11"
+optional = true
+
+[build-dependencies.tauri-build]
+version = "1.0"
+optional = true

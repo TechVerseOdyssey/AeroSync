@@ -1,0 +1,35 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Build artifacts
+/dist/
+/build/
+
+# Tauri
+/src-tauri/target/
+
+# Node modules (if using Tauri with frontend)
+node_modules/
+
+# Test files
+/test_files/
+/temp/
