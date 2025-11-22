@@ -2,12 +2,37 @@ use crate::traits::{TransferProtocol, TransferProgress};
 use aerosync_core::{AeroSyncError, Result, TransferTask};
 use async_trait::async_trait;
 use quinn::{ClientConfig, Connection, Endpoint};
+use rustls::{ClientConfig as TlsClientConfig, Certificate, ServerName};
+use rustls::client::{ServerCertVerifier, ServerCertVerified};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
+
+struct SkipServerVerification;
+
+impl SkipServerVerification {
+    fn new() -> Arc<Self> {
+        Arc::new(Self)
+    }
+}
+
+impl ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &Certificate,
+        _intermediates: &[Certificate],
+        _server_name: &ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: SystemTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+}
 
 pub struct QuicTransfer {
     endpoint: Endpoint,
@@ -37,7 +62,22 @@ impl Default for QuicConfig {
 
 impl QuicTransfer {
     pub fn new(config: QuicConfig) -> Result<Self> {
-        let client_config = ClientConfig::with_native_roots();
+        // Build TLS client config with ALPN to match server
+        // For development: accept self-signed certificates by using a custom verifier
+        // that skips verification.
+        let mut tls_config = TlsClientConfig::builder()
+            .with_safe_defaults()
+            .with_custom_certificate_verifier(SkipServerVerification::new())
+            .with_no_client_auth();
+        
+        // Set ALPN protocol to match server (must match server's "aerosync")
+        let alpn_protocols: Vec<Vec<u8>> = config.alpn_protocols.iter()
+            .map(|s| s.as_bytes().to_vec())
+            .collect();
+        tls_config.alpn_protocols = alpn_protocols;
+        
+        // Create new ClientConfig with the modified TLS config
+        let client_config = ClientConfig::new(Arc::new(tls_config));
 
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
@@ -70,8 +110,13 @@ impl QuicTransfer {
             .await
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
 
-        // Send file metadata first
-        let metadata = format!("UPLOAD:{}", file_size);
+        // Send file metadata first (format: UPLOAD:filename:size)
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let metadata = format!("UPLOAD:{}:{}\n", file_name, file_size);
         send_stream.write_all(metadata.as_bytes()).await
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
 

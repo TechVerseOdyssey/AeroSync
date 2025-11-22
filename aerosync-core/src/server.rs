@@ -569,7 +569,19 @@ async fn handle_quic_connection(
         
         if header.starts_with("UPLOAD:") {
             tracing::info!("QUIC: Processing upload request");
-            let parts: Vec<&str> = header.splitn(3, ':').collect();
+            
+            // Find the end of the header line
+            let header_end = match header.find('\n') {
+                Some(pos) => pos,
+                None => {
+                    tracing::warn!("QUIC: Incomplete header received");
+                    continue;
+                }
+            };
+            
+            let header_line = &header[..header_end];
+            let parts: Vec<&str> = header_line.splitn(3, ':').collect();
+            
             if parts.len() >= 3 {
                 let filename = parts[1];
                 let file_size: u64 = parts[2].trim().parse().unwrap_or(0);
@@ -587,6 +599,17 @@ async fn handle_quic_connection(
                 
                 tracing::info!("QUIC: File size check passed");
                 
+                // Capture any initial data that was read along with the header
+                let initial_data = if header_end + 1 < header_len {
+                    Some(header_buf[header_end + 1..header_len].to_vec())
+                } else {
+                    None
+                };
+                
+                if let Some(ref data) = initial_data {
+                    tracing::debug!("QUIC: Captured {} bytes of initial file data from header buffer", data.len());
+                }
+                
                 // Handle file upload
                 tracing::info!("QUIC: Starting file upload process");
                 match handle_quic_file_upload(
@@ -597,6 +620,7 @@ async fn handle_quic_connection(
                     &receive_dir,
                     allow_overwrite,
                     received_files.clone(),
+                    initial_data,
                 ).await {
                     Ok(_) => {
                         tracing::info!("QUIC: ✅ File upload completed successfully");
@@ -629,6 +653,7 @@ async fn handle_quic_file_upload(
     receive_dir: &PathBuf,
     allow_overwrite: bool,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    initial_data: Option<Vec<u8>>,
 ) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     
@@ -652,41 +677,61 @@ async fn handle_quic_file_upload(
     tracing::info!("QUIC: Creating file: {}", file_path.display());
     let mut file = tokio::fs::File::create(&file_path).await?;
     tracing::debug!("QUIC: File created successfully");
-    let mut buffer = vec![0u8; 64 * 1024]; // 64KB buffer
+    
     let mut total_received = 0u64;
     let mut chunk_count = 0;
     
-    tracing::info!("QUIC: Starting file data transfer");
-    
-    loop {
-        match recv_stream.read(&mut buffer).await {
-            Ok(Some(bytes_read)) => {
-                total_received += bytes_read as u64;
-                chunk_count += 1;
-                
-                tracing::debug!("QUIC: Received chunk {} ({} bytes, total: {} bytes, progress: {:.1}%)", 
-                    chunk_count, bytes_read, total_received, 
-                    (total_received as f64 / expected_size as f64) * 100.0);
-                
-                file.write_all(&buffer[..bytes_read]).await?;
-                
-                if total_received >= expected_size {
-                    tracing::info!("QUIC: Expected file size reached, stopping transfer");
-                    break;
-                }
-            }
-            Ok(None) => {
-                tracing::info!("QUIC: Stream ended, transfer complete");
-                break; // Stream ended
-            }
-            Err(e) => {
-                tracing::error!("QUIC: Read error: {}", e);
-                return Err(AeroSyncError::Network(format!("Read error: {}", e)));
+    // Write initial data if present
+    if let Some(data) = initial_data {
+        if !data.is_empty() {
+            file.write_all(&data).await?;
+            total_received += data.len() as u64;
+            tracing::debug!("QUIC: Wrote {} bytes of initial data", data.len());
+            
+             if total_received >= expected_size {
+                tracing::info!("QUIC: Expected file size reached with initial data, stopping transfer");
+                // Skip loop if done
+                // But we still need to flush and finish
             }
         }
     }
+
+    if total_received < expected_size {
+        let mut buffer = vec![0u8; 64 * 1024]; // 64KB buffer
+        tracing::info!("QUIC: Starting file data transfer loop");
+        
+        loop {
+            match recv_stream.read(&mut buffer).await {
+                Ok(Some(bytes_read)) => {
+                    total_received += bytes_read as u64;
+                    chunk_count += 1;
+                    
+                    tracing::debug!("QUIC: Received chunk {} ({} bytes, total: {} bytes, progress: {:.1}%)", 
+                        chunk_count, bytes_read, total_received, 
+                        (total_received as f64 / expected_size as f64) * 100.0);
+                    
+                    file.write_all(&buffer[..bytes_read]).await?;
+                    
+                    if total_received >= expected_size {
+                        tracing::info!("QUIC: Expected file size reached, stopping transfer");
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("QUIC: Stream ended, transfer complete");
+                    break; // Stream ended
+                }
+                Err(e) => {
+                    tracing::error!("QUIC: Read error: {}", e);
+                    return Err(AeroSyncError::Network(format!("Read error: {}", e)));
+                }
+            }
+        }
+    } else {
+        tracing::info!("QUIC: Transfer completed with initial data only");
+    }
     
-    tracing::info!("QUIC: File data transfer completed. Received: {} bytes in {} chunks", total_received, chunk_count);
+    tracing::info!("QUIC: File data transfer completed. Received: {} bytes", total_received);
     
     tracing::debug!("QUIC: Flushing file to disk");
     file.flush().await?;

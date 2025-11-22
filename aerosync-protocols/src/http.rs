@@ -49,21 +49,38 @@ impl HttpTransfer {
         let mut file = File::open(file_path).await?;
         let file_size = file.metadata().await?.len();
         
-        let mut buffer = vec![0u8; self.config.chunk_size];
-        let mut bytes_transferred = 0u64;
         let start_time = Instant::now();
+        let mut bytes_transferred = 0u64;
 
-        // TODO: Implement chunked upload with proper HTTP multipart
-        // For now, read entire file and upload
+        // Get file name for multipart form
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        // Create multipart form with file
+        let mut form = reqwest::multipart::Form::new();
+        
+        // Read file in chunks and create a stream
         let mut file_contents = Vec::new();
         file.read_to_end(&mut file_contents).await?;
+        
+        let file_part = reqwest::multipart::Part::bytes(file_contents)
+            .file_name(file_name.clone())
+            .mime_str("application/octet-stream")
+            .map_err(|e| AeroSyncError::Network(format!("Failed to create multipart part: {}", e)))?;
+        
+        form = form.part("file", file_part);
 
+        tracing::info!("HTTP: Uploading file '{}' to {}", file_name, url);
+        
         let response = self.client
             .post(url)
-            .body(file_contents)
+            .multipart(form)
             .send()
             .await
-            .map_err(|e| AeroSyncError::Network(e.to_string()))?;
+            .map_err(|e| AeroSyncError::Network(format!("Upload request failed: {}", e)))?;
 
         if response.status().is_success() {
             bytes_transferred = file_size;
@@ -75,11 +92,16 @@ impl HttpTransfer {
                 transfer_speed: speed,
             });
 
+            tracing::info!("HTTP: Upload completed successfully: {} bytes at {:.2} MB/s", 
+                         bytes_transferred, speed / (1024.0 * 1024.0));
             Ok(())
         } else {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            tracing::error!("HTTP: Upload failed with status {}: {}", status, error_text);
             Err(AeroSyncError::Network(format!(
-                "Upload failed with status: {}",
-                response.status()
+                "Upload failed with status: {} - {}",
+                status, error_text
             )))
         }
     }

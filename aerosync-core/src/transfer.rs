@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
+use rustls::{ClientConfig as TlsClientConfig, Certificate, ServerName};
+use rustls::client::{ServerCertVerifier, ServerCertVerified};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferConfig {
@@ -111,12 +114,20 @@ impl TransferEngine {
     }
 
     pub async fn add_transfer(&self, task: TransferTask) -> Result<()> {
+        // Better handling for file names with non-ASCII characters (e.g., Chinese)
+        let file_name = task.source_path.file_name()
+            .and_then(|os_str| os_str.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                task.source_path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            });
+        
         let progress = TransferProgress {
             task_id: task.id,
-            file_name: task.source_path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string(),
+            file_name,
             bytes_transferred: 0,
             total_bytes: task.file_size,
             transfer_speed: 0.0,
@@ -159,7 +170,7 @@ async fn transfer_worker(
     mut task_receiver: mpsc::UnboundedReceiver<TransferTask>,
     mut _cancel_receiver: mpsc::UnboundedReceiver<Uuid>,
     progress_monitor: Arc<RwLock<ProgressMonitor>>,
-    _config: TransferConfig,
+    config: TransferConfig,
 ) {
     tracing::info!("Transfer worker started");
     
@@ -173,8 +184,23 @@ async fn transfer_worker(
             monitor.update_progress(task.id, 0, 0.0);
         }
         
-        // Simulate transfer for now (TODO: implement actual transfer)
-        let result = simulate_transfer(task.clone(), progress_monitor.clone()).await;
+        // Perform actual transfer based on destination URL protocol
+        // Check URL protocol first, then fall back to config
+        let result = if task.destination.starts_with("quic://") {
+            tracing::info!("Using QUIC protocol for transfer");
+            perform_quic_transfer(&task, &config, progress_monitor.clone()).await
+        } else if task.destination.starts_with("http://") || task.destination.starts_with("https://") {
+            tracing::info!("Using HTTP protocol for transfer");
+            perform_http_transfer(&task, &config, progress_monitor.clone()).await
+        } else if config.use_quic {
+            // If no protocol specified but config says use QUIC, try to convert HTTP URL to QUIC
+            tracing::warn!("No protocol in URL, but use_quic=true. Attempting to use HTTP instead.");
+            perform_http_transfer(&task, &config, progress_monitor.clone()).await
+        } else {
+            // Default to HTTP
+            tracing::info!("Using HTTP protocol for transfer (default)");
+            perform_http_transfer(&task, &config, progress_monitor.clone()).await
+        };
         
         match result {
             Ok(_) => {
@@ -193,30 +219,258 @@ async fn transfer_worker(
     tracing::info!("Transfer worker stopped");
 }
 
-async fn simulate_transfer(
-    task: TransferTask,
+struct SkipServerVerification;
+
+impl SkipServerVerification {
+    fn new() -> Arc<Self> {
+        Arc::new(Self)
+    }
+}
+
+impl ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &Certificate,
+        _intermediates: &[Certificate],
+        _server_name: &ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: SystemTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+}
+
+async fn perform_quic_transfer(
+    task: &TransferTask,
+    _config: &TransferConfig,
     progress_monitor: Arc<RwLock<ProgressMonitor>>,
 ) -> Result<()> {
-    // Simulate file transfer with progress updates
-    let total_bytes = task.file_size;
-    let chunk_size = 64 * 1024; // 64KB chunks
-    let total_chunks = (total_bytes + chunk_size - 1) / chunk_size;
+    use quinn::{ClientConfig, Endpoint};
+    use tokio::fs::File;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use std::net::SocketAddr;
+    use tokio::time::Instant;
     
-    for chunk in 0..total_chunks {
-        // Simulate some work
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    // Parse QUIC URL (format: quic://host:port or quic://host:port/path)
+    let url = task.destination.strip_prefix("quic://")
+        .ok_or_else(|| AeroSyncError::Network(format!("Invalid QUIC URL format. Expected quic://host:port, got: {}", task.destination)))?;
+    
+    // Remove path if present (e.g., quic://host:port/path -> host:port)
+    let url_without_path = url.split('/').next().unwrap_or(url).trim();
+    
+    if url_without_path.is_empty() {
+        return Err(AeroSyncError::Network(format!("Invalid QUIC URL: missing host and port in '{}'", task.destination)));
+    }
+    
+    // Parse host and port
+    let (host, port_str) = url_without_path.split_once(':')
+        .ok_or_else(|| AeroSyncError::Network(format!("Invalid QUIC URL format. Expected quic://host:port, got: {}. Missing port number?", task.destination)))?;
+    
+    let host = host.trim();
+    let port_str = port_str.trim();
+    
+    if host.is_empty() {
+        return Err(AeroSyncError::Network(format!("Invalid QUIC URL: missing host in '{}'", task.destination)));
+    }
+    
+    if port_str.is_empty() {
+        return Err(AeroSyncError::Network(format!("Invalid QUIC URL: missing port in '{}'", task.destination)));
+    }
+    
+    let port: u16 = port_str.parse()
+        .map_err(|e| AeroSyncError::Network(format!("Invalid port number '{}' in URL '{}': {}", port_str, task.destination, e)))?;
+    
+    // Try to parse as IP address first, then resolve hostname
+    let server_addr: SocketAddr = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        // It's an IP address
+        SocketAddr::new(ip, port)
+    } else if host.eq_ignore_ascii_case("localhost") {
+        // Special case for localhost - use 127.0.0.1 directly
+        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), port)
+    } else {
+        // It's a hostname, resolve it using blocking DNS lookup in async context
+        use std::net::ToSocketAddrs;
+        let addr_string = format!("{}:{}", host, port);
+        tracing::debug!("QUIC: Resolving hostname '{}'", host);
+        // Use tokio's blocking task for DNS resolution
+        tokio::task::spawn_blocking(move || {
+            addr_string.to_socket_addrs()
+        })
+        .await
+        .map_err(|e| AeroSyncError::Network(format!("DNS resolution task failed: {}", e)))?
+        .map_err(|e| AeroSyncError::Network(format!("Failed to resolve hostname '{}' in URL '{}': {}", host, task.destination, e)))?
+        .next()
+        .ok_or_else(|| AeroSyncError::Network(format!("No address found for hostname '{}' in URL '{}'", host, task.destination)))?
+    };
+    
+    tracing::info!("QUIC: Connecting to {}:{}", host, port);
+    
+    // Create QUIC client endpoint with ALPN protocol matching server
+    // We need to create a custom TLS config with ALPN protocol matching the server
+    let mut tls_config = TlsClientConfig::builder()
+        .with_safe_defaults()
+        .with_custom_certificate_verifier(SkipServerVerification::new())
+        .with_no_client_auth();
+    
+    // Set ALPN protocol to match server (must match server's "aerosync")
+    tls_config.alpn_protocols = vec![b"aerosync".to_vec()];
+    
+    // Create new ClientConfig with the modified TLS config
+    let client_config = ClientConfig::new(Arc::new(tls_config));
+    
+    let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())
+        .map_err(|e| AeroSyncError::Network(format!("Failed to create QUIC endpoint: {}", e)))?;
+    endpoint.set_default_client_config(client_config);
+    
+    // Establish connection
+    let connection = endpoint
+        .connect(server_addr, host)
+        .map_err(|e| AeroSyncError::Network(format!("Failed to initiate QUIC connection: {}", e)))?
+        .await
+        .map_err(|e| AeroSyncError::Network(format!("Failed to establish QUIC connection: {}", e)))?;
+    
+    tracing::info!("QUIC: Connection established");
+    
+    // Open bidirectional stream
+    let (mut send_stream, _recv_stream) = connection
+        .open_bi()
+        .await
+        .map_err(|e| AeroSyncError::Network(format!("Failed to open QUIC stream: {}", e)))?;
+    
+    // Open file
+    let mut file = File::open(&task.source_path).await?;
+    let file_size = file.metadata().await?.len();
+    
+    // Get file name
+    let file_name = task.source_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    
+    // Send file metadata (format: UPLOAD:filename:size\n)
+    let metadata = format!("UPLOAD:{}:{}\n", file_name, file_size);
+    send_stream.write_all(metadata.as_bytes()).await
+        .map_err(|e| AeroSyncError::Network(format!("Failed to send QUIC metadata: {}", e)))?;
+    
+    tracing::info!("QUIC: Uploading file '{}' ({} bytes)", file_name, file_size);
+    
+    // Transfer file data
+    let mut buffer = vec![0u8; 64 * 1024]; // 64KB chunks
+    let mut bytes_transferred = 0u64;
+    let start_time = Instant::now();
+    
+    loop {
+        let bytes_read = file.read(&mut buffer).await?;
+        if bytes_read == 0 {
+            break;
+        }
         
-        let bytes_transferred = std::cmp::min((chunk + 1) * chunk_size, total_bytes);
-        let speed = chunk_size as f64 / 0.05; // 64KB per 50ms = speed
+        send_stream.write_all(&buffer[..bytes_read]).await
+            .map_err(|e| AeroSyncError::Network(format!("Failed to send QUIC data: {}", e)))?;
+        
+        bytes_transferred += bytes_read as u64;
+        let elapsed = start_time.elapsed().as_secs_f64();
+        let speed = if elapsed > 0.0 { bytes_transferred as f64 / elapsed } else { 0.0 };
         
         // Update progress
         {
             let mut monitor = progress_monitor.write().await;
             monitor.update_progress(task.id, bytes_transferred, speed);
         }
-        
-        tracing::debug!("Transfer progress: {}/{} bytes", bytes_transferred, total_bytes);
     }
     
+    // Finish stream
+    send_stream.finish().await
+        .map_err(|e| AeroSyncError::Network(format!("Failed to finish QUIC stream: {}", e)))?;
+    
+    let elapsed = start_time.elapsed().as_secs_f64();
+    let speed = if elapsed > 0.0 { file_size as f64 / elapsed } else { 0.0 };
+    
+    // Update final progress
+    {
+        let mut monitor = progress_monitor.write().await;
+        monitor.update_progress(task.id, file_size, speed);
+    }
+    
+    tracing::info!("QUIC: Upload completed successfully: {} bytes at {:.2} MB/s", 
+                 file_size, speed / (1024.0 * 1024.0));
+    
     Ok(())
+}
+
+async fn perform_http_transfer(
+    task: &TransferTask,
+    config: &TransferConfig,
+    progress_monitor: Arc<RwLock<ProgressMonitor>>,
+) -> Result<()> {
+    use reqwest::Client;
+    use tokio::fs::File;
+    use tokio::io::AsyncReadExt;
+    use std::time::Duration;
+    use tokio::time::Instant;
+    
+    let client = Client::builder()
+        .timeout(Duration::from_secs(config.timeout_seconds))
+        .build()
+        .map_err(|e| AeroSyncError::Network(format!("Failed to create HTTP client: {}", e)))?;
+    
+    let mut file = File::open(&task.source_path).await?;
+    let file_size = file.metadata().await?.len();
+    
+    let start_time = Instant::now();
+    
+    // Get file name for multipart form
+    let file_name = task.source_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    
+    // Read file contents
+    let mut file_contents = Vec::new();
+    file.read_to_end(&mut file_contents).await?;
+    
+    // Create multipart form with file
+    let mut form = reqwest::multipart::Form::new();
+    let file_part = reqwest::multipart::Part::bytes(file_contents)
+        .file_name(file_name.clone())
+        .mime_str("application/octet-stream")
+        .map_err(|e| AeroSyncError::Network(format!("Failed to create multipart part: {}", e)))?;
+    
+    form = form.part("file", file_part);
+    
+    tracing::info!("HTTP: Uploading file '{}' to {}", file_name, task.destination);
+    
+    // Send request and update progress
+    let response = client
+        .post(&task.destination)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| AeroSyncError::Network(format!("Upload request failed: {}", e)))?;
+    
+    if response.status().is_success() {
+        let elapsed = start_time.elapsed().as_secs_f64();
+        let speed = if elapsed > 0.0 { file_size as f64 / elapsed } else { 0.0 };
+        
+        // Update final progress
+        {
+            let mut monitor = progress_monitor.write().await;
+            monitor.update_progress(task.id, file_size, speed);
+        }
+        
+        tracing::info!("HTTP: Upload completed successfully: {} bytes at {:.2} MB/s", 
+                     file_size, speed / (1024.0 * 1024.0));
+        Ok(())
+    } else {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        tracing::error!("HTTP: Upload failed with status {}: {}", status, error_text);
+        Err(AeroSyncError::Network(format!(
+            "Upload failed with status: {} - {}",
+            status, error_text
+        )))
+    }
 }

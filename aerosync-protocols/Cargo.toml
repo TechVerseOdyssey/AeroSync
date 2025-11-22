@@ -15,5 +15,5 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 bytes = "1.0"
-rustls = "0.21"
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
 async-trait = "0.1"

@@ -31,10 +31,17 @@ impl FileManager {
         let path = path.as_ref();
         let metadata = tokio::fs::metadata(path).await?;
         
+        // Better handling for file names with non-ASCII characters (e.g., Chinese)
         let name = path.file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+            .and_then(|os_str| os_str.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                // Fallback to lossy conversion if not valid UTF-8
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            });
 
         let permissions = FilePermissions {
             readable: true, // TODO: Implement proper permission checking per platform
