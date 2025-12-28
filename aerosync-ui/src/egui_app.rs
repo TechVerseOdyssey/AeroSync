@@ -227,8 +227,22 @@ impl EguiApp {
 
     fn start_server(&mut self) {
         let receiver = Arc::clone(&self.state.file_receiver);
+        let config = self.server_config_cache.clone();
+        let state_config = Arc::clone(&self.state.server_config);
+        
         self.rt.spawn(async move {
+            // Update the server configuration first
+            let mut config_guard = state_config.write().await;
+            *config_guard = config.clone();
+            drop(config_guard);
+            
+            // Update FileReceiver's config and start
             let mut receiver_guard = receiver.write().await;
+            if let Err(e) = receiver_guard.update_config(config).await {
+                tracing::error!("Failed to update server config: {}", e);
+                return;
+            }
+            
             if let Err(e) = receiver_guard.start().await {
                 tracing::error!("Failed to start server: {}", e);
             }
@@ -290,10 +304,27 @@ impl EguiApp {
         {
             self.server_config_cache.receive_directory = folder.clone();
             
-            // Ensure the directory exists
+            // Update the state configuration and ensure the directory exists
+            let state_config = Arc::clone(&self.state.server_config);
+            let receiver = Arc::clone(&self.state.file_receiver);
+            let config = self.server_config_cache.clone();
+            
             self.rt.spawn(async move {
+                // Ensure the directory exists
                 if let Err(e) = tokio::fs::create_dir_all(&folder).await {
                     tracing::error!("Failed to create receive directory: {}", e);
+                    return;
+                }
+                
+                // Update the configuration in state
+                let mut config_guard = state_config.write().await;
+                *config_guard = config.clone();
+                drop(config_guard);
+                
+                // Update FileReceiver's config (but don't restart if not running)
+                let mut receiver_guard = receiver.write().await;
+                if let Err(e) = receiver_guard.update_config(config).await {
+                    tracing::error!("Failed to update server config: {}", e);
                 }
             });
             
