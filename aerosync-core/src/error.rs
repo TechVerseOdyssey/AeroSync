@@ -27,4 +27,26 @@ pub enum AeroSyncError {
     
     #[error("Unknown error: {0}")]
     Unknown(String),
+    
+    #[error("Authentication error: {0}")]
+    Auth(String),
+    
+    #[error("Configuration error: {0}")]
+    Config(String),
+    
+    #[error("TOML parsing error: {0}")]
+    TomlParse(String),
+}
+
+// 为 TOML 错误实现 From trait
+impl From<toml::de::Error> for AeroSyncError {
+    fn from(err: toml::de::Error) -> Self {
+        AeroSyncError::TomlParse(err.to_string())
+    }
+}
+
+impl From<toml::ser::Error> for AeroSyncError {
+    fn from(err: toml::ser::Error) -> Self {
+        AeroSyncError::TomlParse(err.to_string())
+    }
 }
