@@ -699,6 +699,10 @@ async fn cmd_receive(
             (Some(cert), Some(key)) => Some(TlsConfig { cert_path: cert, key_path: key }),
             _ => None,
         },
+        enable_metrics: true,
+        enable_ws: true,
+        ws_event_buffer: 256,
+        routing: None,
     };
 
     println!("AeroSync receiver starting...");

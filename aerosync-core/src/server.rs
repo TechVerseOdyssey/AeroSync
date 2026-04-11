@@ -1,11 +1,13 @@
 use crate::audit::{AuditLogger, Direction};
 use crate::auth::{AuthConfig, AuthManager, AuthMiddleware};
+use crate::metrics::Metrics;
+use crate::routing::{Router, RouterConfig};
 use crate::{AeroSyncError, Result};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 /// 外部 TLS 证书配置（用于 QUIC 服务端）
@@ -33,6 +35,14 @@ pub struct ServerConfig {
     pub audit_log: Option<PathBuf>,
     /// 外部 TLS 证书，None 时自动生成自签名证书
     pub tls: Option<TlsConfig>,
+    /// 启用 Prometheus /metrics 端点
+    pub enable_metrics: bool,
+    /// 启用 WebSocket /ws 进度推送
+    pub enable_ws: bool,
+    /// WebSocket 广播通道缓冲大小
+    pub ws_event_buffer: usize,
+    /// 多目录路由规则（None 表示不启用路由）
+    pub routing: Option<RouterConfig>,
 }
 
 impl Default for ServerConfig {
@@ -49,6 +59,10 @@ impl Default for ServerConfig {
             auth: None,
             audit_log: None,
             tls: None,
+            enable_metrics: true,
+            enable_ws: true,
+            ws_event_buffer: 256,
+            routing: None,
         }
     }
 }
@@ -72,25 +86,55 @@ pub enum ServerStatus {
     Error(String),
 }
 
+/// WebSocket broadcast event
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum WsEvent {
+    TransferStarted { filename: String, size: u64, sender_ip: String },
+    Progress { filename: String, bytes: u64, total: u64 },
+    Completed { filename: String, size: u64, sha256: String },
+    Failed { filename: String, reason: String },
+}
+
+pub type WsBroadcast = broadcast::Sender<WsEvent>;
+
 pub struct FileReceiver {
     config: Arc<RwLock<ServerConfig>>,
     status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     http_handle: Option<tokio::task::JoinHandle<()>>,
     quic_handle: Option<tokio::task::JoinHandle<()>>,
+    reload_handle: Option<tokio::task::JoinHandle<()>>,
     audit_logger: Option<Arc<AuditLogger>>,
+    metrics: Arc<Metrics>,
+    ws_tx: WsBroadcast,
 }
 
 impl FileReceiver {
     pub fn new(config: ServerConfig) -> Self {
+        let ws_buf = config.ws_event_buffer.max(1);
+        let (ws_tx, _) = broadcast::channel(ws_buf);
         Self {
             config: Arc::new(RwLock::new(config)),
             status: Arc::new(RwLock::new(ServerStatus::Stopped)),
             received_files: Arc::new(RwLock::new(Vec::new())),
             http_handle: None,
             quic_handle: None,
+            reload_handle: None,
             audit_logger: None,
+            metrics: Metrics::new(),
+            ws_tx,
         }
+    }
+
+    /// Expose the WebSocket broadcast sender so callers can subscribe
+    pub fn ws_sender(&self) -> WsBroadcast {
+        self.ws_tx.clone()
+    }
+
+    /// Expose shared metrics handle
+    pub fn metrics(&self) -> Arc<Metrics> {
+        Arc::clone(&self.metrics)
     }
 
     pub async fn start(&mut self) -> Result<()> {
@@ -141,10 +185,12 @@ impl FileReceiver {
             let received_files = Arc::clone(&self.received_files);
             let auth = auth_manager.clone();
             let audit_http = audit_logger.clone();
+            let metrics_http = Arc::clone(&self.metrics);
+            let ws_tx_http = self.ws_tx.clone();
 
             let handle = tokio::spawn(async move {
                 if let Err(e) =
-                    start_http_server(http_cfg, status.clone(), received_files, auth, audit_http).await
+                    start_http_server(http_cfg, status.clone(), received_files, auth, audit_http, metrics_http, ws_tx_http).await
                 {
                     tracing::error!("HTTP server error: {}", e);
                     *status.write().await = ServerStatus::Error(e.to_string());
@@ -188,8 +234,21 @@ impl FileReceiver {
         if let Some(h) = self.quic_handle.take() {
             h.abort();
         }
+        if let Some(h) = self.reload_handle.take() {
+            h.abort();
+        }
         tracing::info!("File receiver stopped");
         Ok(())
+    }
+
+    /// Start watching for SIGHUP to hot-reload config from a TOML file.
+    /// Only available on Unix. On other platforms this is a no-op.
+    pub fn watch_config_reload(&mut self, config_path: std::path::PathBuf) {
+        let config_arc = Arc::clone(&self.config);
+        let handle = tokio::spawn(async move {
+            watch_config_reload_task(config_arc, config_path).await;
+        });
+        self.reload_handle = Some(handle);
     }
 
     pub async fn get_status(&self) -> ServerStatus {
@@ -227,6 +286,73 @@ impl FileReceiver {
     }
 }
 
+// ─────────────────────────────── config hot-reload ─────────────────────────
+
+/// Fields that can be updated without a restart (used by watch_config_reload_task)
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct HotReloadableConfig {
+    max_file_size: Option<u64>,
+    allow_overwrite: Option<bool>,
+    auth: Option<Option<AuthConfig>>,
+    routing: Option<Option<RouterConfig>>,
+}
+
+async fn watch_config_reload_task(
+    config_arc: Arc<RwLock<ServerConfig>>,
+    config_path: std::path::PathBuf,
+) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut stream = match signal(SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to set up SIGHUP handler: {}", e);
+                return;
+            }
+        };
+        loop {
+            stream.recv().await;
+            tracing::info!("SIGHUP received — reloading config from {}", config_path.display());
+            match tokio::fs::read_to_string(&config_path).await {
+                Ok(contents) => {
+                    match toml::from_str::<ServerConfig>(&contents) {
+                        Ok(new_cfg) => {
+                            let mut cfg = config_arc.write().await;
+                            // Only apply hot-reloadable fields
+                            cfg.max_file_size = new_cfg.max_file_size;
+                            cfg.allow_overwrite = new_cfg.allow_overwrite;
+                            cfg.auth = new_cfg.auth;
+                            cfg.routing = new_cfg.routing;
+                            cfg.audit_log = new_cfg.audit_log;
+                            // Warn about non-reloadable fields if changed
+                            if cfg.http_port != new_cfg.http_port {
+                                tracing::warn!("http_port change ignored (requires restart)");
+                            }
+                            if cfg.quic_port != new_cfg.quic_port {
+                                tracing::warn!("quic_port change ignored (requires restart)");
+                            }
+                            if cfg.bind_address != new_cfg.bind_address {
+                                tracing::warn!("bind_address change ignored (requires restart)");
+                            }
+                            tracing::info!("Config reloaded successfully");
+                        }
+                        Err(e) => tracing::error!("Config parse error: {}", e),
+                    }
+                }
+                Err(e) => tracing::error!("Failed to read config file: {}", e),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tracing::debug!("Config hot-reload not supported on this platform");
+        let _ = config_arc;
+        let _ = config_path;
+    }
+}
+
 // ─────────────────────────────── HTTP server ────────────────────────────────
 
 async fn start_http_server(
@@ -235,12 +361,21 @@ async fn start_http_server(
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_manager: Option<Arc<AuthManager>>,
     audit_logger: Option<Arc<AuditLogger>>,
+    metrics: Arc<Metrics>,
+    ws_tx: WsBroadcast,
 ) -> Result<()> {
     use warp::Filter;
 
     let receive_dir = config.receive_directory.clone();
     let max_size = config.max_file_size;
     let allow_overwrite = config.allow_overwrite;
+    let enable_metrics = config.enable_metrics;
+    let enable_ws = config.enable_ws;
+
+    // 构建路由器（可选）
+    let router: Option<Arc<Router>> = config.routing.clone().map(|routing_cfg| {
+        Arc::new(Router::new(routing_cfg, receive_dir.clone()))
+    });
 
     // 认证中间件（可选）
     let auth_mw = auth_manager.map(|m| Arc::new(AuthMiddleware::new(m)));
@@ -251,11 +386,15 @@ async fn start_http_server(
     let receive_dir_upload = receive_dir.clone();
 
     let audit_upload = audit_logger.clone();
+    let metrics_upload = Arc::clone(&metrics);
+    let ws_tx_upload = ws_tx.clone();
+    let router_upload = router.clone();
     let upload = warp::path("upload")
         .and(warp::path::tail())  // 捕获 /upload 后的路径尾（如 subdir/nested.txt）
         .and(warp::post())
         .and(warp::header::optional::<String>("authorization"))
         .and(warp::header::optional::<String>("x-file-hash"))
+        .and(warp::header::optional::<String>("x-aerosync-tag"))
         .and(warp::addr::remote())
         .and(warp::multipart::form().max_length(max_size))
         .and(warp::any().map(move || receive_dir_upload.clone()))
@@ -263,6 +402,9 @@ async fn start_http_server(
         .and(warp::any().map(move || received_files_upload.clone()))
         .and(warp::any().map(move || auth_mw_upload.clone()))
         .and(warp::any().map(move || audit_upload.clone()))
+        .and(warp::any().map(move || metrics_upload.clone()))
+        .and(warp::any().map(move || ws_tx_upload.clone()))
+        .and(warp::any().map(move || router_upload.clone()))
         .and_then(handle_file_upload);
 
     // ── GET /health ──────────────────────────────────────────────────────────
@@ -285,6 +427,7 @@ async fn start_http_server(
     let received_files_chunk = received_files.clone();
 
     let audit_chunk = audit_logger.clone();
+    let metrics_chunk = Arc::clone(&metrics);
     let upload_chunk = warp::path!("upload" / "chunk")
         .and(warp::post())
         .and(warp::header::optional::<String>("authorization"))
@@ -295,6 +438,7 @@ async fn start_http_server(
         .and(warp::any().map(move || received_files_chunk.clone()))
         .and(warp::any().map(move || auth_mw_chunk.clone()))
         .and(warp::any().map(move || audit_chunk.clone()))
+        .and(warp::any().map(move || metrics_chunk.clone()))
         .and_then(handle_chunk_upload);
 
     // ── POST /upload/complete?task_id=&filename=&total_chunks=&sha256= ───────
@@ -303,6 +447,9 @@ async fn start_http_server(
     let received_files_complete = received_files.clone();
 
     let audit_complete = audit_logger.clone();
+    let metrics_complete = Arc::clone(&metrics);
+    let ws_tx_complete = ws_tx.clone();
+    let router_complete = router.clone();
     let upload_complete = warp::path!("upload" / "complete")
         .and(warp::post())
         .and(warp::header::optional::<String>("authorization"))
@@ -312,11 +459,55 @@ async fn start_http_server(
         .and(warp::any().map(move || received_files_complete.clone()))
         .and(warp::any().map(move || auth_mw_complete.clone()))
         .and(warp::any().map(move || audit_complete.clone()))
+        .and(warp::any().map(move || metrics_complete.clone()))
+        .and(warp::any().map(move || ws_tx_complete.clone()))
+        .and(warp::any().map(move || router_complete.clone()))
         .and_then(handle_chunk_complete);
+
+    // ── GET /metrics ──────────────────────────────────────────────────────────
+    let metrics_arc = Arc::clone(&metrics);
+    let receive_dir_m = receive_dir.clone();
+    let metrics_enabled_flag = enable_metrics;
+    let metrics_route = warp::path("metrics")
+        .and(warp::get())
+        .and(warp::any().map(move || Arc::clone(&metrics_arc)))
+        .and(warp::any().map(move || receive_dir_m.clone()))
+        .and(warp::any().map(move || metrics_enabled_flag))
+        .and_then(|m: Arc<Metrics>, dir: PathBuf, enabled: bool| async move {
+            use warp::Reply;
+            if !enabled {
+                return Err::<warp::reply::Response, _>(warp::reject::not_found());
+            }
+            let (free, total) = get_disk_space(&dir);
+            let body = m.render(free, total);
+            Ok(warp::reply::with_header(
+                body,
+                "Content-Type",
+                "text/plain; version=0.0.4; charset=utf-8",
+            ).into_response())
+        });
+
+    // ── GET /ws (WebSocket) ───────────────────────────────────────────────────
+    let ws_tx_ws = ws_tx.clone();
+    let metrics_ws = Arc::clone(&metrics);
+    let ws_enabled_flag = enable_ws;
+    let ws_route = warp::path("ws")
+        .and(warp::get())
+        .and(warp::ws())
+        .and(warp::any().map(move || ws_tx_ws.subscribe()))
+        .and(warp::any().map(move || Arc::clone(&metrics_ws)))
+        .and(warp::any().map(move || ws_enabled_flag))
+        .and_then(|ws: warp::ws::Ws, rx: broadcast::Receiver<WsEvent>, m: Arc<Metrics>, enabled: bool| async move {
+            if !enabled {
+                return Err::<warp::reply::Response, _>(warp::reject::not_found());
+            }
+            use warp::Reply;
+            Ok(ws.on_upgrade(move |socket| handle_ws_client(socket, rx, m)).into_response())
+        });
 
     let cors = warp::cors()
         .allow_any_origin()
-        .allow_headers(vec!["content-type", "authorization", "x-file-hash"])
+        .allow_headers(vec!["content-type", "authorization", "x-file-hash", "x-aerosync-tag"])
         .allow_methods(vec!["GET", "POST", "OPTIONS"]);
 
     let routes = upload_chunk
@@ -324,6 +515,8 @@ async fn start_http_server(
         .or(upload)
         .or(health)
         .or(status_route)
+        .or(metrics_route)
+        .or(ws_route)
         .with(cors);
 
     let addr: SocketAddr = format!("{}:{}", config.bind_address, config.http_port)
@@ -340,6 +533,7 @@ async fn handle_file_upload(
     path_tail: warp::path::Tail,
     auth_header: Option<String>,
     expected_hash: Option<String>,
+    tag: Option<String>,
     remote_addr: Option<SocketAddr>,
     mut form: warp::multipart::FormData,
     receive_dir: PathBuf,
@@ -347,6 +541,9 @@ async fn handle_file_upload(
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_mw: Option<Arc<AuthMiddleware>>,
     audit_logger: Option<Arc<AuditLogger>>,
+    metrics: Arc<Metrics>,
+    ws_tx: WsBroadcast,
+    router: Option<Arc<Router>>,
 ) -> std::result::Result<warp::reply::Response, warp::Rejection> {
     use bytes::Buf;
     use futures::TryStreamExt;
@@ -399,7 +596,15 @@ async fn handle_file_upload(
         };
         let file_id = Uuid::new_v4();
         let safe_name = sanitize_filename(&filename);
-        let file_path = get_unique_file_path(&receive_dir, &safe_name, allow_overwrite);
+
+        // 路由：根据规则选择目标目录
+        let dest_dir = if let Some(ref r) = router {
+            r.resolve(&client_ip, tag.as_deref(), &safe_name)
+        } else {
+            receive_dir.clone()
+        };
+
+        let file_path = get_unique_file_path(&dest_dir, &safe_name, allow_overwrite);
 
         // 确保父目录存在（支持子目录结构）
         if let Some(parent) = file_path.parent() {
@@ -436,6 +641,11 @@ async fn handle_file_upload(
                     filename, expected, actual_hash
                 );
                 let _ = tokio::fs::remove_file(&file_path).await;
+                metrics.inc_upload_errors();
+                let _ = ws_tx.send(WsEvent::Failed {
+                    filename: filename.clone(),
+                    reason: "SHA-256 mismatch".to_string(),
+                });
                 if let Some(ref al) = audit_logger {
                     al.log_failed(Direction::Receive, "http", &filename, size, Some(&client_ip), "SHA-256 mismatch").await;
                 }
@@ -461,6 +671,14 @@ async fn handle_file_upload(
             sender_ip: Some(client_ip.clone()),
         };
         received_files.write().await.push(received_file);
+
+        metrics.inc_files_received();
+        metrics.add_bytes_received(size);
+        let _ = ws_tx.send(WsEvent::Completed {
+            filename: filename.clone(),
+            size,
+            sha256: actual_hash.clone(),
+        });
 
         if let Some(ref al) = audit_logger {
             al.log_completed(Direction::Receive, "http", &filename, size, Some(&actual_hash), Some(&client_ip)).await;
@@ -589,6 +807,7 @@ async fn handle_chunk_upload(
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_mw: Option<Arc<AuthMiddleware>>,
     audit_logger: Option<Arc<AuditLogger>>,
+    metrics: Arc<Metrics>,
 ) -> std::result::Result<warp::reply::Response, warp::Rejection> {
     use warp::Reply;
 
@@ -645,6 +864,8 @@ async fn handle_chunk_upload(
     // 防止 unused warning
     let _ = received_files;
 
+    metrics.add_bytes_received(body.len() as u64);
+
     Ok(warp::reply::with_status(
         warp::reply::json(&serde_json::json!({
             "task_id": query.task_id,
@@ -665,6 +886,9 @@ async fn handle_chunk_complete(
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_mw: Option<Arc<AuthMiddleware>>,
     audit_logger: Option<Arc<AuditLogger>>,
+    metrics: Arc<Metrics>,
+    ws_tx: WsBroadcast,
+    router: Option<Arc<Router>>,
 ) -> std::result::Result<warp::reply::Response, warp::Rejection> {
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncWriteExt;
@@ -706,7 +930,12 @@ async fn handle_chunk_complete(
 
     // 合并分片
     let safe_name = sanitize_filename(&query.filename);
-    let final_path = get_unique_file_path(&receive_dir, &safe_name, allow_overwrite);
+    let dest_dir = if let Some(ref r) = router {
+        r.resolve("chunk-complete", None, &safe_name)
+    } else {
+        receive_dir.clone()
+    };
+    let final_path = get_unique_file_path(&dest_dir, &safe_name, allow_overwrite);
     if let Some(parent) = final_path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|_| warp::reject::reject())?;
     }
@@ -730,27 +959,32 @@ async fn handle_chunk_complete(
 
     let actual_sha256 = hex::encode(hasher.finalize());
 
-    // SHA-256 校验
-    if let Some(ref expected) = query.sha256 {
-        if &actual_sha256 != expected {
-            tracing::error!(
-                "Chunk complete: SHA-256 mismatch for {} (expected={}, got={})",
-                query.filename,
-                expected,
-                actual_sha256
-            );
-            // 删除损坏文件
-            let _ = tokio::fs::remove_file(&final_path).await;
-            return Ok(warp::reply::with_status(
-                warp::reply::json(&serde_json::json!({
-                    "error": "SHA-256 mismatch",
-                    "expected": expected,
-                    "actual": actual_sha256,
-                })),
-                warp::http::StatusCode::BAD_REQUEST,
-            ).into_response());
+        // SHA-256 校验
+        if let Some(ref expected) = query.sha256 {
+            if &actual_sha256 != expected {
+                tracing::error!(
+                    "Chunk complete: SHA-256 mismatch for {} (expected={}, got={})",
+                    query.filename,
+                    expected,
+                    actual_sha256
+                );
+                // 删除损坏文件
+                let _ = tokio::fs::remove_file(&final_path).await;
+                metrics.inc_upload_errors();
+                let _ = ws_tx.send(WsEvent::Failed {
+                    filename: query.filename.clone(),
+                    reason: "SHA-256 mismatch".to_string(),
+                });
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "error": "SHA-256 mismatch",
+                        "expected": expected,
+                        "actual": actual_sha256,
+                    })),
+                    warp::http::StatusCode::BAD_REQUEST,
+                ).into_response());
+            }
         }
-    }
 
     // 清理临时分片目录
     let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
@@ -773,6 +1007,13 @@ async fn handle_chunk_complete(
     };
     received_files.write().await.push(record);
 
+    metrics.inc_files_received();
+    let _ = ws_tx.send(WsEvent::Completed {
+        filename: query.filename.clone(),
+        size: total_size,
+        sha256: actual_sha256.clone(),
+    });
+
     if let Some(ref al) = audit_logger {
         al.log_completed(Direction::Receive, "http", &query.filename, total_size, Some(&actual_sha256), None).await;
     }
@@ -786,6 +1027,55 @@ async fn handle_chunk_complete(
         })),
         warp::http::StatusCode::OK,
     ).into_response())
+}
+
+// ─────────────────────────────── WebSocket handler ──────────────────────────
+
+async fn handle_ws_client(
+    ws: warp::ws::WebSocket,
+    mut rx: broadcast::Receiver<WsEvent>,
+    metrics: Arc<Metrics>,
+) {
+    use futures::{SinkExt, StreamExt};
+    use warp::ws::Message;
+
+    metrics.inc_ws_connections();
+    tracing::debug!("WebSocket client connected (active={})", metrics.active_ws());
+
+    let (mut tx, mut client_rx) = ws.split();
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Ok(ev) => {
+                        let json = match serde_json::to_string(&ev) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+                        if tx.send(Message::text(json)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WS client lagged behind by {} messages", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            msg = client_rx.next() => {
+                // Client disconnected or sent close frame
+                match msg {
+                    Some(Ok(m)) if m.is_close() => break,
+                    None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    metrics.dec_ws_connections();
+    tracing::debug!("WebSocket client disconnected (active={})", metrics.active_ws());
 }
 
 // ─────────────────────────────── QUIC server ────────────────────────────────
