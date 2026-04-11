@@ -4,13 +4,15 @@ use config::AeroSyncConfig;
 use aerosync_core::{
     auth::{AuthConfig, AuthManager},
     resume::ResumeStore,
-    server::{FileReceiver, ServerConfig},
+    server::{FileReceiver, ServerConfig, TlsConfig},
     transfer::{TransferConfig, TransferEngine, TransferTask},
+    preflight::preflight_check,
     FileManager,
 };
 use aerosync_protocols::{
     http::HttpConfig,
     quic::QuicConfig,
+    ratelimit::parse_limit,
     AutoAdapter,
 };
 use clap::{Parser, Subcommand};
@@ -79,6 +81,14 @@ enum Commands {
         /// 禁用断点续传（强制重新传输）
         #[arg(long)]
         no_resume: bool,
+
+        /// 跳过发送前磁盘空间预检验
+        #[arg(long)]
+        no_preflight: bool,
+
+        /// 上传带宽限速，格式: 512KB / 10MB / 1MB/s（0 或不指定 = 不限速）
+        #[arg(long)]
+        limit: Option<String>,
     },
 
     /// 启动接收端，监听文件传输
@@ -118,6 +128,14 @@ enum Commands {
         /// 仅启用 HTTP（禁用 QUIC）
         #[arg(long)]
         http_only: bool,
+
+        /// TLS 证书文件路径（PEM 格式，用于 QUIC）
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+
+        /// TLS 私钥文件路径（PEM 格式，用于 QUIC）
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
     },
 
     /// Token 管理
@@ -138,6 +156,25 @@ enum Commands {
         #[command(subcommand)]
         action: ResumeAction,
     },
+
+    /// 查看传输历史记录
+    History {
+        /// 最多显示 N 条（默认 20）
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// 只显示发送记录
+        #[arg(long)]
+        sent: bool,
+
+        /// 只显示接收记录
+        #[arg(long)]
+        received: bool,
+
+        /// 只显示成功记录
+        #[arg(long)]
+        success_only: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -150,12 +187,25 @@ enum TokenAction {
         /// 有效时长（小时，默认 24）
         #[arg(long, default_value = "24")]
         hours: u64,
+        /// 保存到磁盘（~/.config/aerosync/tokens.toml）
+        #[arg(long)]
+        save: bool,
+        /// 备注标签
+        #[arg(long)]
+        label: Option<String>,
     },
     /// 验证 Token
     Verify {
         token: String,
         #[arg(long)]
         secret: String,
+    },
+    /// 列出所有已保存的 Token
+    List,
+    /// 撤销一个已保存的 Token（支持前缀匹配）
+    Revoke {
+        /// Token 字符串或前缀（前 8 字符即可）
+        token_prefix: String,
     },
 }
 
@@ -212,8 +262,10 @@ async fn main() -> anyhow::Result<()> {
             no_verify,
             dry_run,
             no_resume,
+            no_preflight,
+            limit,
         } => {
-            cmd_send(source, destination, recursive, protocol, token, parallel, no_verify, dry_run, no_resume, &app_config).await?;
+            cmd_send(source, destination, recursive, protocol, token, parallel, no_verify, dry_run, no_resume, no_preflight, limit, &app_config).await?;
         }
 
         Commands::Receive {
@@ -226,8 +278,10 @@ async fn main() -> anyhow::Result<()> {
             overwrite,
             max_size,
             http_only,
+            tls_cert,
+            tls_key,
         } => {
-            cmd_receive(port, quic_port, save_to, bind, auth_token, one_shot, overwrite, max_size, http_only, &app_config).await?;
+            cmd_receive(port, quic_port, save_to, bind, auth_token, one_shot, overwrite, max_size, http_only, tls_cert, tls_key, &app_config).await?;
         }
 
         Commands::Token { action } => {
@@ -240,6 +294,10 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Resume { action } => {
             cmd_resume(action).await?;
+        }
+
+        Commands::History { limit, sent, received, success_only } => {
+            cmd_history(limit, sent, received, success_only).await?;
         }
     }
 
@@ -258,6 +316,8 @@ async fn cmd_send(
     no_verify: bool,
     dry_run: bool,
     no_resume: bool,
+    no_preflight: bool,
+    limit: Option<String>,
     app_config: &AeroSyncConfig,
 ) -> anyhow::Result<()> {
     // 收集要发送的文件列表
@@ -286,6 +346,26 @@ async fn cmd_send(
     // 自动协商协议（host:port 格式时探测对端是否支持 QUIC）
     let dest_url = negotiate_protocol(&destination).await;
 
+    // 预检验：探测接收端磁盘空间
+    if !no_preflight {
+        // 从 dest_url 提取 HTTP base（quic:// 时转换为 http://）
+        let http_base = extract_http_base(&dest_url, &destination);
+        match preflight_check(&http_base, total_size).await {
+            Ok(info) => {
+                tracing::info!(
+                    "Preflight OK: free={:.2} GB, version={:?}",
+                    info.free_bytes as f64 / 1_073_741_824.0,
+                    info.version
+                );
+            }
+            Err(e) => {
+                eprintln!("Preflight check failed: {}", e);
+                eprintln!("Use --no-preflight to skip this check.");
+                return Err(anyhow::anyhow!("Preflight failed: {}", e));
+            }
+        }
+    }
+
     let config = TransferConfig {
         max_concurrent_transfers: app_config.transfer.max_concurrent,
         chunk_size: (app_config.transfer.chunk_size_mb * 1024 * 1024) as usize,
@@ -299,11 +379,18 @@ async fn cmd_send(
 
     // 构建协议适配器
     let eff_token = token.clone().or_else(|| app_config.auth.token.clone());
+    let upload_limit_bps = limit.as_deref()
+        .and_then(|s| parse_limit(s))
+        .unwrap_or(0);
+    if upload_limit_bps > 0 {
+        println!("Upload limit: {:.1} KB/s", upload_limit_bps as f64 / 1024.0);
+    }
     let http_config = HttpConfig {
         timeout_seconds: app_config.transfer.timeout_seconds,
         max_retries: app_config.transfer.retry_attempts,
         chunk_size: (app_config.transfer.chunk_size_mb * 1024 * 1024) as usize,
         auth_token: eff_token.clone(),
+        upload_limit_bps,
     };
     let quic_config = QuicConfig {
         auth_token: eff_token.clone(),
@@ -492,6 +579,33 @@ fn collect_files_recursive<'a>(
     })
 }
 
+/// 从目标 URL 提取 HTTP base URL（用于 preflight probe）
+/// quic://host:7789/... → http://host:7788
+/// http://host:7788/... → http://host:7788
+/// host:port → http://host:port
+fn extract_http_base(dest_url: &str, original_dest: &str) -> String {
+    if dest_url.starts_with("http://") || dest_url.starts_with("https://") {
+        // 去掉路径，只保留 scheme + host + port
+        let trimmed = dest_url.trim_start_matches("http://").trim_start_matches("https://");
+        let host_port = trimmed.split('/').next().unwrap_or(trimmed);
+        return format!("http://{}", host_port);
+    }
+    if dest_url.starts_with("quic://") {
+        // quic://host:7789 → http://host:7788
+        let trimmed = dest_url.trim_start_matches("quic://");
+        let host_port = trimmed.split('/').next().unwrap_or(trimmed);
+        if let Some(colon_pos) = host_port.rfind(':') {
+            let host = &host_port[..colon_pos];
+            let quic_port: u16 = host_port[colon_pos + 1..].parse().unwrap_or(7789);
+            let http_port = quic_port.saturating_sub(1);
+            return format!("http://{}:{}", host, http_port);
+        }
+        return format!("http://{}", host_port);
+    }
+    // 原始 host:port 格式
+    format!("http://{}", original_dest)
+}
+
 /// 自动协商协议：探测对端是否为 AeroSync，若是则升级 QUIC，否则降级 HTTP
 async fn negotiate_protocol(dest: &str) -> String {
     // 已有协议前缀，直接返回
@@ -553,6 +667,8 @@ async fn cmd_receive(
     overwrite: bool,
     max_size: u64,
     http_only: bool,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
     _app_config: &AeroSyncConfig,
 ) -> anyhow::Result<()> {
     // 构建认证配置
@@ -579,6 +695,10 @@ async fn cmd_receive(
         enable_quic: !http_only,
         auth: auth_cfg,
         audit_log: None,
+        tls: match (tls_cert, tls_key) {
+            (Some(cert), Some(key)) => Some(TlsConfig { cert_path: cert, key_path: key }),
+            _ => None,
+        },
     };
 
     println!("AeroSync receiver starting...");
@@ -639,7 +759,7 @@ async fn cmd_receive(
 
 async fn cmd_token(action: TokenAction) -> anyhow::Result<()> {
     match action {
-        TokenAction::Generate { secret, hours } => {
+        TokenAction::Generate { secret, hours, save, label } => {
             let secret_key = secret.unwrap_or_else(|| {
                 format!("{}-{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
             });
@@ -661,6 +781,18 @@ async fn cmd_token(action: TokenAction) -> anyhow::Result<()> {
             println!("Token:   {}", token);
             println!("Secret:  {}", secret_key);
             println!("Expires: {} hours", hours);
+
+            if save {
+                let store_path = aerosync_core::auth::TokenStore::default_path();
+                let store = aerosync_core::auth::TokenStore::new(&store_path);
+                let expires_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() + hours * 3600;
+                store.save(&token, label.as_deref(), expires_at)?;
+                println!("Saved to: {}", store_path.display());
+            }
+
             println!("\nUsage:");
             println!("  aerosync send ./file host:7788 --token {}", &token[..32]);
             println!("  aerosync receive --auth-token <same-token>");
@@ -680,6 +812,51 @@ async fn cmd_token(action: TokenAction) -> anyhow::Result<()> {
                 Ok(true) => println!("Token is VALID"),
                 Ok(false) => println!("Token is INVALID or EXPIRED"),
                 Err(e) => println!("Verification error: {}", e),
+            }
+        }
+
+        TokenAction::List => {
+            let store_path = aerosync_core::auth::TokenStore::default_path();
+            let store = aerosync_core::auth::TokenStore::new(&store_path);
+            let tokens = store.list_all()?;
+            if tokens.is_empty() {
+                println!("No saved tokens. Use: aerosync token generate --save");
+            } else {
+                println!("{} token(s):\n", tokens.len());
+                for t in &tokens {
+                    let status = if t.revoked {
+                        "revoked"
+                    } else if t.is_expired() {
+                        "expired"
+                    } else {
+                        "valid"
+                    };
+                    println!(
+                        "  [{}] {}... ({}{})",
+                        status,
+                        &t.token[..t.token.len().min(32)],
+                        t.label.as_deref().unwrap_or(""),
+                        if t.label.is_some() { " " } else { "" }
+                    );
+                }
+            }
+        }
+
+        TokenAction::Revoke { token_prefix } => {
+            let store_path = aerosync_core::auth::TokenStore::default_path();
+            let store = aerosync_core::auth::TokenStore::new(&store_path);
+
+            // 先按前缀查找
+            if let Some(found) = store.find_by_prefix(&token_prefix)? {
+                store.revoke(&found.token)?;
+                println!("Revoked: {}...", &found.token[..found.token.len().min(32)]);
+            } else {
+                // 直接按完整 token 撤销
+                if store.revoke(&token_prefix)? {
+                    println!("Revoked token.");
+                } else {
+                    eprintln!("Token not found: {}", &token_prefix[..token_prefix.len().min(16)]);
+                }
             }
         }
     }
@@ -719,7 +896,65 @@ async fn cmd_status(host: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ──────────────────────────── resume ────────────────────────────────────────
+// ──────────────────────────── history ───────────────────────────────────────
+
+async fn cmd_history(
+    limit: usize,
+    sent: bool,
+    received: bool,
+    success_only: bool,
+) -> anyhow::Result<()> {
+    use aerosync_core::{HistoryStore, HistoryQuery};
+
+    let store_path = HistoryStore::default_path();
+    if !store_path.exists() {
+        println!("No transfer history yet.");
+        return Ok(());
+    }
+
+    let store = HistoryStore::new(&store_path).await?;
+    let direction = if sent {
+        Some("send".to_string())
+    } else if received {
+        Some("receive".to_string())
+    } else {
+        None
+    };
+
+    let q = HistoryQuery {
+        direction,
+        success_only,
+        limit,
+        ..Default::default()
+    };
+
+    let entries = store.query(&q).await?;
+
+    if entries.is_empty() {
+        println!("No matching history records.");
+        return Ok(());
+    }
+
+    println!("{} record(s):\n", entries.len());
+    for e in &entries {
+        let status_marker = if e.success { "✓" } else { "✗" };
+        let speed_kb = if e.avg_speed_bps > 0 { e.avg_speed_bps as f64 / 1024.0 } else { 0.0 };
+        println!(
+            "  {} [{:>7}] {:>6.1} KB/s  {:<30}  {} → {}",
+            status_marker,
+            e.protocol,
+            speed_kb,
+            &e.filename[..e.filename.len().min(30)],
+            e.direction,
+            e.remote_ip.as_deref().unwrap_or("?")
+        );
+        if let Some(ref err) = e.error {
+            println!("      error: {}", err);
+        }
+    }
+
+    Ok(())
+}
 
 async fn cmd_resume(action: ResumeAction) -> anyhow::Result<()> {
     match action {

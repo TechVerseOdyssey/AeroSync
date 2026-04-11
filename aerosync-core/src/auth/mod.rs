@@ -5,10 +5,12 @@
 mod token;
 mod config;
 mod middleware;
+pub mod store;
 
 pub use token::{TokenManager, TokenInfo, TokenError};
 pub use config::AuthConfig;
 pub use middleware::AuthMiddleware;
+pub use store::{TokenStore, StoredToken};
 
 use crate::error::Result;
 

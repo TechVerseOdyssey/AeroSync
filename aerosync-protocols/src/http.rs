@@ -1,4 +1,5 @@
 use crate::traits::{TransferProtocol, TransferProgress};
+use crate::ratelimit::RateLimiter;
 use aerosync_core::{AeroSyncError, Result, TransferTask};
 use aerosync_core::resume::ResumeState;
 use async_trait::async_trait;
@@ -23,6 +24,8 @@ pub struct HttpConfig {
     pub chunk_size: usize,
     /// 发送方认证 Token（Bearer）
     pub auth_token: Option<String>,
+    /// 上传带宽限制（bytes/s），0 = 不限速
+    pub upload_limit_bps: u64,
 }
 
 impl Default for HttpConfig {
@@ -32,6 +35,7 @@ impl Default for HttpConfig {
             max_retries: 3,
             chunk_size: 4 * 1024 * 1024, // 4MB
             auth_token: None,
+            upload_limit_bps: 0,
         }
     }
 }
@@ -72,6 +76,7 @@ impl HttpTransfer {
 
         let start_time = Instant::now();
         let mut bytes_done = state.bytes_transferred();
+        let rate_limiter = RateLimiter::new(self.config.upload_limit_bps);
 
         tracing::info!(
             "Chunked upload: '{}' {} chunks (already done: {:?})",
@@ -89,6 +94,9 @@ impl HttpTransfer {
             tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(offset)).await?;
             let mut buf = vec![0u8; size as usize];
             file.read_exact(&mut buf).await?;
+
+            // 限速（消耗令牌）
+            rate_limiter.consume(size).await;
 
             // 带重试的分片上传
             let chunk_url = format!(

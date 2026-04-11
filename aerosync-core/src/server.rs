@@ -8,6 +8,15 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// 外部 TLS 证书配置（用于 QUIC 服务端）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// PEM 格式证书文件路径
+    pub cert_path: PathBuf,
+    /// PEM 格式私钥文件路径
+    pub key_path: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub http_port: u16,
@@ -22,6 +31,8 @@ pub struct ServerConfig {
     pub auth: Option<AuthConfig>,
     /// 审计日志文件路径，None 表示不记录审计日志
     pub audit_log: Option<PathBuf>,
+    /// 外部 TLS 证书，None 时自动生成自签名证书
+    pub tls: Option<TlsConfig>,
 }
 
 impl Default for ServerConfig {
@@ -37,6 +48,7 @@ impl Default for ServerConfig {
             enable_quic: true,
             auth: None,
             audit_log: None,
+            tls: None,
         }
     }
 }
@@ -482,12 +494,47 @@ async fn handle_health(
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let count = received_files.read().await.len();
+
+    // 获取当前目录磁盘空间（跨平台）
+    let (free_bytes, total_bytes) = get_disk_space(std::path::Path::new("."));
+
     let reply = warp::reply::json(&serde_json::json!({
         "status": "ok",
         "received_files": count,
+        "free_bytes": free_bytes,
+        "total_bytes": total_bytes,
+        "version": env!("CARGO_PKG_VERSION"),
     }));
     // X-AeroSync header 让客户端识别对端为 AeroSync 服务，触发 QUIC 自动升级
     Ok(warp::reply::with_header(reply, "X-AeroSync", "true"))
+}
+
+/// 获取指定路径所在文件系统的磁盘空闲/总量（字节）
+/// 返回 (free_bytes, total_bytes)；获取失败返回 (0, 0)
+fn get_disk_space(path: &std::path::Path) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::mem::MaybeUninit;
+        let c_path = match CString::new(path.to_string_lossy().as_bytes()) {
+            Ok(p) => p,
+            Err(_) => return (0, 0),
+        };
+        unsafe {
+            let mut stat: libc::statvfs = MaybeUninit::zeroed().assume_init();
+            if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
+                let free = stat.f_bavail as u64 * stat.f_bsize as u64;
+                let total = stat.f_blocks as u64 * stat.f_bsize as u64;
+                return (free, total);
+            }
+        }
+        (0, 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        (0, 0)
+    }
 }
 
 async fn handle_status_request(
@@ -752,7 +799,7 @@ async fn start_quic_server(
 ) -> Result<()> {
     use quinn::Endpoint;
 
-    let server_config = configure_quic_server()?;
+    let server_config = configure_quic_server(config.tls.as_ref())?;
     let addr: SocketAddr = format!("{}:{}", config.bind_address, config.quic_port)
         .parse()
         .map_err(|e| AeroSyncError::InvalidConfig(format!("Invalid QUIC address: {}", e)))?;
@@ -800,26 +847,73 @@ async fn start_quic_server(
     Ok(())
 }
 
-fn configure_quic_server() -> Result<quinn::ServerConfig> {
+fn configure_quic_server(tls: Option<&TlsConfig>) -> Result<quinn::ServerConfig> {
     use rustls::{Certificate, PrivateKey, ServerConfig as TlsServerConfig};
 
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
-        .map_err(|e| AeroSyncError::System(format!("Failed to generate certificate: {}", e)))?;
-
-    let cert_der = cert
-        .serialize_der()
-        .map_err(|e| AeroSyncError::System(format!("Failed to serialize certificate: {}", e)))?;
-    let key_der = cert.serialize_private_key_der();
+    let (certs, key) = if let Some(tls_cfg) = tls {
+        // 加载外部 PEM 文件
+        load_tls_from_pem(&tls_cfg.cert_path, &tls_cfg.key_path)?
+    } else {
+        // 自动生成自签名证书
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
+            .map_err(|e| AeroSyncError::System(format!("Failed to generate certificate: {}", e)))?;
+        let cert_der = cert
+            .serialize_der()
+            .map_err(|e| AeroSyncError::System(format!("Failed to serialize certificate: {}", e)))?;
+        let key_der = cert.serialize_private_key_der();
+        (vec![Certificate(cert_der)], PrivateKey(key_der))
+    };
 
     let mut tls_config = TlsServerConfig::builder()
         .with_safe_defaults()
         .with_no_client_auth()
-        .with_single_cert(vec![Certificate(cert_der)], PrivateKey(key_der))
+        .with_single_cert(certs, key)
         .map_err(|e| AeroSyncError::System(format!("TLS config error: {}", e)))?;
 
     tls_config.alpn_protocols = vec![b"aerosync".to_vec()];
 
     Ok(quinn::ServerConfig::with_crypto(Arc::new(tls_config)))
+}
+
+/// 从 PEM 文件加载证书链和私钥
+fn load_tls_from_pem(cert_path: &PathBuf, key_path: &PathBuf) -> Result<(Vec<rustls::Certificate>, rustls::PrivateKey)> {
+    use std::io::BufReader;
+
+    let cert_file = std::fs::File::open(cert_path)
+        .map_err(|e| AeroSyncError::System(format!("Cannot open cert file {}: {}", cert_path.display(), e)))?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let certs: Vec<rustls::Certificate> = rustls_pemfile::certs(&mut cert_reader)
+        .map_err(|e| AeroSyncError::System(format!("Failed to parse cert PEM: {}", e)))?
+        .into_iter()
+        .map(rustls::Certificate)
+        .collect();
+
+    if certs.is_empty() {
+        return Err(AeroSyncError::System(format!(
+            "No certificates found in {}",
+            cert_path.display()
+        )));
+    }
+
+    let key_file = std::fs::File::open(key_path)
+        .map_err(|e| AeroSyncError::System(format!("Cannot open key file {}: {}", key_path.display(), e)))?;
+    let mut key_reader = BufReader::new(key_file);
+
+    // 尝试 PKCS8，再尝试 RSA
+    let key = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
+        .map_err(|e| AeroSyncError::System(format!("Failed to parse key PEM: {}", e)))?
+        .into_iter()
+        .next()
+        .map(rustls::PrivateKey)
+        .or_else(|| {
+            // 重新打开文件读 RSA 格式
+            let key_file2 = std::fs::File::open(key_path).ok()?;
+            let mut kr = BufReader::new(key_file2);
+            rustls_pemfile::rsa_private_keys(&mut kr).ok()?.into_iter().next().map(rustls::PrivateKey)
+        })
+        .ok_or_else(|| AeroSyncError::System(format!("No private key found in {}", key_path.display())))?;
+
+    Ok((certs, key))
 }
 
 async fn handle_quic_connection(
