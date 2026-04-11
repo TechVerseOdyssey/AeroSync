@@ -1178,7 +1178,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let port = free_port();
 
-        let mut cfg = ServerConfig {
+        let cfg = ServerConfig {
             http_port: port,
             bind_address: "127.0.0.1".to_string(),
             receive_directory: dir.path().to_path_buf(),
@@ -1212,7 +1212,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let port = free_port();
 
-        let mut cfg = ServerConfig {
+        let cfg = ServerConfig {
             http_port: port,
             bind_address: "127.0.0.1".to_string(),
             receive_directory: dir.path().to_path_buf(),
@@ -1260,7 +1260,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let port = free_port();
 
-        let mut cfg = ServerConfig {
+        let cfg = ServerConfig {
             http_port: port,
             bind_address: "127.0.0.1".to_string(),
             receive_directory: dir.path().to_path_buf(),
@@ -1386,7 +1386,7 @@ mod tests {
             http_port: port,
             bind_address: "127.0.0.1".to_string(),
             enable_quic: false,
-            receive_directory: tempfile::tempdir().unwrap().into_path(),
+            receive_directory: tempfile::tempdir().unwrap().keep(),
             ..ServerConfig::default()
         };
         let mut recv = FileReceiver::new(cfg);
