@@ -194,7 +194,7 @@ impl FileReceiver {
 
 async fn start_http_server(
     config: ServerConfig,
-    status: Arc<RwLock<ServerStatus>>,
+    _status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_manager: Option<Arc<AuthManager>>,
 ) -> Result<()> {
@@ -344,9 +344,12 @@ async fn handle_file_upload(
         let safe_name = sanitize_filename(&filename);
         let file_path = get_unique_file_path(&receive_dir, &safe_name, allow_overwrite);
 
-        tokio::fs::create_dir_all(&receive_dir)
-            .await
-            .map_err(|_| warp::reject::reject())?;
+        // 确保父目录存在（支持子目录结构）
+        if let Some(parent) = file_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|_| warp::reject::reject())?;
+        }
 
         let mut file = tokio::fs::File::create(&file_path)
             .await
@@ -429,10 +432,12 @@ async fn handle_health(
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let count = received_files.read().await.len();
-    Ok(warp::reply::json(&serde_json::json!({
+    let reply = warp::reply::json(&serde_json::json!({
         "status": "ok",
         "received_files": count,
-    })))
+    }));
+    // X-AeroSync header 让客户端识别对端为 AeroSync 服务，触发 QUIC 自动升级
+    Ok(warp::reply::with_header(reply, "X-AeroSync", "true"))
 }
 
 async fn handle_status_request(
@@ -464,6 +469,7 @@ struct ChunkQuery {
     task_id: Uuid,
     chunk_index: u32,
     total_chunks: u32,
+    #[allow(dead_code)]
     filename: String,
 }
 
@@ -759,13 +765,10 @@ async fn handle_quic_connection(
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_manager: Option<Arc<AuthManager>>,
 ) -> Result<()> {
-    use sha2::{Digest, Sha256};
-    use tokio::io::AsyncWriteExt;
-
     let remote_ip = connection.remote_address().ip().to_string();
 
     // QUIC 连接层认证：读取第一条消息作为 Token
-    if let Some(ref auth) = auth_manager {
+    if let Some(ref _auth) = auth_manager {
         // Auth will be validated per-stream below
         tracing::debug!("QUIC: Auth enabled for connection from {}", remote_ip);
     }
@@ -944,16 +947,36 @@ async fn handle_quic_file_upload(
 // ─────────────────────────────── helpers ────────────────────────────────────
 
 fn sanitize_filename(filename: &str) -> String {
+    // 拒绝路径穿越和绝对路径：有 ".." 或以 "/" 开头，则只取最后一段
+    let filename = if filename.contains("..") || filename.starts_with('/') {
+        // 仅保留最后一个路径段
+        filename
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != ".." && *s != ".")
+            .last()
+            .unwrap_or("file")
+    } else {
+        filename
+    };
+
+    // 按 "/" 分割，对每段分别 sanitize，然后重新用 "/" 拼接（保留子目录结构）
     filename
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|segment| {
+            segment
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn get_unique_file_path(
@@ -965,6 +988,8 @@ fn get_unique_file_path(
     if allow_overwrite || !path.exists() {
         return path;
     }
+    // 分离父目录、文件名主体和扩展名，仅在文件名主体后追加计数器
+    let parent = path.parent().unwrap_or(receive_dir.as_path()).to_path_buf();
     let stem = path
         .file_stem()
         .unwrap_or_default()
@@ -981,7 +1006,7 @@ fn get_unique_file_path(
         } else {
             format!("{}_{}.{}", stem, i, ext)
         };
-        path = receive_dir.join(new_name);
+        path = parent.join(new_name);
         if !path.exists() {
             break;
         }
@@ -1002,15 +1027,30 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_filename_replaces_spaces() {
+    fn test_sanitize_filename_preserves_subpath() {
+        // 子路径分隔符应保留
+        let result = sanitize_filename("subdir/file.bin");
+        assert_eq!(result, "subdir/file.bin");
+    }
+
+    #[test]
+    fn test_sanitize_filename_replaces_slashes_spaces() {
         let result = sanitize_filename("my file name.txt");
         assert_eq!(result, "my_file_name.txt");
     }
 
     #[test]
-    fn test_sanitize_filename_replaces_slashes() {
-        let result = sanitize_filename("path/to/file.bin");
-        assert_eq!(result, "path_to_file.bin");
+    fn test_sanitize_filename_path_traversal_stripped() {
+        // ".." 路径穿越：只保留最后一个段
+        let result = sanitize_filename("../../etc/passwd");
+        assert!(!result.contains(".."), "result should not contain ..: {}", result);
+        assert!(!result.starts_with('/'), "result should not start with /: {}", result);
+    }
+
+    #[test]
+    fn test_sanitize_filename_absolute_path_stripped() {
+        let result = sanitize_filename("/etc/passwd");
+        assert!(!result.starts_with('/'), "result should not start with /: {}", result);
     }
 
     #[test]

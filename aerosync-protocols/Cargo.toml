@@ -24,6 +24,7 @@ hex = "0.4"
 uuid = { workspace = true }
 urlencoding = "2.1"
 url = "2"
+suppaftp = { version = "8.0.2", features = ["tokio"] }
 
 [dev-dependencies]
 tempfile = "3"

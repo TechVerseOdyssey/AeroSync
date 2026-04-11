@@ -34,6 +34,7 @@ impl PinnedCertVerifier {
     }
 
     /// 生产模式：只接受固定的证书列表。
+    #[allow(dead_code)]
     fn with_pinned(certs: Vec<Vec<u8>>) -> Arc<Self> {
         Arc::new(Self {
             accepted_certs: certs,

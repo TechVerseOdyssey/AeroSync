@@ -1,6 +1,6 @@
 use crate::traits::{TransferProtocol, TransferProgress};
 use aerosync_core::{AeroSyncError, Result, TransferTask};
-use aerosync_core::resume::{ResumeState, DEFAULT_CHUNK_SIZE};
+use aerosync_core::resume::ResumeState;
 use async_trait::async_trait;
 use reqwest::Client;
 use std::sync::Arc;

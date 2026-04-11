@@ -10,14 +10,18 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use crate::ftp::{FtpConfig, FtpTransfer};
 use crate::http::{HttpConfig, HttpTransfer};
 use crate::quic::{QuicConfig, QuicTransfer};
+use crate::s3::{S3Config, S3Transfer};
 use crate::traits::{TransferProtocol, TransferProgress as ProtoProgress};
 
 pub struct AutoAdapter {
     http_config: HttpConfig,
     quic_config_base: QuicConfig,
     shared_client: Arc<Client>,
+    s3_config: Option<S3Config>,
+    ftp_config: Option<FtpConfig>,
 }
 
 impl AutoAdapter {
@@ -31,7 +35,21 @@ impl AutoAdapter {
             http_config,
             quic_config_base,
             shared_client: Arc::new(client),
+            s3_config: None,
+            ftp_config: None,
         }
+    }
+
+    /// Builder: 配置 S3 协议支持（MinIO 或 AWS S3）
+    pub fn with_s3(mut self, cfg: S3Config) -> Self {
+        self.s3_config = Some(cfg);
+        self
+    }
+
+    /// Builder: 配置 FTP 协议支持
+    pub fn with_ftp(mut self, cfg: FtpConfig) -> Self {
+        self.ftp_config = Some(cfg);
+        self
     }
 }
 
@@ -42,6 +60,44 @@ impl ProtocolAdapter for AutoAdapter {
         task: &TransferTask,
         progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
     ) -> Result<()> {
+        // S3 路由
+        if task.destination.starts_with("s3://") {
+            let cfg = self.s3_config.clone().ok_or_else(|| {
+                AeroSyncError::InvalidConfig("S3 config not set; use AutoAdapter::with_s3()".to_string())
+            })?;
+            let s3 = S3Transfer::new(cfg)?;
+            let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
+            let ptx = progress_tx.clone();
+            tokio::spawn(async move {
+                while let Some(p) = rx.recv().await {
+                    let _ = ptx.send(ProtocolProgress {
+                        bytes_transferred: p.bytes_transferred,
+                        transfer_speed: p.transfer_speed,
+                    });
+                }
+            });
+            return s3.upload_file(task, tx).await;
+        }
+
+        // FTP 路由
+        if task.destination.starts_with("ftp://") {
+            let cfg = self.ftp_config.clone().ok_or_else(|| {
+                AeroSyncError::InvalidConfig("FTP config not set; use AutoAdapter::with_ftp()".to_string())
+            })?;
+            let ft = FtpTransfer::new(cfg);
+            let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
+            let ptx = progress_tx.clone();
+            tokio::spawn(async move {
+                while let Some(p) = rx.recv().await {
+                    let _ = ptx.send(ProtocolProgress {
+                        bytes_transferred: p.bytes_transferred,
+                        transfer_speed: p.transfer_speed,
+                    });
+                }
+            });
+            return ft.upload_file(task, tx).await;
+        }
+
         if task.destination.starts_with("quic://") {
             let qc = resolve_quic_config(&task.destination, &self.quic_config_base)?;
             let qt = QuicTransfer::new(qc)?;
@@ -79,6 +135,44 @@ impl ProtocolAdapter for AutoAdapter {
         task: &TransferTask,
         progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
     ) -> Result<()> {
+        // S3 路由
+        if task.destination.starts_with("s3://") {
+            let cfg = self.s3_config.clone().ok_or_else(|| {
+                AeroSyncError::InvalidConfig("S3 config not set".to_string())
+            })?;
+            let s3 = S3Transfer::new(cfg)?;
+            let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
+            let ptx = progress_tx.clone();
+            tokio::spawn(async move {
+                while let Some(p) = rx.recv().await {
+                    let _ = ptx.send(ProtocolProgress {
+                        bytes_transferred: p.bytes_transferred,
+                        transfer_speed: p.transfer_speed,
+                    });
+                }
+            });
+            return s3.download_file(task, tx).await;
+        }
+
+        // FTP 路由
+        if task.destination.starts_with("ftp://") {
+            let cfg = self.ftp_config.clone().ok_or_else(|| {
+                AeroSyncError::InvalidConfig("FTP config not set".to_string())
+            })?;
+            let ft = FtpTransfer::new(cfg);
+            let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
+            let ptx = progress_tx.clone();
+            tokio::spawn(async move {
+                while let Some(p) = rx.recv().await {
+                    let _ = ptx.send(ProtocolProgress {
+                        bytes_transferred: p.bytes_transferred,
+                        transfer_speed: p.transfer_speed,
+                    });
+                }
+            });
+            return ft.download_file(task, tx).await;
+        }
+
         if task.destination.starts_with("quic://") {
             let qc = resolve_quic_config(&task.destination, &self.quic_config_base)?;
             let qt = QuicTransfer::new(qc)?;
@@ -119,8 +213,11 @@ impl ProtocolAdapter for AutoAdapter {
         state: &mut ResumeState,
         progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
     ) -> Result<()> {
-        // 分片上传仅支持 HTTP（QUIC 暂用普通上传）
-        if task.destination.starts_with("quic://") {
+        // S3/FTP/QUIC 不支持分片，fallback 到普通上传
+        if task.destination.starts_with("s3://")
+            || task.destination.starts_with("ftp://")
+            || task.destination.starts_with("quic://")
+        {
             return self.upload(task, progress_tx).await;
         }
 

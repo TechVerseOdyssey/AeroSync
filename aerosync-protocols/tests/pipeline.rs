@@ -233,3 +233,32 @@ async fn test_pipeline_mixed_file_sizes() {
         TOTAL
     );
 }
+
+/// 验证 AutoAdapter 对连接失败返回 Network 错误（非 panic）
+#[tokio::test]
+async fn test_auto_adapter_connection_refused_returns_network_error() {
+    use aerosync_core::transfer::{ProtocolAdapter, TransferTask};
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("test.bin");
+    tokio::fs::write(&file, b"data").await.unwrap();
+
+    let task = TransferTask {
+        id: uuid::Uuid::new_v4(),
+        source_path: file,
+        destination: "http://127.0.0.1:19990/upload".to_string(),
+        is_upload: true,
+        file_size: 4,
+        sha256: None,
+    };
+    let adapter = Arc::new(AutoAdapter::new(HttpConfig::default(), QuicConfig::default()));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = adapter.upload(&task, tx).await;
+    assert!(result.is_err(), "should fail without server");
+    match result {
+        Err(aerosync_core::AeroSyncError::Network(_)) => {}
+        Err(e) => panic!("Wrong error type: {:?}", e),
+        Ok(_) => panic!("Should not succeed"),
+    }
+}

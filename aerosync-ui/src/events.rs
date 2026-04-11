@@ -1,4 +1,4 @@
-use aerosync_core::{TransferTask, TransferProgress, TransferStats};
+use aerosync_core::{TransferProgress, TransferStats};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;

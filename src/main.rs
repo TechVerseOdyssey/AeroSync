@@ -1,3 +1,6 @@
+mod config;
+use config::AeroSyncConfig;
+
 use aerosync_core::{
     auth::{AuthConfig, AuthManager},
     resume::ResumeStore,
@@ -190,6 +193,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // 加载配置文件（CLI 参数优先级最高）
+    let app_config = if let Some(ref cfg_path) = cli.config {
+        let expanded = shellexpand::tilde(&cfg_path.to_string_lossy()).to_string();
+        AeroSyncConfig::load(std::path::Path::new(&expanded)).unwrap_or_default()
+    } else {
+        AeroSyncConfig::default()
+    };
+
     match cli.command {
         Commands::Send {
             source,
@@ -202,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
             dry_run,
             no_resume,
         } => {
-            cmd_send(source, destination, recursive, protocol, token, parallel, no_verify, dry_run, no_resume).await?;
+            cmd_send(source, destination, recursive, protocol, token, parallel, no_verify, dry_run, no_resume, &app_config).await?;
         }
 
         Commands::Receive {
@@ -216,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
             max_size,
             http_only,
         } => {
-            cmd_receive(port, quic_port, save_to, bind, auth_token, one_shot, overwrite, max_size, http_only).await?;
+            cmd_receive(port, quic_port, save_to, bind, auth_token, one_shot, overwrite, max_size, http_only, &app_config).await?;
         }
 
         Commands::Token { action } => {
@@ -247,6 +258,7 @@ async fn cmd_send(
     no_verify: bool,
     dry_run: bool,
     no_resume: bool,
+    app_config: &AeroSyncConfig,
 ) -> anyhow::Result<()> {
     // 收集要发送的文件列表
     let files = collect_files(&source, recursive).await?;
@@ -256,7 +268,7 @@ async fn cmd_send(
         return Ok(());
     }
 
-    let total_size: u64 = files.iter().map(|f| f.1).sum();
+    let total_size: u64 = files.iter().map(|f| f.2).sum();
     println!(
         "Sending {} file(s), total {:.2} MB",
         files.len(),
@@ -265,35 +277,36 @@ async fn cmd_send(
 
     if dry_run {
         println!("\nDry run — files that would be sent:");
-        for (path, size) in &files {
-            println!("  {} ({:.2} KB)", path.display(), *size as f64 / 1024.0);
+        for (path, rel, size) in &files {
+            println!("  {} → {} ({:.2} KB)", path.display(), rel.display(), *size as f64 / 1024.0);
         }
         return Ok(());
     }
 
-    // 自动补全 destination URL
-    let dest_url = normalize_destination(&destination, &source, recursive);
+    // 自动协商协议（host:port 格式时探测对端是否支持 QUIC）
+    let dest_url = negotiate_protocol(&destination).await;
 
     let config = TransferConfig {
-        max_concurrent_transfers: 4,
-        chunk_size: 4 * 1024 * 1024,
-        retry_attempts: 3,
-        timeout_seconds: 60,
+        max_concurrent_transfers: app_config.transfer.max_concurrent,
+        chunk_size: (app_config.transfer.chunk_size_mb * 1024 * 1024) as usize,
+        retry_attempts: app_config.transfer.retry_attempts,
+        timeout_seconds: app_config.transfer.timeout_seconds,
         use_quic: !destination.starts_with("http"),
-        auth_token: token.clone(),
+        auth_token: token.clone().or_else(|| app_config.auth.token.clone()),
         enable_resume: !no_resume,
         ..TransferConfig::default()
     };
 
     // 构建协议适配器
+    let eff_token = token.clone().or_else(|| app_config.auth.token.clone());
     let http_config = HttpConfig {
-        timeout_seconds: 60,
-        max_retries: 3,
-        chunk_size: 4 * 1024 * 1024,
-        auth_token: token.clone(),
+        timeout_seconds: app_config.transfer.timeout_seconds,
+        max_retries: app_config.transfer.retry_attempts,
+        chunk_size: (app_config.transfer.chunk_size_mb * 1024 * 1024) as usize,
+        auth_token: eff_token.clone(),
     };
     let quic_config = QuicConfig {
-        auth_token: token.clone(),
+        auth_token: eff_token.clone(),
         ..QuicConfig::default()
     };
     let adapter = Arc::new(AutoAdapter::new(http_config, quic_config));
@@ -304,7 +317,7 @@ async fn cmd_send(
     // 并发预计算所有文件的 SHA-256（最多 8 个并发）
     let sha256_map: HashMap<PathBuf, Option<String>> = if !no_verify {
         println!("Computing SHA-256 checksums ({} file(s))...", files.len());
-        stream::iter(files.iter().map(|(path, _)| path.clone()))
+        stream::iter(files.iter().map(|(path, _, _)| path.clone()))
             .map(|path| async move {
                 let hash = match FileManager::compute_sha256(&path).await {
                     Ok(h) => Some(h),
@@ -344,7 +357,7 @@ async fn cmd_send(
     // task_id → ProgressBar 映射
     let mut file_bars: HashMap<Uuid, ProgressBar> = HashMap::new();
 
-    for (path, size) in &files {
+    for (path, relative_path, size) in &files {
         let file_name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -353,11 +366,9 @@ async fn cmd_send(
         // 从预计算结果中读取 SHA-256
         let sha256 = sha256_map.get(path).and_then(|h| h.clone());
 
-        let task_dest = if dest_url.ends_with('/') {
-            format!("{}{}", dest_url, file_name)
-        } else {
-            dest_url.clone()
-        };
+        // 保留相对路径结构：dest_url/subdir/file.bin
+        let rel_str = relative_path.to_string_lossy();
+        let task_dest = format!("{}/{}", dest_url.trim_end_matches('/'), rel_str);
 
         let mut task = TransferTask::new_upload(path.clone(), task_dest, *size);
         task.sha256 = sha256;
@@ -433,11 +444,13 @@ async fn cmd_send(
     Ok(())
 }
 
-/// 收集要发送的文件列表，返回 (path, size) 对
-async fn collect_files(source: &PathBuf, recursive: bool) -> anyhow::Result<Vec<(PathBuf, u64)>> {
+/// 收集要发送的文件列表，返回 (absolute_path, relative_path, size) 三元组
+async fn collect_files(source: &PathBuf, recursive: bool) -> anyhow::Result<Vec<(PathBuf, PathBuf, u64)>> {
     let meta = tokio::fs::metadata(source).await?;
     if meta.is_file() {
-        return Ok(vec![(source.clone(), meta.len())]);
+        // 单文件：relative_path 就是文件名本身
+        let rel = PathBuf::from(source.file_name().unwrap_or(source.as_os_str()));
+        return Ok(vec![(source.clone(), rel, meta.len())]);
     }
     if !meta.is_dir() {
         return Err(anyhow::anyhow!("Source is not a file or directory"));
@@ -457,7 +470,7 @@ async fn collect_files(source: &PathBuf, recursive: bool) -> anyhow::Result<Vec<
 fn collect_files_recursive<'a>(
     base: &'a PathBuf,
     dir: &'a PathBuf,
-    out: &'a mut Vec<(PathBuf, u64)>,
+    out: &'a mut Vec<(PathBuf, PathBuf, u64)>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
     Box::pin(async move {
         let mut entries = tokio::fs::read_dir(dir).await?;
@@ -465,7 +478,12 @@ fn collect_files_recursive<'a>(
             let path = entry.path();
             let meta = entry.metadata().await?;
             if meta.is_file() {
-                out.push((path, meta.len()));
+                // 计算相对于 base 的相对路径
+                let rel = path
+                    .strip_prefix(base)
+                    .unwrap_or(&path)
+                    .to_path_buf();
+                out.push((path, rel, meta.len()));
             } else if meta.is_dir() {
                 collect_files_recursive(base, &path, out).await?;
             }
@@ -474,13 +492,52 @@ fn collect_files_recursive<'a>(
     })
 }
 
-/// 将用户输入的 destination 规范化为完整 URL
-fn normalize_destination(dest: &str, _source: &PathBuf, _recursive: bool) -> String {
-    if dest.starts_with("http://") || dest.starts_with("https://") || dest.starts_with("quic://") {
+/// 自动协商协议：探测对端是否为 AeroSync，若是则升级 QUIC，否则降级 HTTP
+async fn negotiate_protocol(dest: &str) -> String {
+    // 已有协议前缀，直接返回
+    if dest.starts_with("http://")
+        || dest.starts_with("https://")
+        || dest.starts_with("quic://")
+        || dest.starts_with("s3://")
+        || dest.starts_with("ftp://")
+    {
         return dest.to_string();
     }
-    // host:port 格式 → 先尝试 QUIC，再 HTTP
-    // 此处默认用 HTTP（自动协商在 Phase 2 实现）
+
+    // host:port 格式：尝试 HTTP health 探测
+    let health_url = format!("http://{}/health", dest);
+    let probe = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build();
+
+    if let Ok(client) = probe {
+        if let Ok(resp) = client.get(&health_url).send().await {
+            let is_aerosync = resp
+                .headers()
+                .get("x-aerosync")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v == "true")
+                .unwrap_or(false);
+
+            if is_aerosync {
+                // 解析端口，QUIC 端口 = HTTP 端口 + 1（默认 7789）
+                let quic_dest = if let Some(colon_pos) = dest.rfind(':') {
+                    let host = &dest[..colon_pos];
+                    let http_port: u16 = dest[colon_pos + 1..]
+                        .parse()
+                        .unwrap_or(7788);
+                    let quic_port = http_port + 1;
+                    format!("quic://{}:{}/upload", host, quic_port)
+                } else {
+                    format!("quic://{}:7789/upload", dest)
+                };
+                tracing::info!("AeroSync peer detected, upgrading to QUIC: {}", quic_dest);
+                return quic_dest;
+            }
+        }
+    }
+
+    // 无法探测或非 AeroSync → 降级 HTTP
     format!("http://{}/upload", dest)
 }
 
@@ -496,6 +553,7 @@ async fn cmd_receive(
     overwrite: bool,
     max_size: u64,
     http_only: bool,
+    _app_config: &AeroSyncConfig,
 ) -> anyhow::Result<()> {
     // 构建认证配置
     let auth_cfg = auth_token.map(|token| {

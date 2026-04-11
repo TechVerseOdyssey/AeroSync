@@ -1,12 +1,14 @@
 use crate::{AppState, UiEvent, UiEventHandler};
-use aerosync_core::{TransferTask, FileManager, FileInfo};
+use aerosync_core::{TransferTask, FileManager};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 pub struct CliApp {
     state: AppState,
+    #[allow(dead_code)]
     event_rx: mpsc::UnboundedReceiver<UiEvent>,
+    #[allow(dead_code)]
     event_tx: mpsc::UnboundedSender<UiEvent>,
 }
 
