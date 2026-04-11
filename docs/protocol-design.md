@@ -34,8 +34,13 @@
 | 13 | 预检验 | P1 | ✅ 已实现 | `/health` 返回 `free_bytes/total_bytes/version`；发送前自动检查磁盘空间；`--no-preflight` 跳过 |
 | 14 | /health 端点 | P2 | ✅ 已实现 | 返回 `free_bytes/total_bytes/version`；含 `X-AeroSync: true` 响应头 |
 | 15 | Token 持久化 | P1 | ✅ 已实现 | TOML 格式存储至 `~/.config/aerosync/tokens.toml`；`token generate --save/list/revoke` |
+| 16 | Prometheus /metrics 端点 | P1 | ✅ 已实现 | `AtomicU64` 计数器 + 磁盘 gauge；Prometheus exposition format；`enable_metrics` 可关闭 |
+| 17 | WebSocket 实时进度推送 | P1 | ✅ 已实现 | `broadcast::Sender<WsEvent>`；GET /ws；多客户端扇出；上传完成/失败自动广播 |
+| 18 | 多接收目录路由 | P2 | ✅ 已实现 | 按 sender_ip / X-AeroSync-Tag / 扩展名路由；第一条匹配规则胜出；TOML 配置 |
+| 19 | 配置热重载（SIGHUP） | P2 | ✅ 已实现 | `watch_config_reload()`；可热重载 auth/routing/limits；端口变更 warn + 忽略 |
+| 20 | S3 Multipart Upload | P2 | ✅ 已实现 | 三步 API：initiate/upload_part/complete；超阈值自动切换；abort on failure |
 
-**已实现 15 项 / 部分实现 0 项 / 未实现 0 项 — Phase 4 全部完成 🎉**
+**已实现 20 项 / 部分实现 0 项 / 未实现 0 项 — Phase 4 + Phase 5 全部完成 🎉**
 
 ---
 
@@ -52,17 +57,17 @@
 | 预检验（磁盘空间） | P1 | ✅ | `aerosync-core/src/preflight.rs` |
 | 带宽限速（Token Bucket） | P1 | ✅ | `aerosync-protocols/src/ratelimit.rs` |
 
-### Phase 5 — 生产增强（规划中）
+### Phase 5 — 生产增强 ✅ 已完成
 
 详细设计见 [docs/phase5-plan.md](phase5-plan.md)。
 
-| # | 任务 | 优先级 | 影响模块 |
-|---|------|--------|---------|
-| 5.1 | Prometheus 指标端点 `/metrics` | P1 | `aerosync-core/src/metrics.rs`（新增） |
-| 5.2 | WebSocket 实时传输进度推送 | P1 | `aerosync-core/src/server.rs` |
-| 5.3 | 多接收目录路由（按 sender IP/tag） | P2 | `aerosync-core/src/routing.rs`（新增） |
-| 5.4 | S3 Multipart Upload（大文件分片） | P2 | `aerosync-protocols/src/s3.rs` |
-| 5.5 | 配置热重载（SIGHUP） | P2 | `src/main.rs`，`aerosync-core/src/server.rs` |
+| # | 任务 | 优先级 | 状态 | 实现文件 |
+|---|------|--------|------|---------|
+| 5.1 | Prometheus 指标端点 `/metrics` | P1 | ✅ | `aerosync-core/src/metrics.rs`（新增） |
+| 5.2 | WebSocket 实时传输进度推送 | P1 | ✅ | `aerosync-core/src/server.rs` |
+| 5.3 | 多接收目录路由（按 sender IP/tag） | P2 | ✅ | `aerosync-core/src/routing.rs`（新增） |
+| 5.4 | S3 Multipart Upload（大文件分片） | P2 | ✅ | `aerosync-protocols/src/s3.rs` |
+| 5.5 | 配置热重载（SIGHUP） | P2 | ✅ | `aerosync-core/src/server.rs` |
 
 ---
 
@@ -264,32 +269,120 @@ pub async fn preflight_check(
 
 ---
 
-## 5. P2 参考设计
+## 5. P2 已实现设计参考
 
-### 5.1 /health 端点扩展
+### 5.1 Prometheus /metrics 端点 ✅
 
-当前已实现基础 `/health`，后续可扩展为标准监控格式：
+**实现**：`aerosync-core/src/metrics.rs`，`Arc<Metrics>` 全局单例，`AtomicU64` 零锁计数器，`render()` 手动生成 exposition format（无外部 crate 依赖）。
 
-```json
-{
-  "status": "ok",
-  "version": "0.1.0",
-  "uptime_seconds": 3600,
-  "received_files": 42,
-  "active_transfers": 3,
-  "free_bytes": 107374182400,
-  "protocols": ["http", "quic"]
+**核心接口**：
+
+```rust
+pub struct Metrics {
+    pub files_received_total: AtomicU64,
+    pub bytes_received_total: AtomicU64,
+    pub upload_errors_total: AtomicU64,
+    pub ws_connections_total: AtomicU64,
+    // active_ws_connections: AtomicU64 (gauge)
+}
+
+impl Metrics {
+    pub fn new() -> Arc<Self>;
+    pub fn inc_files_received(&self);
+    pub fn add_bytes_received(&self, n: u64);
+    pub fn inc_upload_errors(&self);
+    pub fn inc_ws_connections(&self);
+    pub fn dec_ws_connections(&self);
+    pub fn render(&self, free_bytes: u64, total_bytes: u64) -> String;
 }
 ```
 
-Prometheus 指标端点（可选）：
+**端点**：`GET /metrics`，`Content-Type: text/plain; version=0.0.4`，通过 `ServerConfig.enable_metrics: bool` 控制开关。
 
+---
+
+### 5.2 WebSocket 实时进度推送 ✅
+
+**实现**：`WsEvent` JSON 枚举通过 `tokio::sync::broadcast` 广播给所有连接的客户端；客户端断连 fire-and-forget；`Lagged` 错误打印 warn 后继续。
+
+**核心接口**：
+
+```rust
+#[derive(Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum WsEvent {
+    TransferStarted { filename: String, size: u64, sender_ip: String },
+    Progress        { filename: String, bytes: u64, total: u64 },
+    Completed       { filename: String, size: u64, sha256: String },
+    Failed          { filename: String, reason: String },
+}
+
+pub type WsBroadcast = broadcast::Sender<WsEvent>;
 ```
-GET /metrics
-aerosync_received_files_total 42
-aerosync_received_bytes_total 1073741824
-aerosync_active_transfers 3
-aerosync_free_disk_bytes 107374182400
+
+**端点**：`GET /ws`（WebSocket 升级），通过 `ServerConfig.enable_ws` 控制开关，`ws_event_buffer` 配置广播缓冲区。
+
+---
+
+### 5.3 多接收目录路由 ✅
+
+**实现**：`aerosync-core/src/routing.rs`，`Router::resolve()` 按优先级迭代规则列表，第一条匹配胜出，无匹配回退 `receive_directory`。
+
+**核心接口**：
+
+```rust
+pub struct RoutingRule {
+    pub name: String,
+    pub destination: PathBuf,
+    pub tag: Option<String>,        // X-AeroSync-Tag header
+    pub sender_ip: Option<String>,  // exact IP match
+    pub extension: Option<String>,  // case-insensitive, without dot
+}
+
+pub struct Router { config: RouterConfig, default_dir: PathBuf }
+
+impl Router {
+    pub fn resolve(&self, sender_ip: &str, tag: Option<&str>, filename: &str) -> PathBuf;
+}
+```
+
+**配置**：`ServerConfig.routing: Option<RouterConfig>`（TOML 可序列化）。
+
+---
+
+### 5.4 S3 Multipart Upload ✅
+
+**实现**：`aerosync-protocols/src/s3.rs`，三步 API；`upload_auto()` 按 `multipart_threshold` 自动选择路径；part 失败时自动调用 `abort_multipart()` 清理。
+
+**核心接口**：
+
+```rust
+impl S3Transfer {
+    pub async fn initiate_multipart(&self, bucket, key) -> Result<String>;                       // → UploadId
+    pub async fn upload_part(&self, bucket, key, upload_id, part_number, data) -> Result<String>; // → ETag
+    pub async fn complete_multipart(&self, bucket, key, upload_id, parts) -> Result<()>;
+    pub async fn abort_multipart(&self, bucket, key, upload_id) -> Result<()>;
+    pub async fn upload_auto(&self, file_path, url, progress_tx) -> Result<()>;                  // 自动选路
+}
+```
+
+**配置**：`S3Config.multipart_threshold`（默认 100MB）、`S3Config.part_size`（默认 16MB）。
+
+---
+
+### 5.5 配置热重载（SIGHUP）✅
+
+**实现**：`FileReceiver::watch_config_reload(config_path)` 启动后台 task，监听 `SIGHUP`（Unix only），重新读取 TOML 配置文件并只更新可热重载字段。
+
+**可热重载字段**：`max_file_size`、`allow_overwrite`、`auth`、`routing`、`audit_log`
+
+**不可热重载字段**：`http_port`、`quic_port`、`bind_address`（变更时打印 warn 并忽略，需重启生效）
+
+**用法**：
+
+```bash
+# 修改配置文件后发送 SIGHUP，无需重启服务
+kill -HUP $(pidof aerosync)
 ```
 
 ---
@@ -400,8 +493,8 @@ Client                           S3 / MinIO
 
 URL 格式：`s3://bucket-name/path/to/key`
 
-不支持分片续传（S3 原生 Multipart Upload 未实现），大文件通过单次 PUT 上传。
+不支持分片续传（S3 Multipart Upload 已实现，见 §5.4），大文件超过 `multipart_threshold`（默认 100MB）自动切换为分片上传。
 
 ---
 
-*最后更新：2026-04-11（Phase 4 全部完成）*
+*最后更新：2026-04-11（Phase 4 + Phase 5 全部完成 🎉，累计 208 个测试，0 失败）*
