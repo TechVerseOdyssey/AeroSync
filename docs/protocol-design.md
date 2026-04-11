@@ -390,7 +390,7 @@ kill -HUP $(pidof aerosync)
 
 ### 5.6 `aerosync watch` WebSocket 订阅命令 ✅
 
-**实现**：`src/main.rs`，`tokio-tungstenite` 客户端，`build_ws_url()` 归一化输入地址，连接 `ws://host:port/ws` 后持续接收 `WsEvent` JSON 消息。
+**实现**：`src/main.rs`，`tokio-tungstenite` 客户端，`build_ws_url()` 归一化输入地址，连接 `ws://host:port/ws` 后持续接收 `WsEvent` JSON 消息。`watch_once()` 封装单次连接逻辑，`cmd_watch()` 外层循环实现指数退避自动重连。
 
 **CLI 参数**：
 
@@ -398,7 +398,23 @@ kill -HUP $(pidof aerosync)
 |------|--------|------|
 | `<host>` | `localhost:7788` | 接收端地址（`host:port` 或完整 `ws://` URL） |
 | `--format` | `pretty` | `pretty`（人类可读）或 `json`（机器可读原始 JSON） |
-| `--filter <event>` | — | 只输出含指定事件类型的消息（`completed` / `failed` / `transfer_started` / `progress`） |
+| `--filter <event>` | — | 只输出含指定事件类型的消息 |
+| `--reconnect` | false | 断连后自动重连（默认关闭） |
+| `--max-retries <n>` | `0` | 最大重连次数，`0` 表示无限重连（需配合 `--reconnect`） |
+| `--retry-delay <s>` | `2` | 初始等待秒数，每次失败后翻倍，上限 60 秒 |
+
+**重连退避策略**：
+
+| attempt | delay（retry-delay=2） |
+|---------|------------------------|
+| 1 | 2s |
+| 2 | 4s |
+| 3 | 8s |
+| 4 | 16s |
+| 5 | 32s |
+| 6+ | 60s（上限） |
+
+服务端主动发送 Close frame 时**不触发重连**（视为正常关闭）。
 
 **输出规则（pretty 模式）**：
 
@@ -444,6 +460,16 @@ aerosync watch --format json 2>/dev/null \
 # 8. 只监听失败事件（用于告警）
 aerosync watch --filter failed --format json 2>/dev/null \
   | jq -r '"ALERT: upload failed for \(.filename): \(.reason)"'
+
+# 9. 自动重连（断网后无限重试，初始等待 2s，最多等 60s）
+aerosync watch --reconnect
+
+# 10. 限制重连次数（最多重试 5 次，初始等待 3s）
+aerosync watch --reconnect --max-retries 5 --retry-delay 3
+
+# 11. agent 场景：重连 + json 模式（服务重启后自动恢复订阅）
+aerosync watch --reconnect --format json 2>/dev/null \
+  | jq -r 'select(.event=="completed") | .filename'
 ```
 
 **与 Prometheus 指标的组合使用**：
@@ -573,4 +599,4 @@ URL 格式：`s3://bucket-name/path/to/key`
 
 ---
 
-*最后更新：2026-04-11（Phase 4 + Phase 5 + aerosync watch 全部完成 🎉，累计 217 个测试，0 失败）*
+*最后更新：2026-04-11（Phase 4 + Phase 5 + aerosync watch（含重连）全部完成 🎉，累计 219 个测试，0 失败）*

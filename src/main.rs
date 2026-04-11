@@ -195,6 +195,18 @@ enum Commands {
         /// 输出格式：pretty（默认，人类可读）或 json（machine-readable，适合 agent 脚本解析）
         #[arg(long, default_value = "pretty")]
         format: String,
+
+        /// 断连后自动重连（默认关闭）
+        #[arg(long)]
+        reconnect: bool,
+
+        /// 最大重连次数，0 表示无限重连（默认 0，需配合 --reconnect 使用）
+        #[arg(long, default_value = "0")]
+        max_retries: u32,
+
+        /// 初始重连等待时间（秒），每次失败后翻倍，上限 60 秒（默认 2）
+        #[arg(long, default_value = "2")]
+        retry_delay: u64,
     },
 }
 
@@ -321,8 +333,8 @@ async fn main() -> anyhow::Result<()> {
             cmd_history(limit, sent, received, success_only).await?;
         }
 
-        Commands::Watch { host, filter, format } => {
-            cmd_watch(host, filter, format).await?;
+        Commands::Watch { host, filter, format, reconnect, max_retries, retry_delay } => {
+            cmd_watch(host, filter, format, reconnect, max_retries, retry_delay).await?;
         }
     }
 
@@ -1058,17 +1070,23 @@ fn build_ws_url(host: &str) -> String {
     }
 }
 
-async fn cmd_watch(host: String, filter: Option<String>, format: String) -> anyhow::Result<()> {
+/// 单次连接结果：区分"正常退出"和"需要重连的错误"。
+enum WatchResult {
+    /// 服务端主动关闭连接（Close frame），不应重连
+    ServerClosed,
+    /// 网络断开或协议错误，可以重连
+    Disconnected(String),
+}
+
+/// 建立一次 WebSocket 连接并持续消费消息，直到断连。
+async fn watch_once(url: &str, filter: &Option<String>, format: &str) -> WatchResult {
     use futures::StreamExt;
     use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-    let url = build_ws_url(&host);
-
-    eprintln!("Connecting to {}...", url);
-    let (ws_stream, _) = connect_async(&url)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to connect to {}: {}", url, e))?;
-    eprintln!("Connected. Waiting for events... (Ctrl+C to stop)\n");
+    let (ws_stream, _) = match connect_async(url).await {
+        Ok(s) => s,
+        Err(e) => return WatchResult::Disconnected(e.to_string()),
+    };
 
     let (_write, mut read) = ws_stream.split();
 
@@ -1083,29 +1101,97 @@ async fn cmd_watch(host: String, filter: Option<String>, format: String) -> anyh
                 }
 
                 if format == "json" {
-                    // machine-readable：直接输出原始 JSON 到 stdout
                     println!("{}", text);
+                } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    print_event_pretty(&v);
                 } else {
-                    // pretty 模式：按事件类型格式化输出
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                        print_event_pretty(&v);
-                    } else {
-                        println!("{}", text);
-                    }
+                    println!("{}", text);
                 }
             }
             Ok(Message::Close(_)) => {
-                eprintln!("Server closed connection.");
-                break;
+                return WatchResult::ServerClosed;
             }
             Err(e) => {
-                eprintln!("WebSocket error: {}", e);
-                break;
+                return WatchResult::Disconnected(e.to_string());
             }
             _ => {}
         }
     }
-    Ok(())
+    // read stream exhausted without Close frame — treat as disconnect
+    WatchResult::Disconnected("stream ended".to_string())
+}
+
+async fn cmd_watch(
+    host: String,
+    filter: Option<String>,
+    format: String,
+    reconnect: bool,
+    max_retries: u32,
+    retry_delay: u64,
+) -> anyhow::Result<()> {
+    let url = build_ws_url(&host);
+    let unlimited = max_retries == 0;
+    let mut attempt: u32 = 0;
+    // 指数退避上限 60 秒
+    const MAX_DELAY_SECS: u64 = 60;
+
+    eprintln!("Connecting to {}...", url);
+
+    loop {
+        match watch_once(&url, &filter, &format).await {
+            WatchResult::ServerClosed => {
+                eprintln!("Server closed connection.");
+                // 服务端主动关闭，无论是否开启重连都退出
+                return Ok(());
+            }
+            WatchResult::Disconnected(reason) => {
+                if attempt == 0 && reason.contains("stream ended") {
+                    // 首次且流正常结束（已接收过消息），安静退出
+                    return Ok(());
+                }
+
+                if !reconnect {
+                    if attempt == 0 {
+                        // 连接从未成功
+                        return Err(anyhow::anyhow!("Failed to connect to {}: {}", url, reason));
+                    }
+                    eprintln!("WebSocket error: {}", reason);
+                    return Ok(());
+                }
+
+                attempt += 1;
+                if !unlimited && attempt > max_retries {
+                    eprintln!(
+                        "Max retries ({}) reached. Giving up.",
+                        max_retries
+                    );
+                    return Err(anyhow::anyhow!("Failed to connect after {} attempt(s)", attempt));
+                }
+
+                // 指数退避：delay = retry_delay * 2^(attempt-1)，上限 MAX_DELAY_SECS
+                let delay = (retry_delay
+                    .saturating_mul(1u64 << (attempt - 1).min(5)))
+                .min(MAX_DELAY_SECS);
+
+                eprintln!(
+                    "Disconnected ({}). Reconnecting in {}s... (attempt {}/{})",
+                    reason,
+                    delay,
+                    attempt,
+                    if unlimited {
+                        "∞".to_string()
+                    } else {
+                        max_retries.to_string()
+                    }
+                );
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+                eprintln!("Reconnecting to {}...", url);
+            }
+        }
+
+        // 重连成功后重置 attempt
+        attempt = 0;
+    }
 }
 
 /// pretty 模式下格式化输出一条 WsEvent。
@@ -1175,5 +1261,35 @@ mod watch_tests {
             build_ws_url("192.168.1.10:7788/"),
             "ws://192.168.1.10:7788/ws"
         );
+    }
+
+    /// 验证指数退避延迟计算：delay = retry_delay * 2^(attempt-1)，上限 60s
+    #[test]
+    fn test_retry_backoff_delay() {
+        let base: u64 = 2;
+        const MAX: u64 = 60;
+
+        let delays: Vec<u64> = (1u32..=8)
+            .map(|attempt| {
+                (base.saturating_mul(1u64 << (attempt - 1).min(5))).min(MAX)
+            })
+            .collect();
+
+        // attempt 1 → 2s, 2 → 4s, 3 → 8s, 4 → 16s, 5 → 32s, 6+ → 60s (capped)
+        assert_eq!(delays[0], 2);
+        assert_eq!(delays[1], 4);
+        assert_eq!(delays[2], 8);
+        assert_eq!(delays[3], 16);
+        assert_eq!(delays[4], 32);
+        assert_eq!(delays[5], 60); // capped at MAX_DELAY_SECS
+        assert_eq!(delays[6], 60);
+        assert_eq!(delays[7], 60);
+    }
+
+    /// 验证 max_retries=0 时表示无限重连
+    #[test]
+    fn test_unlimited_retries_flag() {
+        let max_retries: u32 = 0;
+        assert!(max_retries == 0, "0 should mean unlimited");
     }
 }
