@@ -10,7 +10,7 @@
 2. [开发路线图](#2-开发路线图)
 3. [P0 已实现设计参考](#3-p0-已实现设计参考)
 4. [P1 已实现设计参考](#4-p1-已实现设计参考)
-5. [P2 参考设计](#5-p2-参考设计)
+5. [P2 已实现设计参考](#5-p2-已实现设计参考)
 6. [协议交互时序](#6-协议交互时序)
 
 ---
@@ -39,8 +39,9 @@
 | 18 | 多接收目录路由 | P2 | ✅ 已实现 | 按 sender_ip / X-AeroSync-Tag / 扩展名路由；第一条匹配规则胜出；TOML 配置 |
 | 19 | 配置热重载（SIGHUP） | P2 | ✅ 已实现 | `watch_config_reload()`；可热重载 auth/routing/limits；端口变更 warn + 忽略 |
 | 20 | S3 Multipart Upload | P2 | ✅ 已实现 | 三步 API：initiate/upload_part/complete；超阈值自动切换；abort on failure |
+| 21 | `aerosync watch` WebSocket 订阅命令 | P2 | ✅ 已实现 | CLI 原生订阅 `/ws`；pretty/json 双格式；`--filter` 事件过滤；agent 友好 |
 
-**已实现 20 项 / 部分实现 0 项 / 未实现 0 项 — Phase 4 + Phase 5 全部完成 🎉**
+**已实现 21 项 / 部分实现 0 项 / 未实现 0 项 — Phase 4 + Phase 5 + 补丁功能全部完成 🎉**
 
 ---
 
@@ -387,6 +388,81 @@ kill -HUP $(pidof aerosync)
 
 ---
 
+### 5.6 `aerosync watch` WebSocket 订阅命令 ✅
+
+**实现**：`src/main.rs`，`tokio-tungstenite` 客户端，`build_ws_url()` 归一化输入地址，连接 `ws://host:port/ws` 后持续接收 `WsEvent` JSON 消息。
+
+**CLI 参数**：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `<host>` | `localhost:7788` | 接收端地址（`host:port` 或完整 `ws://` URL） |
+| `--format` | `pretty` | `pretty`（人类可读）或 `json`（机器可读原始 JSON） |
+| `--filter <event>` | — | 只输出含指定事件类型的消息（`completed` / `failed` / `transfer_started` / `progress`） |
+
+**输出规则（pretty 模式）**：
+
+| 事件 | 输出目标 | 说明 |
+|------|----------|------|
+| `completed` | **stdout** | agent 只需捕获 stdout 即可感知文件到达 |
+| `transfer_started` / `failed` | stderr | 状态信息，不干扰管道 |
+| `progress` | 静默 | 默认不输出，避免刷屏 |
+
+**使用示例**：
+
+```bash
+# 1. 基本用法 — 连接本地接收端，pretty 格式输出
+aerosync watch
+# 等同于：
+aerosync watch localhost:7788 --format pretty
+
+# 2. 连接远端接收端
+aerosync watch 10.0.0.5:7788
+
+# 3. 使用完整 ws:// URL（自定义路径）
+aerosync watch ws://10.0.0.5:7788/ws
+
+# 4. 只显示 completed 事件（过滤掉 started/progress/failed）
+aerosync watch --filter completed
+
+# 5. agent 模式 — 机器可读 JSON，stderr 丢弃（不刷屏）
+#    stdout 每行输出一个完整 JSON 对象
+aerosync watch --format json 2>/dev/null
+# 输出示例：
+# {"event":"completed","filename":"report.pdf","size":2097152,"sha256":"a1b2c3d4..."}
+
+# 6. agent 脚本：管道解析文件到达事件
+aerosync watch --format json 2>/dev/null | while IFS= read -r line; do
+  filename=$(echo "$line" | python3 -c "import sys,json; print(json.load(sys.stdin)['filename'])")
+  echo "[AGENT] File arrived: $filename"
+done
+
+# 7. agent 脚本（jq 版）：提取 completed 事件中的 sha256
+aerosync watch --format json 2>/dev/null \
+  | jq -r 'select(.event=="completed") | "\(.filename) sha256=\(.sha256)"'
+
+# 8. 只监听失败事件（用于告警）
+aerosync watch --filter failed --format json 2>/dev/null \
+  | jq -r '"ALERT: upload failed for \(.filename): \(.reason)"'
+```
+
+**与 Prometheus 指标的组合使用**：
+
+```bash
+# 终端 1：实时监听文件事件
+aerosync watch --filter completed
+
+# 终端 2：定期采集指标
+watch -n5 'curl -s localhost:7788/metrics | grep aerosync_files_received_total'
+```
+
+**注意事项**：
+- `aerosync watch` 会持续运行直到 `Ctrl+C` 或服务端关闭连接
+- 若接收端未启用 WebSocket（`[ws] enabled = false`），连接会被拒绝并返回 404
+- 事件缓冲区满（默认 256 条）时，滞后的客户端会收到 `WebSocket error: lagged` 警告，不影响接收端正常运行
+
+---
+
 ## 6. 协议交互时序
 
 ### 6.1 QUIC 自动协商流程
@@ -497,4 +573,4 @@ URL 格式：`s3://bucket-name/path/to/key`
 
 ---
 
-*最后更新：2026-04-11（Phase 4 + Phase 5 全部完成 🎉，累计 208 个测试，0 失败）*
+*最后更新：2026-04-11（Phase 4 + Phase 5 + aerosync watch 全部完成 🎉，累计 217 个测试，0 失败）*
