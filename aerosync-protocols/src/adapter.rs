@@ -5,6 +5,9 @@ use aerosync_core::resume::ResumeState;
 use aerosync_core::transfer::{ProtocolAdapter, ProtocolProgress, TransferTask};
 use aerosync_core::{AeroSyncError, Result};
 use async_trait::async_trait;
+use reqwest::Client;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::http::{HttpConfig, HttpTransfer};
@@ -14,13 +17,20 @@ use crate::traits::{TransferProtocol, TransferProgress as ProtoProgress};
 pub struct AutoAdapter {
     http_config: HttpConfig,
     quic_config_base: QuicConfig,
+    shared_client: Arc<Client>,
 }
 
 impl AutoAdapter {
     pub fn new(http_config: HttpConfig, quic_config_base: QuicConfig) -> Self {
+        // 构建一个共享的 reqwest::Client，连接池在所有上传/下载请求间复用
+        let client = Client::builder()
+            .timeout(Duration::from_secs(http_config.timeout_seconds))
+            .build()
+            .unwrap_or_default();
         Self {
             http_config,
             quic_config_base,
+            shared_client: Arc::new(client),
         }
     }
 }
@@ -49,7 +59,7 @@ impl ProtocolAdapter for AutoAdapter {
             qt.upload_file(task, tx).await
         } else {
             // HTTP（包括 http:// 和 host:port 规范化后的地址）
-            let ht = HttpTransfer::new(self.http_config.clone())?;
+            let ht = HttpTransfer::new_with_client(Arc::clone(&self.shared_client), self.http_config.clone());
             let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
             let ptx = progress_tx.clone();
             tokio::spawn(async move {
@@ -84,7 +94,7 @@ impl ProtocolAdapter for AutoAdapter {
             });
             qt.download_file(task, tx).await
         } else {
-            let ht = HttpTransfer::new(self.http_config.clone())?;
+            let ht = HttpTransfer::new_with_client(Arc::clone(&self.shared_client), self.http_config.clone());
             let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
             let ptx = progress_tx.clone();
             tokio::spawn(async move {
@@ -116,7 +126,7 @@ impl ProtocolAdapter for AutoAdapter {
 
         // 从完整 URL 中提取 base_url（scheme + host + port）
         let base_url = extract_base_url(&task.destination)?;
-        let ht = HttpTransfer::new(self.http_config.clone())?;
+        let ht = HttpTransfer::new_with_client(Arc::clone(&self.shared_client), self.http_config.clone());
 
         let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
         let ptx = progress_tx.clone();

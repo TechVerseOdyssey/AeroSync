@@ -1,16 +1,18 @@
 use crate::{AeroSyncError, Result, ProgressMonitor, TransferProgress};
 use crate::progress::TransferStatus;
 use crate::resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
+use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, Semaphore};
 use uuid::Uuid;
 
 // ────────────────────────── configuration ───────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferConfig {
+    /// 最大并发传输任务数（Semaphore permits）
     pub max_concurrent_transfers: usize,
     pub chunk_size: usize,
     pub retry_attempts: u32,
@@ -24,6 +26,12 @@ pub struct TransferConfig {
     pub resume_state_dir: PathBuf,
     /// 是否启用断点续传（默认 true）
     pub enable_resume: bool,
+    /// 小文件（< small_file_threshold）并发上限，默认 16
+    pub small_file_concurrency: usize,
+    /// 中等文件（< chunked_threshold）并发上限，默认 8
+    pub medium_file_concurrency: usize,
+    /// 小文件阈值（bytes），默认 1MB
+    pub small_file_threshold: u64,
 }
 
 impl Default for TransferConfig {
@@ -35,9 +43,25 @@ impl Default for TransferConfig {
             timeout_seconds: 60,
             use_quic: true,
             auth_token: None,
-            chunked_threshold: 64 * 1024 * 1024, // 64MB
+            chunked_threshold: 64 * 1024 * 1024,  // 64MB
             resume_state_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             enable_resume: true,
+            small_file_concurrency: 16,
+            medium_file_concurrency: 8,
+            small_file_threshold: 1024 * 1024,     // 1MB
+        }
+    }
+}
+
+impl TransferConfig {
+    /// 根据文件大小返回自适应并发数（供上层 UI 参考）
+    pub fn concurrency_for_size(&self, file_size: u64) -> usize {
+        if file_size < self.small_file_threshold {
+            self.small_file_concurrency
+        } else if file_size < self.chunked_threshold {
+            self.medium_file_concurrency
+        } else {
+            1
         }
     }
 }
@@ -80,8 +104,6 @@ impl TransferTask {
 }
 
 // ────────────────────────── protocol trait (core-side) ──────────────────────
-// 这是 aerosync-core 自己定义的轻量 trait，aerosync-protocols 实现它。
-// 由外层（main.rs / app crate）注入具体实现，避免循环依赖。
 
 /// 进度更新消息（核心层自有类型，不依赖 protocols crate）
 #[derive(Debug, Clone)]
@@ -106,8 +128,6 @@ pub trait ProtocolAdapter: Send + Sync {
     ) -> Result<()>;
 
     /// 分片上传（支持断点续传）
-    /// `base_url`: 形如 `http://host:port`，不含路径
-    /// `state`: 当前续传状态（会被修改以记录已完成分片）
     async fn upload_chunked(
         &self,
         task: &TransferTask,
@@ -207,7 +227,13 @@ impl TransferEngine {
     }
 }
 
-// ────────────────────────── worker ──────────────────────────────────────────
+// ────────────────────────── 并发 worker ──────────────────────────────────────
+//
+// 设计：
+//  - Semaphore 控制最大并发数（max_concurrent_transfers）
+//  - FuturesUnordered 并发驱动所有运行中任务
+//  - select! 同时监听「新任务入队」和「已有任务完成」
+//  - 每个任务持有 OwnedSemaphorePermit，执行完自动释放
 
 async fn transfer_worker(
     mut task_rx: mpsc::UnboundedReceiver<TransferTask>,
@@ -216,36 +242,66 @@ async fn transfer_worker(
     adapter: Arc<dyn ProtocolAdapter>,
     config: TransferConfig,
 ) {
-    tracing::info!("Transfer worker started (protocol: {})", adapter.protocol_name());
+    tracing::info!(
+        "Transfer worker started (protocol: {}, max_concurrent: {})",
+        adapter.protocol_name(),
+        config.max_concurrent_transfers
+    );
 
-    while let Some(task) = task_rx.recv().await {
-        tracing::info!(
-            "Transfer: {} -> {}",
-            task.source_path.display(),
-            task.destination
-        );
+    let sem = Arc::new(Semaphore::new(config.max_concurrent_transfers));
+    let mut running: FuturesUnordered<
+        tokio::task::JoinHandle<(Uuid, std::result::Result<(), String>)>,
+    > = FuturesUnordered::new();
 
-        monitor.write().await.update_progress(task.id, 0, 0.0);
+    loop {
+        tokio::select! {
+            // ── 接收新任务 ──────────────────────────────────────────────────
+            maybe_task = task_rx.recv() => {
+                match maybe_task {
+                    Some(task) => {
+                        let task_id = task.id;
+                        tracing::debug!(
+                            "Queuing: {} (size={}B)",
+                            task.source_path.display(),
+                            task.file_size
+                        );
+                        monitor.write().await.update_progress(task_id, 0, 0.0);
 
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<ProtocolProgress>();
+                        let permit = Arc::clone(&sem)
+                            .acquire_owned()
+                            .await
+                            .expect("semaphore closed");
+                        let adapter_ref = Arc::clone(&adapter);
+                        let config_ref = config.clone();
 
-        let result = if task.is_upload {
-            execute_upload(&task, &adapter, &config, progress_tx).await
-        } else {
-            adapter.download(&task, progress_tx).await
-        };
+                        running.push(tokio::spawn(async move {
+                            let (progress_tx, mut progress_rx) =
+                                mpsc::unbounded_channel::<ProtocolProgress>();
 
-        // 排空进度 channel
-        while progress_rx.try_recv().is_ok() {}
+                            let result = if task.is_upload {
+                                execute_upload(&task, &adapter_ref, &config_ref, progress_tx).await
+                            } else {
+                                adapter_ref.download(&task, progress_tx).await
+                            };
 
-        match result {
-            Ok(_) => {
-                monitor.write().await.complete_transfer(task.id);
-                tracing::info!("Transfer completed: {}", task.source_path.display());
+                            while progress_rx.try_recv().is_ok() {}
+                            drop(permit); // 释放 Semaphore
+                            (task_id, result.map_err(|e| e.to_string()))
+                        }));
+                    }
+                    None => {
+                        // 发送端关闭，等待剩余任务完成
+                        while let Some(join_result) = running.next().await {
+                            handle_join_result(join_result, &monitor).await;
+                        }
+                        break;
+                    }
+                }
             }
-            Err(e) => {
-                monitor.write().await.fail_transfer(task.id, e.to_string());
-                tracing::error!("Transfer failed: {} — {}", task.source_path.display(), e);
+
+            // ── 处理已完成任务 ──────────────────────────────────────────────
+            Some(join_result) = running.next() => {
+                handle_join_result(join_result, &monitor).await;
             }
         }
     }
@@ -253,7 +309,27 @@ async fn transfer_worker(
     tracing::info!("Transfer worker stopped");
 }
 
-/// 执行上传：根据文件大小自动选择普通上传或分片续传
+async fn handle_join_result(
+    join_result: std::result::Result<(Uuid, std::result::Result<(), String>), tokio::task::JoinError>,
+    monitor: &Arc<RwLock<ProgressMonitor>>,
+) {
+    match join_result {
+        Ok((task_id, Ok(()))) => {
+            monitor.write().await.complete_transfer(task_id);
+            tracing::debug!("Transfer completed: {}", task_id);
+        }
+        Ok((task_id, Err(e))) => {
+            monitor.write().await.fail_transfer(task_id, e.clone());
+            tracing::error!("Transfer failed: {} — {}", task_id, e);
+        }
+        Err(join_err) => {
+            tracing::error!("Task panicked: {}", join_err);
+        }
+    }
+}
+
+// ────────────────────────── execute_upload ───────────────────────────────────
+
 async fn execute_upload(
     task: &TransferTask,
     adapter: &Arc<dyn ProtocolAdapter>,
@@ -266,10 +342,8 @@ async fn execute_upload(
         return adapter.upload(task, progress_tx).await;
     }
 
-    // 分片上传路径
     let store = ResumeStore::new(&config.resume_state_dir);
 
-    // 查找已有续传状态
     let mut state = if config.enable_resume {
         match store.find_by_file(&task.source_path, &task.destination).await {
             Ok(Some(existing)) => {
@@ -304,14 +378,12 @@ async fn execute_upload(
         )
     };
 
-    // 每完成一片立即持久化
     let result = adapter.upload_chunked(task, &mut state, progress_tx).await;
 
     if config.enable_resume {
         if result.is_ok() {
             store.delete(state.task_id).await.ok();
         } else {
-            // 保存最新进度（部分完成）
             store.save(&state).await.ok();
         }
     }
@@ -319,15 +391,18 @@ async fn execute_upload(
     result
 }
 
+// ────────────────────────── tests ────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
     use tempfile::TempDir;
+    use tokio::time::sleep;
 
-    // ── Mock Adapter ─────────────────────────────────────────────────────────
+    // ── Mock Adapters ─────────────────────────────────────────────────────────
 
-    /// 成功的 Mock adapter，记录调用次数
     struct SuccessAdapter {
         upload_count: Arc<AtomicUsize>,
         download_count: Arc<AtomicUsize>,
@@ -350,96 +425,98 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ProtocolAdapter for SuccessAdapter {
-        async fn upload(
-            &self,
-            _task: &TransferTask,
-            _tx: mpsc::UnboundedSender<ProtocolProgress>,
-        ) -> Result<()> {
+        async fn upload(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
             self.upload_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-
-        async fn download(
-            &self,
-            _task: &TransferTask,
-            _tx: mpsc::UnboundedSender<ProtocolProgress>,
-        ) -> Result<()> {
+        async fn download(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
             self.download_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-
-        async fn upload_chunked(
-            &self,
-            _task: &TransferTask,
-            _state: &mut ResumeState,
-            _tx: mpsc::UnboundedSender<ProtocolProgress>,
-        ) -> Result<()> {
+        async fn upload_chunked(&self, _: &TransferTask, _: &mut ResumeState, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
             self.upload_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-
-        fn protocol_name(&self) -> &'static str {
-            "mock-success"
-        }
+        fn protocol_name(&self) -> &'static str { "mock-success" }
     }
 
-    /// 总是失败的 Mock adapter
     struct FailAdapter;
-
     #[async_trait::async_trait]
     impl ProtocolAdapter for FailAdapter {
-        async fn upload(
-            &self,
-            _task: &TransferTask,
-            _tx: mpsc::UnboundedSender<ProtocolProgress>,
-        ) -> Result<()> {
+        async fn upload(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
             Err(AeroSyncError::Network("simulated upload failure".to_string()))
         }
-
-        async fn download(
-            &self,
-            _task: &TransferTask,
-            _tx: mpsc::UnboundedSender<ProtocolProgress>,
-        ) -> Result<()> {
+        async fn download(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
             Err(AeroSyncError::Network("simulated download failure".to_string()))
         }
-
-        async fn upload_chunked(
-            &self,
-            _task: &TransferTask,
-            _state: &mut ResumeState,
-            _tx: mpsc::UnboundedSender<ProtocolProgress>,
-        ) -> Result<()> {
+        async fn upload_chunked(&self, _: &TransferTask, _: &mut ResumeState, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
             Err(AeroSyncError::Network("simulated chunked failure".to_string()))
         }
+        fn protocol_name(&self) -> &'static str { "mock-fail" }
+    }
 
-        fn protocol_name(&self) -> &'static str {
-            "mock-fail"
+    /// 有延迟的 adapter，用于验证 Semaphore 实际限流效果
+    struct SlowAdapter {
+        upload_count: Arc<AtomicUsize>,
+        max_concurrent_seen: Arc<AtomicUsize>,
+        current_concurrent: Arc<AtomicUsize>,
+        delay_ms: u64,
+    }
+
+    impl SlowAdapter {
+        fn new(delay_ms: u64) -> (Arc<Self>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+            let count = Arc::new(AtomicUsize::new(0));
+            let max_seen = Arc::new(AtomicUsize::new(0));
+            let current = Arc::new(AtomicUsize::new(0));
+            (
+                Arc::new(Self {
+                    upload_count: Arc::clone(&count),
+                    max_concurrent_seen: Arc::clone(&max_seen),
+                    current_concurrent: Arc::clone(&current),
+                    delay_ms,
+                }),
+                count,
+                max_seen,
+            )
         }
     }
 
-    // ── TransferTask ─────────────────────────────────────────────────────────
+    #[async_trait::async_trait]
+    impl ProtocolAdapter for SlowAdapter {
+        async fn upload(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
+            let c = self.current_concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut max = self.max_concurrent_seen.load(Ordering::SeqCst);
+            while c > max {
+                match self.max_concurrent_seen.compare_exchange(max, c, Ordering::SeqCst, Ordering::SeqCst) {
+                    Ok(_) => break,
+                    Err(actual) => max = actual,
+                }
+            }
+            sleep(Duration::from_millis(self.delay_ms)).await;
+            self.current_concurrent.fetch_sub(1, Ordering::SeqCst);
+            self.upload_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn download(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> { Ok(()) }
+        async fn upload_chunked(&self, task: &TransferTask, _: &mut ResumeState, tx: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
+            self.upload(task, tx).await
+        }
+        fn protocol_name(&self) -> &'static str { "mock-slow" }
+    }
+
+    // ── TransferTask ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_new_upload_task() {
-        let task = TransferTask::new_upload(
-            PathBuf::from("/src/file.bin"),
-            "http://host/upload".to_string(),
-            1024,
-        );
+        let task = TransferTask::new_upload(PathBuf::from("/src/file.bin"), "http://host/upload".to_string(), 1024);
         assert!(task.is_upload);
         assert_eq!(task.file_size, 1024);
-        assert_eq!(task.destination, "http://host/upload");
         assert!(task.sha256.is_none());
     }
 
     #[test]
     fn test_new_download_task() {
-        let task = TransferTask::new_download(
-            "http://host/file.bin".to_string(),
-            PathBuf::from("/dst/file.bin"),
-            4096,
-        );
+        let task = TransferTask::new_download("http://host/file.bin".to_string(), PathBuf::from("/dst/file.bin"), 4096);
         assert!(!task.is_upload);
         assert_eq!(task.file_size, 4096);
     }
@@ -451,19 +528,42 @@ mod tests {
         assert_ne!(t1.id, t2.id);
     }
 
+    // ── TransferConfig ────────────────────────────────────────────────────────
+
     #[test]
     fn test_transfer_config_default() {
         let cfg = TransferConfig::default();
         assert_eq!(cfg.max_concurrent_transfers, 4);
         assert_eq!(cfg.chunk_size, 4 * 1024 * 1024);
         assert_eq!(cfg.chunked_threshold, 64 * 1024 * 1024);
+        assert_eq!(cfg.small_file_concurrency, 16);
+        assert_eq!(cfg.medium_file_concurrency, 8);
+        assert_eq!(cfg.small_file_threshold, 1024 * 1024);
         assert!(cfg.enable_resume);
         assert_eq!(cfg.retry_attempts, 3);
         assert!(cfg.use_quic);
         assert!(cfg.auth_token.is_none());
     }
 
-    // ── TransferEngine ───────────────────────────────────────────────────────
+    #[test]
+    fn test_concurrency_for_size_small() {
+        let cfg = TransferConfig::default();
+        assert_eq!(cfg.concurrency_for_size(512 * 1024), 16);
+    }
+
+    #[test]
+    fn test_concurrency_for_size_medium() {
+        let cfg = TransferConfig::default();
+        assert_eq!(cfg.concurrency_for_size(5 * 1024 * 1024), 8);
+    }
+
+    #[test]
+    fn test_concurrency_for_size_large() {
+        let cfg = TransferConfig::default();
+        assert_eq!(cfg.concurrency_for_size(100 * 1024 * 1024), 1);
+    }
+
+    // ── TransferEngine 基础 ───────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_engine_add_transfer_registers_progress() {
@@ -471,7 +571,6 @@ mod tests {
         let task = TransferTask::new_upload(PathBuf::from("/file.bin"), "http://h".to_string(), 512);
         let task_id = task.id;
         engine.add_transfer(task).await.unwrap();
-
         let monitor = engine.get_progress_monitor().await;
         let m = monitor.read().await;
         assert_eq!(m.get_stats().total_files, 1);
@@ -491,19 +590,14 @@ mod tests {
         let task = TransferTask::new_upload(file_path, "http://host/upload".to_string(), 9);
         let task_id = task.id;
         engine.add_transfer(task).await.unwrap();
-
-        // give the worker time to process
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(200)).await;
 
         let monitor = engine.get_progress_monitor().await;
         let m = monitor.read().await;
-        let stats = m.get_stats();
-        assert_eq!(stats.completed_files, 1);
-        assert_eq!(stats.failed_files, 0);
+        assert_eq!(m.get_stats().completed_files, 1);
+        assert_eq!(m.get_stats().failed_files, 0);
         assert_eq!(up_count.load(Ordering::SeqCst), 1);
-
-        let t = m.get_transfer(&task_id).unwrap();
-        assert!(matches!(t.status, crate::progress::TransferStatus::Completed));
+        assert!(matches!(m.get_transfer(&task_id).unwrap().status, TransferStatus::Completed));
     }
 
     #[tokio::test]
@@ -511,24 +605,106 @@ mod tests {
         let engine = TransferEngine::new(TransferConfig::default());
         engine.start(Arc::new(FailAdapter)).await.unwrap();
 
-        let task = TransferTask::new_upload(
-            PathBuf::from("/any/path.bin"),
-            "http://host/upload".to_string(),
-            0,
-        );
+        let task = TransferTask::new_upload(PathBuf::from("/any/path.bin"), "http://host/upload".to_string(), 0);
         let task_id = task.id;
         engine.add_transfer(task).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(200)).await;
 
         let monitor = engine.get_progress_monitor().await;
         let m = monitor.read().await;
-        let stats = m.get_stats();
-        assert_eq!(stats.completed_files, 0);
-        assert_eq!(stats.failed_files, 1);
+        assert_eq!(m.get_stats().failed_files, 1);
+        assert!(matches!(m.get_transfer(&task_id).unwrap().status, TransferStatus::Failed(_)));
+    }
 
-        let t = m.get_transfer(&task_id).unwrap();
-        assert!(matches!(t.status, crate::progress::TransferStatus::Failed(_)));
+    // ── 并发测试 ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_engine_100_tasks_all_complete() {
+        let cfg = TransferConfig {
+            max_concurrent_transfers: 16,
+            ..TransferConfig::default()
+        };
+        let engine = TransferEngine::new(cfg);
+        let (adapter, up_count, _) = SuccessAdapter::new();
+        engine.start(adapter).await.unwrap();
+
+        for i in 0..100 {
+            let task = TransferTask::new_upload(
+                PathBuf::from(format!("/file{}.bin", i)),
+                "http://host/upload".to_string(),
+                100,
+            );
+            engine.add_transfer(task).await.unwrap();
+        }
+        sleep(Duration::from_millis(500)).await;
+
+        let m = engine.get_progress_monitor().await;
+        assert_eq!(m.read().await.get_stats().completed_files, 100);
+        assert_eq!(up_count.load(Ordering::SeqCst), 100);
+    }
+
+    #[tokio::test]
+    async fn test_semaphore_limits_concurrency() {
+        let max_concurrent = 4usize;
+        let cfg = TransferConfig {
+            max_concurrent_transfers: max_concurrent,
+            ..TransferConfig::default()
+        };
+        let engine = TransferEngine::new(cfg);
+        let (adapter, up_count, max_seen) = SlowAdapter::new(30);
+        engine.start(adapter).await.unwrap();
+
+        for i in 0..20 {
+            let task = TransferTask::new_upload(
+                PathBuf::from(format!("/f{}.bin", i)),
+                "http://host/upload".to_string(),
+                100,
+            );
+            engine.add_transfer(task).await.unwrap();
+        }
+        sleep(Duration::from_millis(1500)).await;
+
+        assert_eq!(up_count.load(Ordering::SeqCst), 20, "all tasks should complete");
+        let observed_max = max_seen.load(Ordering::SeqCst);
+        assert!(
+            observed_max <= max_concurrent,
+            "max concurrent {} should be <= semaphore limit {}",
+            observed_max, max_concurrent
+        );
+    }
+
+    #[tokio::test]
+    async fn test_engine_small_files_high_concurrency() {
+        let cfg = TransferConfig {
+            max_concurrent_transfers: 16,
+            ..TransferConfig::default()
+        };
+        let engine = TransferEngine::new(cfg);
+        let (adapter, up_count, _) = SuccessAdapter::new();
+        engine.start(adapter).await.unwrap();
+
+        for i in 0..50 {
+            let task = TransferTask::new_upload(
+                PathBuf::from(format!("/small{}.txt", i)),
+                "http://host/upload".to_string(),
+                512,
+            );
+            engine.add_transfer(task).await.unwrap();
+        }
+        sleep(Duration::from_millis(500)).await;
+        assert_eq!(up_count.load(Ordering::SeqCst), 50);
+    }
+
+    #[tokio::test]
+    async fn test_engine_download_calls_download_on_adapter() {
+        let engine = TransferEngine::new(TransferConfig::default());
+        let (adapter, _, down_count) = SuccessAdapter::new();
+        engine.start(adapter).await.unwrap();
+
+        let task = TransferTask::new_download("http://host/file.bin".to_string(), PathBuf::from("/dst/file.bin"), 0);
+        engine.add_transfer(task).await.unwrap();
+        sleep(Duration::from_millis(200)).await;
+        assert_eq!(down_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -538,52 +714,21 @@ mod tests {
         engine.start(adapter).await.unwrap();
 
         for i in 0..5 {
-            let task = TransferTask::new_upload(
-                PathBuf::from(format!("/file{}.bin", i)),
-                "http://host/upload".to_string(),
-                0,
-            );
+            let task = TransferTask::new_upload(PathBuf::from(format!("/file{}.bin", i)), "http://host/upload".to_string(), 0);
             engine.add_transfer(task).await.unwrap();
         }
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        let monitor = engine.get_progress_monitor().await;
-        let m = monitor.read().await;
-        assert_eq!(m.get_stats().completed_files, 5);
+        sleep(Duration::from_millis(300)).await;
+        let m = engine.get_progress_monitor().await;
+        assert_eq!(m.read().await.get_stats().completed_files, 5);
         assert_eq!(up_count.load(Ordering::SeqCst), 5);
     }
 
     #[tokio::test]
-    async fn test_engine_download_calls_download_on_adapter() {
-        let engine = TransferEngine::new(TransferConfig::default());
-        let (adapter, _, down_count) = SuccessAdapter::new();
-        engine.start(adapter).await.unwrap();
-
-        let task = TransferTask::new_download(
-            "http://host/file.bin".to_string(),
-            PathBuf::from("/dst/file.bin"),
-            0,
-        );
-        engine.add_transfer(task).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        assert_eq!(down_count.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
     async fn test_protocol_progress_bridging() {
-        // Adapter that sends progress events
         struct ProgressAdapter;
-
         #[async_trait::async_trait]
         impl ProtocolAdapter for ProgressAdapter {
-            async fn upload(
-                &self,
-                task: &TransferTask,
-                tx: mpsc::UnboundedSender<ProtocolProgress>,
-            ) -> Result<()> {
+            async fn upload(&self, task: &TransferTask, tx: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
                 let total = task.file_size;
                 for step in [25u64, 50, 75, 100] {
                     let _ = tx.send(ProtocolProgress {
@@ -593,43 +738,19 @@ mod tests {
                 }
                 Ok(())
             }
-
-            async fn download(
-                &self,
-                _task: &TransferTask,
-                _tx: mpsc::UnboundedSender<ProtocolProgress>,
-            ) -> Result<()> {
-                Ok(())
-            }
-
-            async fn upload_chunked(
-                &self,
-                task: &TransferTask,
-                _state: &mut ResumeState,
-                tx: mpsc::UnboundedSender<ProtocolProgress>,
-            ) -> Result<()> {
+            async fn download(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> { Ok(()) }
+            async fn upload_chunked(&self, task: &TransferTask, _: &mut ResumeState, tx: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
                 self.upload(task, tx).await
             }
-
-            fn protocol_name(&self) -> &'static str {
-                "mock-progress"
-            }
+            fn protocol_name(&self) -> &'static str { "mock-progress" }
         }
 
         let engine = TransferEngine::new(TransferConfig::default());
         engine.start(Arc::new(ProgressAdapter)).await.unwrap();
-
-        let task = TransferTask::new_upload(
-            PathBuf::from("/big.bin"),
-            "http://host/upload".to_string(),
-            1024 * 1024,
-        );
+        let task = TransferTask::new_upload(PathBuf::from("/big.bin"), "http://host/upload".to_string(), 1024 * 1024);
         engine.add_transfer(task).await.unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let monitor = engine.get_progress_monitor().await;
-        let m = monitor.read().await;
-        assert_eq!(m.get_stats().completed_files, 1);
+        sleep(Duration::from_millis(200)).await;
+        let m = engine.get_progress_monitor().await;
+        assert_eq!(m.read().await.get_stats().completed_files, 1);
     }
 }

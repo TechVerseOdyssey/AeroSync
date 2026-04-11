@@ -23,6 +23,7 @@ indicatif = "0.17"
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { version = "0.11", features = ["json"] }
+futures = { workspace = true }
 uuid = { workspace = true }
 
 [workspace]

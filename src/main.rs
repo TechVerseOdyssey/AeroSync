@@ -11,11 +11,13 @@ use aerosync_protocols::{
     AutoAdapter,
 };
 use clap::{Parser, Subcommand};
-use indicatif::{ProgressBar, ProgressStyle};
+use futures::stream::{self, StreamExt};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use uuid::Uuid as _Uuid;
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(
@@ -299,74 +301,133 @@ async fn cmd_send(
     let engine = TransferEngine::new(config);
     engine.start(adapter).await?;
 
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}",
-        )
-        .unwrap()
-        .progress_chars("=>-"),
-    );
+    // 并发预计算所有文件的 SHA-256（最多 8 个并发）
+    let sha256_map: HashMap<PathBuf, Option<String>> = if !no_verify {
+        println!("Computing SHA-256 checksums ({} file(s))...", files.len());
+        stream::iter(files.iter().map(|(path, _)| path.clone()))
+            .map(|path| async move {
+                let hash = match FileManager::compute_sha256(&path).await {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        tracing::warn!("Could not compute SHA-256 for {}: {}", path.display(), e);
+                        None
+                    }
+                };
+                (path, hash)
+            })
+            .buffer_unordered(8)
+            .collect()
+            .await
+    } else {
+        HashMap::new()
+    };
+
+    // ── MultiProgress 流水线进度显示 ──────────────────────────────────────────
+    let mp = MultiProgress::new();
+
+    // 汇总进度条（顶部）
+    let summary_style = ProgressStyle::with_template(
+        "Overall [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) @ {binary_bytes_per_sec}",
+    )
+    .unwrap()
+    .progress_chars("=>-");
+    let summary_pb = mp.add(ProgressBar::new(total_size));
+    summary_pb.set_style(summary_style);
+
+    // 每文件一条进度条
+    let file_style = ProgressStyle::with_template(
+        "  {spinner} {msg:<30} [{bar:30.green/white}] {bytes}/{total_bytes}",
+    )
+    .unwrap()
+    .progress_chars("=>-");
+
+    // task_id → ProgressBar 映射
+    let mut file_bars: HashMap<Uuid, ProgressBar> = HashMap::new();
 
     for (path, size) in &files {
-        let msg = path
+        let file_name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        pb.set_message(msg.clone());
 
-        // 计算 SHA-256（除非跳过校验）
-        let sha256 = if !no_verify {
-            match FileManager::compute_sha256(&path).await {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    tracing::warn!("Could not compute SHA-256 for {}: {}", path.display(), e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // 从预计算结果中读取 SHA-256
+        let sha256 = sha256_map.get(path).and_then(|h| h.clone());
 
         let task_dest = if dest_url.ends_with('/') {
-            format!("{}{}", dest_url, msg)
+            format!("{}{}", dest_url, file_name)
         } else {
             dest_url.clone()
         };
 
         let mut task = TransferTask::new_upload(path.clone(), task_dest, *size);
         task.sha256 = sha256;
+        let task_id = task.id;
 
         engine.add_transfer(task).await?;
-        pb.inc(*size);
+
+        // 为该文件创建进度条
+        let pb = mp.add(ProgressBar::new(*size));
+        pb.set_style(file_style.clone());
+        pb.set_message(file_name);
+        file_bars.insert(task_id, pb);
     }
 
-    // 等待所有任务完成（简单 poll）
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // 轮询 ProgressMonitor，驱动所有进度条更新
     let monitor = engine.get_progress_monitor().await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    let mut last_total_bytes: u64 = 0;
+
     loop {
-        {
+        let done = {
             let m = monitor.read().await;
             let stats = m.get_stats();
-            if stats.completed_files + stats.failed_files >= stats.total_files {
-                break;
+
+            // 更新每文件进度条
+            for tp in m.get_active_transfers() {
+                if let Some(pb) = file_bars.get(&tp.task_id) {
+                    pb.set_position(tp.bytes_transferred.min(tp.total_bytes));
+                    if matches!(tp.status, aerosync_core::progress::TransferStatus::Completed) {
+                        pb.finish_with_message(format!(
+                            "{} ✓",
+                            pb.message()
+                        ));
+                    } else if matches!(tp.status, aerosync_core::progress::TransferStatus::Failed(_)) {
+                        pb.abandon_with_message(format!(
+                            "{} ✗",
+                            pb.message()
+                        ));
+                    }
+                }
             }
+
+            // 更新汇总条
+            let delta = stats.transferred_bytes.saturating_sub(last_total_bytes);
+            if delta > 0 {
+                summary_pb.inc(delta);
+                last_total_bytes = stats.transferred_bytes;
+            }
+
+            stats.completed_files + stats.failed_files >= stats.total_files
+        };
+
+        if done {
+            break;
         }
         if tokio::time::Instant::now() >= deadline {
             eprintln!("Timeout waiting for transfers");
             break;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    pb.finish_with_message("Done");
+    summary_pb.finish_with_message("Done");
 
     let m = monitor.read().await;
     let stats = m.get_stats();
+    let speed_mb = stats.overall_speed / 1_048_576.0;
     println!(
-        "\nCompleted: {}/{} files, Failed: {}",
-        stats.completed_files, stats.total_files, stats.failed_files
+        "\nCompleted: {}/{} files, Failed: {}, Avg speed: {:.2} MB/s",
+        stats.completed_files, stats.total_files, stats.failed_files, speed_mb
     );
 
     Ok(())

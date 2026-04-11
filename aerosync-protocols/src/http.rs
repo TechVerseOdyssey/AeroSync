@@ -3,6 +3,7 @@ use aerosync_core::{AeroSyncError, Result, TransferTask};
 use aerosync_core::resume::{ResumeState, DEFAULT_CHUNK_SIZE};
 use async_trait::async_trait;
 use reqwest::Client;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,7 +12,7 @@ use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
 
 pub struct HttpTransfer {
-    client: Client,
+    client: Arc<Client>,
     config: HttpConfig,
 }
 
@@ -42,7 +43,12 @@ impl HttpTransfer {
             .build()
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
 
-        Ok(Self { client, config })
+        Ok(Self { client: Arc::new(client), config })
+    }
+
+    /// 使用外部共享 client 构造，避免每次创建新连接池。
+    pub fn new_with_client(client: Arc<Client>, config: HttpConfig) -> Self {
+        Self { client, config }
     }
 
     /// 分片上传：将文件切分为 chunk_size 大小的块逐一上传。
