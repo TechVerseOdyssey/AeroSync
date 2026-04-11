@@ -1,3 +1,4 @@
+pub use aerosync_core::routing::RouterConfig;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -19,6 +20,23 @@ use std::path::Path;
 /// quic_port = 7789
 /// save_to = "./received"
 /// bind = "0.0.0.0"
+///
+/// [metrics]
+/// enabled = true
+///
+/// [ws]
+/// enabled = true
+/// event_buffer = 256
+///
+/// [[routing.rules]]
+/// name = "images"
+/// destination = "./received/images"
+/// extension = "jpg"
+///
+/// [[routing.rules]]
+/// name = "trusted-agent"
+/// destination = "./received/agent"
+/// sender_ip = "10.0.0.5"
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct AeroSyncConfig {
@@ -28,6 +46,43 @@ pub struct AeroSyncConfig {
     pub auth: AuthSection,
     #[serde(default)]
     pub server: ServerSection,
+    #[serde(default)]
+    pub metrics: MetricsSection,
+    #[serde(default)]
+    pub ws: WebSocketSection,
+    #[serde(default)]
+    pub routing: Option<RouterConfig>,
+}
+
+/// Prometheus 指标导出配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MetricsSection {
+    /// 是否启用 /metrics 端点（默认 true）
+    pub enabled: bool,
+}
+
+impl Default for MetricsSection {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// WebSocket 事件推送配置
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WebSocketSection {
+    /// 是否启用 /ws 端点（默认 true）
+    pub enabled: bool,
+    /// 事件广播缓冲区大小（默认 256）
+    pub event_buffer: usize,
+}
+
+impl Default for WebSocketSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            event_buffer: 256,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -173,5 +228,63 @@ mod tests {
         std::fs::write(&path, "not valid toml [[[").unwrap();
         let result = AeroSyncConfig::load(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_default_metrics_and_ws() {
+        let cfg = AeroSyncConfig::default();
+        assert!(cfg.metrics.enabled);
+        assert!(cfg.ws.enabled);
+        assert_eq!(cfg.ws.event_buffer, 256);
+        assert!(cfg.routing.is_none());
+    }
+
+    #[test]
+    fn test_load_metrics_section() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[metrics]\nenabled = false\n").unwrap();
+        let cfg = AeroSyncConfig::load(&path).unwrap();
+        assert!(!cfg.metrics.enabled);
+        // ws still defaults to true
+        assert!(cfg.ws.enabled);
+    }
+
+    #[test]
+    fn test_load_ws_section() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ws]\nenabled = false\nevent_buffer = 512\n").unwrap();
+        let cfg = AeroSyncConfig::load(&path).unwrap();
+        assert!(!cfg.ws.enabled);
+        assert_eq!(cfg.ws.event_buffer, 512);
+    }
+
+    #[test]
+    fn test_load_routing_rules() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[routing.rules]]
+name = "images"
+destination = "./received/images"
+extension = "jpg"
+
+[[routing.rules]]
+name = "agent"
+destination = "./received/agent"
+sender_ip = "10.0.0.5"
+"#,
+        )
+        .unwrap();
+        let cfg = AeroSyncConfig::load(&path).unwrap();
+        let rules = &cfg.routing.as_ref().unwrap().rules;
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].name, "images");
+        assert_eq!(rules[0].extension.as_deref(), Some("jpg"));
+        assert_eq!(rules[1].name, "agent");
+        assert_eq!(rules[1].sender_ip.as_deref(), Some("10.0.0.5"));
     }
 }

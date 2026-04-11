@@ -281,7 +281,7 @@ async fn main() -> anyhow::Result<()> {
             tls_cert,
             tls_key,
         } => {
-            cmd_receive(port, quic_port, save_to, bind, auth_token, one_shot, overwrite, max_size, http_only, tls_cert, tls_key, &app_config).await?;
+            cmd_receive(port, quic_port, save_to, bind, auth_token, one_shot, overwrite, max_size, http_only, tls_cert, tls_key, &app_config, cli.config.clone()).await?;
         }
 
         Commands::Token { action } => {
@@ -669,7 +669,8 @@ async fn cmd_receive(
     http_only: bool,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
-    _app_config: &AeroSyncConfig,
+    app_config: &AeroSyncConfig,
+    config_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     // 构建认证配置
     let auth_cfg = auth_token.map(|token| {
@@ -699,10 +700,10 @@ async fn cmd_receive(
             (Some(cert), Some(key)) => Some(TlsConfig { cert_path: cert, key_path: key }),
             _ => None,
         },
-        enable_metrics: true,
-        enable_ws: true,
-        ws_event_buffer: 256,
-        routing: None,
+        enable_metrics: app_config.metrics.enabled,
+        enable_ws: app_config.ws.enabled,
+        ws_event_buffer: app_config.ws.event_buffer,
+        routing: app_config.routing.clone(),
     };
 
     println!("AeroSync receiver starting...");
@@ -718,6 +719,12 @@ async fn cmd_receive(
 
     let mut receiver = FileReceiver::new(config);
     receiver.start().await?;
+
+    // 激活 SIGHUP 热重载（仅 Unix；配置文件路径有效时）
+    if let Some(ref cfg_path) = config_path {
+        let expanded = shellexpand::tilde(&cfg_path.to_string_lossy()).to_string();
+        receiver.watch_config_reload(std::path::PathBuf::from(expanded));
+    }
 
     if one_shot {
         // 等待第一个文件到达后退出
