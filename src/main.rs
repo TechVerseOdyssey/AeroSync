@@ -175,6 +175,27 @@ enum Commands {
         #[arg(long)]
         success_only: bool,
     },
+
+    /// 订阅接收端 WebSocket 事件流（实时感知文件到达）
+    ///
+    /// 示例:
+    ///   aerosync watch                          # 连接 localhost:7788，pretty 格式
+    ///   aerosync watch 10.0.0.5:7788            # 连接指定主机
+    ///   aerosync watch --format json 2>/dev/null  # agent 模式，只输出 completed JSON
+    ///   aerosync watch --filter completed       # 只显示 completed 事件
+    Watch {
+        /// 接收端地址，格式 host:port 或 ws://host:port/ws
+        #[arg(default_value = "localhost:7788")]
+        host: String,
+
+        /// 只输出包含指定事件类型的消息（transfer_started / progress / completed / failed）
+        #[arg(long)]
+        filter: Option<String>,
+
+        /// 输出格式：pretty（默认，人类可读）或 json（machine-readable，适合 agent 脚本解析）
+        #[arg(long, default_value = "pretty")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -298,6 +319,10 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::History { limit, sent, received, success_only } => {
             cmd_history(limit, sent, received, success_only).await?;
+        }
+
+        Commands::Watch { host, filter, format } => {
+            cmd_watch(host, filter, format).await?;
         }
     }
 
@@ -1019,4 +1044,136 @@ async fn cmd_resume(action: ResumeAction) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+// ──────────────────────────── watch ─────────────────────────────────────────
+
+/// 将用户输入的 host 字符串归一化为 ws:// URL。
+/// 提取为独立函数以便单元测试。
+fn build_ws_url(host: &str) -> String {
+    if host.starts_with("ws://") || host.starts_with("wss://") {
+        host.to_string()
+    } else {
+        format!("ws://{}/ws", host.trim_end_matches('/'))
+    }
+}
+
+async fn cmd_watch(host: String, filter: Option<String>, format: String) -> anyhow::Result<()> {
+    use futures::StreamExt;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    let url = build_ws_url(&host);
+
+    eprintln!("Connecting to {}...", url);
+    let (ws_stream, _) = connect_async(&url)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to connect to {}: {}", url, e))?;
+    eprintln!("Connected. Waiting for events... (Ctrl+C to stop)\n");
+
+    let (_write, mut read) = ws_stream.split();
+
+    while let Some(msg) = read.next().await {
+        match msg {
+            Ok(Message::Text(text)) => {
+                // 可选事件类型过滤
+                if let Some(ref f) = filter {
+                    if !text.contains(&format!("\"{}\"", f)) {
+                        continue;
+                    }
+                }
+
+                if format == "json" {
+                    // machine-readable：直接输出原始 JSON 到 stdout
+                    println!("{}", text);
+                } else {
+                    // pretty 模式：按事件类型格式化输出
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        print_event_pretty(&v);
+                    } else {
+                        println!("{}", text);
+                    }
+                }
+            }
+            Ok(Message::Close(_)) => {
+                eprintln!("Server closed connection.");
+                break;
+            }
+            Err(e) => {
+                eprintln!("WebSocket error: {}", e);
+                break;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// pretty 模式下格式化输出一条 WsEvent。
+///
+/// 输出规则（便于 agent 脚本解析）：
+/// - completed → println!（stdout）：agent 只需捕获 stdout
+/// - 其余事件  → eprintln!（stderr）：人类可读的状态信息，不干扰管道
+fn print_event_pretty(v: &serde_json::Value) {
+    let event = v["event"].as_str().unwrap_or("unknown");
+    match event {
+        "transfer_started" => eprintln!(
+            "[--> started ] {} ({} bytes) from {}",
+            v["filename"].as_str().unwrap_or("?"),
+            v["size"].as_u64().unwrap_or(0),
+            v["sender_ip"].as_str().unwrap_or("?"),
+        ),
+        "progress" => {
+            // 进度事件默认静默（避免刷屏）；只在 verbose 模式下打印
+        }
+        "completed" => {
+            let sha = v["sha256"].as_str().unwrap_or("");
+            let sha_short = &sha[..sha.len().min(8)];
+            println!(
+                "[completed  ] {} ({} bytes) sha256={}",
+                v["filename"].as_str().unwrap_or("?"),
+                v["size"].as_u64().unwrap_or(0),
+                sha_short,
+            );
+        }
+        "failed" => eprintln!(
+            "[   failed  ] {} reason={}",
+            v["filename"].as_str().unwrap_or("?"),
+            v["reason"].as_str().unwrap_or("?"),
+        ),
+        _ => println!("[{}] {}", event, v),
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+
+    #[test]
+    fn test_build_ws_url_bare_host_port() {
+        assert_eq!(build_ws_url("localhost:7788"), "ws://localhost:7788/ws");
+    }
+
+    #[test]
+    fn test_build_ws_url_already_ws_scheme() {
+        assert_eq!(
+            build_ws_url("ws://myhost:9000/ws"),
+            "ws://myhost:9000/ws"
+        );
+    }
+
+    #[test]
+    fn test_build_ws_url_wss_scheme() {
+        assert_eq!(
+            build_ws_url("wss://myhost:443/ws"),
+            "wss://myhost:443/ws"
+        );
+    }
+
+    #[test]
+    fn test_build_ws_url_trailing_slash_stripped() {
+        assert_eq!(
+            build_ws_url("192.168.1.10:7788/"),
+            "ws://192.168.1.10:7788/ws"
+        );
+    }
 }
