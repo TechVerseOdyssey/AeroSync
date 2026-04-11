@@ -1,3 +1,4 @@
+use crate::auth::{AuthConfig, AuthManager, AuthMiddleware};
 use crate::{AeroSyncError, Result};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -12,23 +13,26 @@ pub struct ServerConfig {
     pub quic_port: u16,
     pub bind_address: String,
     pub receive_directory: PathBuf,
-    pub max_file_size: u64, // bytes
+    pub max_file_size: u64,
     pub allow_overwrite: bool,
     pub enable_http: bool,
     pub enable_quic: bool,
+    /// 认证配置，None 表示不启用认证
+    pub auth: Option<AuthConfig>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            http_port: 8080,
-            quic_port: 4433,
+            http_port: 7788,
+            quic_port: 7789,
             bind_address: "0.0.0.0".to_string(),
-            receive_directory: PathBuf::from("./received_files"),
-            max_file_size: 1024 * 1024 * 1024, // 1GB
+            receive_directory: PathBuf::from("./received"),
+            max_file_size: 100 * 1024 * 1024 * 1024, // 100GB
             allow_overwrite: false,
             enable_http: true,
             enable_quic: true,
+            auth: None,
         }
     }
 }
@@ -39,8 +43,9 @@ pub struct ReceivedFile {
     pub original_name: String,
     pub saved_path: PathBuf,
     pub size: u64,
+    pub sha256: Option<String>,
     pub received_at: std::time::SystemTime,
-    pub sender_info: Option<String>,
+    pub sender_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,95 +76,82 @@ impl FileReceiver {
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        let config = self.config.read().await;
-        
-        tracing::info!("Starting file receiver server...");
-        tracing::info!("Configuration:");
-        tracing::info!("  - HTTP port: {}", config.http_port);
-        tracing::info!("  - QUIC port: {}", config.quic_port);
-        tracing::info!("  - Bind address: {}", config.bind_address);
-        tracing::info!("  - Receive directory: {}", config.receive_directory.display());
-        tracing::info!("  - Max file size: {} MB", config.max_file_size / (1024 * 1024));
-        tracing::info!("  - Allow overwrite: {}", config.allow_overwrite);
-        tracing::info!("  - HTTP enabled: {}", config.enable_http);
-        tracing::info!("  - QUIC enabled: {}", config.enable_quic);
-        
-        // Ensure receive directory exists
-        tracing::info!("Creating receive directory: {}", config.receive_directory.display());
+        let config = self.config.read().await.clone();
+
+        tracing::info!(
+            "Starting file receiver: HTTP={} QUIC={} dir={}",
+            config.http_port,
+            config.quic_port,
+            config.receive_directory.display()
+        );
+
         tokio::fs::create_dir_all(&config.receive_directory).await?;
-        tracing::info!("Receive directory created successfully");
-        
         *self.status.write().await = ServerStatus::Starting;
-        
-        // Start HTTP server if enabled
+
+        // 构建 AuthManager（如果配置了认证）
+        let auth_manager = config
+            .auth
+            .clone()
+            .map(|auth_cfg| {
+                AuthManager::new(auth_cfg)
+                    .map(|m| Arc::new(m))
+                    .map_err(|e| tracing::warn!("Auth init failed: {}", e))
+                    .ok()
+            })
+            .flatten();
+
         if config.enable_http {
-            let http_config = config.clone();
+            let http_cfg = config.clone();
             let status = Arc::clone(&self.status);
             let received_files = Arc::clone(&self.received_files);
-            
+            let auth = auth_manager.clone();
+
             let handle = tokio::spawn(async move {
-                tracing::info!("HTTP server task started");
-                if let Err(e) = start_http_server(http_config, status.clone(), received_files).await {
+                if let Err(e) =
+                    start_http_server(http_cfg, status.clone(), received_files, auth).await
+                {
                     tracing::error!("HTTP server error: {}", e);
-                    tracing::error!("HTTP server task will terminate");
                     *status.write().await = ServerStatus::Error(e.to_string());
-                } else {
-                    tracing::info!("HTTP server task completed normally");
                 }
             });
-            
             self.http_handle = Some(handle);
         }
-        
-        // Start QUIC server if enabled
+
         if config.enable_quic {
-            let quic_config = config.clone();
+            let quic_cfg = config.clone();
             let status = Arc::clone(&self.status);
             let received_files = Arc::clone(&self.received_files);
-            
+            let auth = auth_manager.clone();
+
             let handle = tokio::spawn(async move {
-                tracing::info!("QUIC server task started");
-                if let Err(e) = start_quic_server(quic_config, status.clone(), received_files).await {
+                if let Err(e) =
+                    start_quic_server(quic_cfg, status.clone(), received_files, auth).await
+                {
                     tracing::error!("QUIC server error: {}", e);
-                    tracing::error!("QUIC server task will terminate");
                     *status.write().await = ServerStatus::Error(e.to_string());
-                } else {
-                    tracing::info!("QUIC server task completed normally");
                 }
             });
-            
             self.quic_handle = Some(handle);
         }
-        
+
         *self.status.write().await = ServerStatus::Running;
-        
-        tracing::info!("File receiver started on HTTP:{} QUIC:{}", 
-                      config.http_port, config.quic_port);
-        
+        tracing::info!(
+            "File receiver started on HTTP:{} QUIC:{}",
+            config.http_port,
+            config.quic_port
+        );
         Ok(())
     }
 
     pub async fn stop(&mut self) -> Result<()> {
-        tracing::info!("Stopping file receiver server...");
         *self.status.write().await = ServerStatus::Stopped;
-        
-        if let Some(handle) = self.http_handle.take() {
-            tracing::info!("Stopping HTTP server task");
-            handle.abort();
-            tracing::debug!("HTTP server task aborted");
-        } else {
-            tracing::debug!("No HTTP server task to stop");
+        if let Some(h) = self.http_handle.take() {
+            h.abort();
         }
-        
-        if let Some(handle) = self.quic_handle.take() {
-            tracing::info!("Stopping QUIC server task");
-            handle.abort();
-            tracing::debug!("QUIC server task aborted");
-        } else {
-            tracing::debug!("No QUIC server task to stop");
+        if let Some(h) = self.quic_handle.take() {
+            h.abort();
         }
-        
-        tracing::info!("✅ File receiver stopped successfully");
+        tracing::info!("File receiver stopped");
         Ok(())
     }
 
@@ -176,106 +168,70 @@ impl FileReceiver {
         Ok(())
     }
 
-    pub async fn update_config_and_restart(&mut self, new_config: ServerConfig) -> Result<()> {
-        // Check if server is currently running
-        let was_running = matches!(self.get_status().await, ServerStatus::Running);
-        
-        tracing::info!("Updating server configuration...");
-        tracing::info!("Server was running: {}", was_running);
-        
-        // Stop the server if it's running
-        if was_running {
-            tracing::info!("Stopping server for configuration update");
-            self.stop().await?;
-        }
-        
-        // Log configuration changes
-        let old_config = self.config.read().await.clone();
-        tracing::info!("Configuration changes:");
-        if old_config.receive_directory != new_config.receive_directory {
-            tracing::info!("  - Receive directory: {} -> {}", 
-                old_config.receive_directory.display(), new_config.receive_directory.display());
-        }
-        if old_config.http_port != new_config.http_port {
-            tracing::info!("  - HTTP port: {} -> {}", old_config.http_port, new_config.http_port);
-        }
-        if old_config.quic_port != new_config.quic_port {
-            tracing::info!("  - QUIC port: {} -> {}", old_config.quic_port, new_config.quic_port);
-        }
-        if old_config.max_file_size != new_config.max_file_size {
-            tracing::info!("  - Max file size: {} MB -> {} MB", 
-                old_config.max_file_size / (1024 * 1024), new_config.max_file_size / (1024 * 1024));
-        }
-        if old_config.allow_overwrite != new_config.allow_overwrite {
-            tracing::info!("  - Allow overwrite: {} -> {}", old_config.allow_overwrite, new_config.allow_overwrite);
-        }
-        
-        // Update the configuration
-        *self.config.write().await = new_config;
-        tracing::info!("Configuration updated in memory");
-        
-        // Restart the server if it was running
-        if was_running {
-            tracing::info!("Restarting server with new configuration");
-            self.start().await?;
-            tracing::info!("✅ Server restarted successfully with new configuration");
-        } else {
-            tracing::info!("✅ Configuration updated (server was not running)");
-        }
-        
-        Ok(())
-    }
-
     pub async fn get_received_files(&self) -> Vec<ReceivedFile> {
         self.received_files.read().await.clone()
     }
 
-    pub async fn clear_received_files(&self) {
-        self.received_files.write().await.clear();
-    }
-
     pub async fn get_server_urls(&self) -> Vec<String> {
         let config = self.config.read().await;
+        let host = if config.bind_address == "0.0.0.0" {
+            "localhost"
+        } else {
+            &config.bind_address
+        };
         let mut urls = Vec::new();
-        
         if config.enable_http {
-            urls.push(format!("http://{}:{}/upload", 
-                             if config.bind_address == "0.0.0.0" { "localhost" } else { &config.bind_address },
-                             config.http_port));
+            urls.push(format!("http://{}:{}/upload", host, config.http_port));
         }
-        
         if config.enable_quic {
-            urls.push(format!("quic://{}:{}", 
-                             if config.bind_address == "0.0.0.0" { "localhost" } else { &config.bind_address },
-                             config.quic_port));
+            urls.push(format!("quic://{}:{}", host, config.quic_port));
         }
-        
         urls
     }
 }
+
+// ─────────────────────────────── HTTP server ────────────────────────────────
 
 async fn start_http_server(
     config: ServerConfig,
     status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    auth_manager: Option<Arc<AuthManager>>,
 ) -> Result<()> {
     use warp::Filter;
-    
+
     let receive_dir = config.receive_directory.clone();
     let max_size = config.max_file_size;
     let allow_overwrite = config.allow_overwrite;
-    
-    // Clone for the filter
-    let received_files_filter = received_files.clone();
-    
+
+    // 认证中间件（可选）
+    let auth_mw = auth_manager.map(|m| Arc::new(AuthMiddleware::new(m)));
+
+    // ── POST /upload ────────────────────────────────────────────────────────
+    let auth_mw_upload = auth_mw.clone();
+    let received_files_upload = received_files.clone();
+    let receive_dir_upload = receive_dir.clone();
+
     let upload = warp::path("upload")
         .and(warp::post())
+        .and(warp::header::optional::<String>("authorization"))
+        .and(warp::header::optional::<String>("x-file-hash"))
+        .and(warp::addr::remote())
         .and(warp::multipart::form().max_length(max_size))
-        .and(warp::any().map(move || receive_dir.clone()))
+        .and(warp::any().map(move || receive_dir_upload.clone()))
         .and(warp::any().map(move || allow_overwrite))
-        .and(warp::any().map(move || received_files_filter.clone()))
+        .and(warp::any().map(move || received_files_upload.clone()))
+        .and(warp::any().map(move || auth_mw_upload.clone()))
         .and_then(handle_file_upload);
 
+    // ── GET /health ──────────────────────────────────────────────────────────
+    let received_files_health = received_files.clone();
+    let health = warp::path("health")
+        .and(warp::get())
+        .and(warp::any().map(move || received_files_health.clone()))
+        .and_then(handle_health);
+
+    // ── GET /status ──────────────────────────────────────────────────────────
     let status_route = warp::path("status")
         .and(warp::get())
         .and(warp::any().map(move || received_files.clone()))
@@ -283,259 +239,263 @@ async fn start_http_server(
 
     let cors = warp::cors()
         .allow_any_origin()
-        .allow_headers(vec!["content-type"])
+        .allow_headers(vec!["content-type", "authorization", "x-file-hash"])
         .allow_methods(vec!["GET", "POST", "OPTIONS"]);
 
-    let routes = upload.or(status_route).with(cors);
+    let routes = upload.or(health).or(status_route).with(cors);
 
     let addr: SocketAddr = format!("{}:{}", config.bind_address, config.http_port)
         .parse()
-        .map_err(|e| {
-            tracing::error!("Invalid HTTP server address: {}:{} - {}", config.bind_address, config.http_port, e);
-            AeroSyncError::InvalidConfig(format!("Invalid address: {}", e))
-        })?;
+        .map_err(|e| AeroSyncError::InvalidConfig(format!("Invalid address: {}", e)))?;
 
-    tracing::info!("Starting HTTP server on {}", addr);
-    tracing::info!("HTTP server configuration:");
-    tracing::info!("  - Receive directory: {}", config.receive_directory.display());
-    tracing::info!("  - Max file size: {} MB", config.max_file_size / (1024 * 1024));
-    tracing::info!("  - Allow overwrite: {}", config.allow_overwrite);
-    
-    tracing::info!("HTTP server is ready to accept file uploads");
-    warp::serve(routes)
-        .run(addr)
-        .await;
-    
-    tracing::info!("HTTP server has stopped");
-
+    tracing::info!("HTTP server listening on {}", addr);
+    warp::serve(routes).run(addr).await;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_file_upload(
+    auth_header: Option<String>,
+    expected_hash: Option<String>,
+    remote_addr: Option<SocketAddr>,
     mut form: warp::multipart::FormData,
     receive_dir: PathBuf,
     allow_overwrite: bool,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
-) -> std::result::Result<impl warp::Reply, warp::Rejection> {
-    use futures::TryStreamExt;
-    use tokio::io::AsyncWriteExt;
+    auth_mw: Option<Arc<AuthMiddleware>>,
+) -> std::result::Result<warp::reply::Response, warp::Rejection> {
     use bytes::Buf;
-    
-    tracing::info!("HTTP: Received file upload request");
-    tracing::debug!("HTTP: Receive directory: {}", receive_dir.display());
-    tracing::debug!("HTTP: Allow overwrite: {}", allow_overwrite);
-    
-    while let Some(part) = form.try_next().await.map_err(|e| {
-        tracing::error!("HTTP: Failed to read multipart form: {}", e);
-        warp::reject::reject()
-    })? {
-        tracing::debug!("HTTP: Processing form part: {}", part.name());
-        
-        if part.name() == "file" {
-            let filename = part.filename()
-                .unwrap_or("unknown_file")
-                .to_string();
-            
-            tracing::info!("HTTP: Processing file upload: '{}'", filename);
-            
-            let file_id = Uuid::new_v4();
-            let safe_filename = sanitize_filename(&filename);
-            let file_path = get_unique_file_path(&receive_dir, &safe_filename, allow_overwrite);
-            
-            tracing::info!("HTTP: File ID: {}", file_id);
-            tracing::info!("HTTP: Safe filename: '{}'", safe_filename);
-            tracing::info!("HTTP: Target file path: {}", file_path.display());
-            
-            // Ensure the receive directory exists
-            tracing::debug!("HTTP: Ensuring receive directory exists: {}", receive_dir.display());
-            if let Err(e) = tokio::fs::create_dir_all(&receive_dir).await {
-                tracing::error!("HTTP: Failed to create receive directory '{}': {}", receive_dir.display(), e);
+    use futures::TryStreamExt;
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+    use warp::Reply;
+
+    let client_ip = remote_addr
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // ── 认证 ──────────────────────────────────────────────────────────────────
+    if let Some(ref mw) = auth_mw {
+        let auth_str = auth_header.as_deref();
+        match mw.authenticate_http_request(auth_str, &client_ip) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!("HTTP: Unauthorized upload attempt from {}", client_ip);
+                let resp = mw.unauthorized_response();
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "error": resp.message
+                    })),
+                    warp::http::StatusCode::UNAUTHORIZED,
+                ).into_response());
+            }
+            Err(e) => {
+                tracing::error!("HTTP: Auth error: {}", e);
                 return Err(warp::reject::reject());
             }
-            tracing::debug!("HTTP: Receive directory confirmed");
-            
-            // Write file
-            tracing::info!("HTTP: Creating file: {}", file_path.display());
-            let mut file = tokio::fs::File::create(&file_path).await
-                .map_err(|e| {
-                    tracing::error!("HTTP: Failed to create file '{}': {}", file_path.display(), e);
-                    warp::reject::reject()
-                })?;
-            tracing::debug!("HTTP: File created successfully");
-            
-            let mut size = 0u64;
-            let mut stream = part.stream();
-            let mut chunk_count = 0;
-            
-            tracing::info!("HTTP: Starting file data transfer");
-            
-            while let Some(chunk) = stream.try_next().await.map_err(|e| {
-                tracing::error!("HTTP: Failed to read chunk: {}", e);
-                warp::reject::reject()
-            })? {
-                let chunk_bytes = chunk.chunk();
-                let chunk_size = chunk_bytes.len() as u64;
-                size += chunk_size;
-                chunk_count += 1;
-                
-                tracing::debug!("HTTP: Writing chunk {} ({} bytes, total: {} bytes)", chunk_count, chunk_size, size);
-                
-                file.write_all(chunk_bytes).await.map_err(|e| {
-                    tracing::error!("HTTP: Failed to write chunk to file: {}", e);
-                    warp::reject::reject()
-                })?;
-            }
-            
-            tracing::info!("HTTP: File data transfer completed. Total size: {} bytes in {} chunks", size, chunk_count);
-            
-            file.flush().await.map_err(|e| {
-                tracing::error!("HTTP: Failed to flush file: {}", e);
-                warp::reject::reject()
-            })?;
-            tracing::debug!("HTTP: File flushed to disk");
-            
-            // Record received file
-            let received_file = ReceivedFile {
-                id: file_id,
-                original_name: filename.clone(),
-                saved_path: file_path.clone(),
-                size,
-                received_at: std::time::SystemTime::now(),
-                sender_info: None,
-            };
-            
-            tracing::info!("HTTP: Recording received file in memory");
-            received_files.write().await.push(received_file);
-            tracing::debug!("HTTP: File record added to received files list");
-            
-            tracing::info!("HTTP: ✅ File upload completed successfully!");
-            tracing::info!("HTTP:   - Original name: '{}'", filename);
-            tracing::info!("HTTP:   - Safe name: '{}'", safe_filename);
-            tracing::info!("HTTP:   - Size: {} bytes ({:.2} KB)", size, size as f64 / 1024.0);
-            tracing::info!("HTTP:   - Saved to: {}", file_path.display());
-            tracing::info!("HTTP:   - File ID: {}", file_id);
-            
-            return Ok(warp::reply::json(&serde_json::json!({
-                "success": true,
-                "file_id": file_id,
-                "filename": safe_filename,
-                "size": size,
-                "path": file_path.to_string_lossy()
-            })));
         }
     }
-    
+
+    // ── 接收文件 ──────────────────────────────────────────────────────────────
+    while let Some(part) = form.try_next().await.map_err(|_| warp::reject::reject())? {
+        if part.name() != "file" {
+            continue;
+        }
+
+        let filename = part.filename().unwrap_or("unknown").to_string();
+        let file_id = Uuid::new_v4();
+        let safe_name = sanitize_filename(&filename);
+        let file_path = get_unique_file_path(&receive_dir, &safe_name, allow_overwrite);
+
+        tokio::fs::create_dir_all(&receive_dir)
+            .await
+            .map_err(|_| warp::reject::reject())?;
+
+        let mut file = tokio::fs::File::create(&file_path)
+            .await
+            .map_err(|_| warp::reject::reject())?;
+
+        let mut size = 0u64;
+        let mut hasher = Sha256::new();
+        let mut stream = part.stream();
+
+        while let Some(chunk) = stream.try_next().await.map_err(|_| warp::reject::reject())? {
+            let data = chunk.chunk();
+            hasher.update(data);
+            size += data.len() as u64;
+            file.write_all(data)
+                .await
+                .map_err(|_| warp::reject::reject())?;
+        }
+        file.flush().await.map_err(|_| warp::reject::reject())?;
+
+        let actual_hash = hex::encode(hasher.finalize());
+
+        // ── SHA-256 校验 ─────────────────────────────────────────────────────
+        if let Some(ref expected) = expected_hash {
+            if &actual_hash != expected {
+                tracing::error!(
+                    "HTTP: Hash mismatch for '{}': expected={} actual={}",
+                    filename,
+                    expected,
+                    actual_hash
+                );
+                let _ = tokio::fs::remove_file(&file_path).await;
+                use warp::Reply;
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "error": "SHA-256 mismatch",
+                        "expected": expected,
+                        "actual": actual_hash
+                    })),
+                    warp::http::StatusCode::BAD_REQUEST,
+                ).into_response());
+            }
+        }
+
+        let received_file = ReceivedFile {
+            id: file_id,
+            original_name: filename.clone(),
+            saved_path: file_path.clone(),
+            size,
+            sha256: Some(actual_hash.clone()),
+            received_at: std::time::SystemTime::now(),
+            sender_ip: Some(client_ip.clone()),
+        };
+        received_files.write().await.push(received_file);
+
+        tracing::info!(
+            "HTTP: Received '{}' ({} bytes) sha256={} from {}",
+            filename,
+            size,
+            &actual_hash[..8],
+            client_ip
+        );
+
+        use warp::Reply;
+        return Ok(warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({
+                "success": true,
+                "file_id": file_id,
+                "filename": safe_name,
+                "size": size,
+                "sha256": actual_hash,
+            })),
+            warp::http::StatusCode::OK,
+        ).into_response());
+    }
+
     Err(warp::reject::reject())
+}
+
+async fn handle_health(
+    received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+) -> std::result::Result<impl warp::Reply, warp::Rejection> {
+    let count = received_files.read().await.len();
+    Ok(warp::reply::json(&serde_json::json!({
+        "status": "ok",
+        "received_files": count,
+    })))
 }
 
 async fn handle_status_request(
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let files = received_files.read().await;
-    let total_files = files.len();
     let total_size: u64 = files.iter().map(|f| f.size).sum();
-    
     Ok(warp::reply::json(&serde_json::json!({
         "status": "running",
-        "total_files": total_files,
+        "total_files": files.len(),
         "total_size": total_size,
         "files": files.iter().map(|f| serde_json::json!({
             "id": f.id,
             "name": f.original_name,
             "size": f.size,
-            "received_at": f.received_at.duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default().as_secs()
+            "sha256": f.sha256,
+            "received_at": f.received_at
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
         })).collect::<Vec<_>>()
     })))
 }
 
+// ─────────────────────────────── QUIC server ────────────────────────────────
+
 async fn start_quic_server(
     config: ServerConfig,
-    _status: Arc<RwLock<ServerStatus>>,
+    status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    auth_manager: Option<Arc<AuthManager>>,
 ) -> Result<()> {
     use quinn::Endpoint;
-    
-    // Create server configuration
+
     let server_config = configure_quic_server()?;
-    
     let addr: SocketAddr = format!("{}:{}", config.bind_address, config.quic_port)
         .parse()
-        .map_err(|e| {
-            tracing::error!("Invalid QUIC server address: {}:{} - {}", config.bind_address, config.quic_port, e);
-            AeroSyncError::InvalidConfig(format!("Invalid QUIC address: {}", e))
-        })?;
-    
+        .map_err(|e| AeroSyncError::InvalidConfig(format!("Invalid QUIC address: {}", e)))?;
+
     let endpoint = Endpoint::server(server_config, addr)
-        .map_err(|e| {
-            tracing::error!("Failed to create QUIC endpoint: {}", e);
-            AeroSyncError::Network(format!("Failed to create QUIC endpoint: {}", e))
-        })?;
-    
+        .map_err(|e| AeroSyncError::Network(format!("Failed to create QUIC endpoint: {}", e)))?;
+
     tracing::info!("QUIC server listening on {}", addr);
-    tracing::info!("QUIC server configuration:");
-    tracing::info!("  - Receive directory: {}", config.receive_directory.display());
-    tracing::info!("  - Max file size: {} MB", config.max_file_size / (1024 * 1024));
-    tracing::info!("  - Allow overwrite: {}", config.allow_overwrite);
-    tracing::info!("QUIC server is ready to accept connections");
-    
+
     while let Some(conn) = endpoint.accept().await {
-        tracing::debug!("QUIC: Incoming connection attempt");
-        let connection = conn.await
-            .map_err(|e| {
-                tracing::error!("QUIC: Connection failed: {}", e);
-                AeroSyncError::Network(format!("Connection failed: {}", e))
-            })?;
-        
-        let remote_addr = connection.remote_address();
-        tracing::info!("QUIC: New connection accepted from {}", remote_addr);
-        
+        let connection = match conn.await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("QUIC: Connection handshake failed: {}", e);
+                continue;
+            }
+        };
+
+        let remote = connection.remote_address();
         let receive_dir = config.receive_directory.clone();
         let allow_overwrite = config.allow_overwrite;
         let max_size = config.max_file_size;
         let files = received_files.clone();
-        
+        let auth = auth_manager.clone();
+        let _status = status.clone();
+
         tokio::spawn(async move {
-            if let Err(e) = handle_quic_connection(connection, receive_dir, allow_overwrite, max_size, files).await {
-                tracing::error!("QUIC connection error from {}: {}", remote_addr, e);
-            } else {
-                tracing::info!("QUIC: Connection from {} completed successfully", remote_addr);
+            if let Err(e) = handle_quic_connection(
+                connection,
+                receive_dir,
+                allow_overwrite,
+                max_size,
+                files,
+                auth,
+            )
+            .await
+            {
+                tracing::error!("QUIC connection error from {}: {}", remote, e);
             }
         });
     }
-    
-    tracing::info!("QUIC server has stopped accepting connections");
-    
+
     Ok(())
 }
 
 fn configure_quic_server() -> Result<quinn::ServerConfig> {
     use rustls::{Certificate, PrivateKey, ServerConfig as TlsServerConfig};
-    use std::sync::Arc;
-    
-    // Generate self-signed certificate for development
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
         .map_err(|e| AeroSyncError::System(format!("Failed to generate certificate: {}", e)))?;
-    
-    let cert_der = cert.serialize_der()
+
+    let cert_der = cert
+        .serialize_der()
         .map_err(|e| AeroSyncError::System(format!("Failed to serialize certificate: {}", e)))?;
-    
     let key_der = cert.serialize_private_key_der();
-    
-    let cert_chain = vec![Certificate(cert_der)];
-    let private_key = PrivateKey(key_der);
-    
+
     let mut tls_config = TlsServerConfig::builder()
         .with_safe_defaults()
         .with_no_client_auth()
-        .with_single_cert(cert_chain, private_key)
+        .with_single_cert(vec![Certificate(cert_der)], PrivateKey(key_der))
         .map_err(|e| AeroSyncError::System(format!("TLS config error: {}", e)))?;
-    
+
     tls_config.alpn_protocols = vec![b"aerosync".to_vec()];
-    
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(tls_config));
-    
-    Ok(server_config)
+
+    Ok(quinn::ServerConfig::with_crypto(Arc::new(tls_config)))
 }
 
 async fn handle_quic_connection(
@@ -544,228 +504,191 @@ async fn handle_quic_connection(
     allow_overwrite: bool,
     max_size: u64,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    auth_manager: Option<Arc<AuthManager>>,
 ) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    
-    tracing::info!("QUIC: New connection established from {}", connection.remote_address());
-    tracing::debug!("QUIC: Receive directory: {}", receive_dir.display());
-    tracing::debug!("QUIC: Allow overwrite: {}", allow_overwrite);
-    tracing::debug!("QUIC: Max file size: {} MB", max_size / (1024 * 1024));
-    
-    while let Ok((mut send_stream, mut recv_stream)) = connection.accept_bi().await {
-        tracing::debug!("QUIC: New bidirectional stream opened");
-        // Read the request header
-        tracing::debug!("QUIC: Reading request header");
-        let mut header_buf = [0u8; 1024];
-        let header_len = recv_stream.read(&mut header_buf).await
-            .map_err(|e| {
-                tracing::error!("QUIC: Failed to read header: {}", e);
-                AeroSyncError::Network(format!("Failed to read header: {}", e))
-            })?
-            .unwrap_or(0);
-        
-        let header = String::from_utf8_lossy(&header_buf[..header_len]);
-        tracing::info!("QUIC: Received header: '{}'", header.trim());
-        
-        if header.starts_with("UPLOAD:") {
-            tracing::info!("QUIC: Processing upload request");
-            
-            // Find the end of the header line
-            let header_end = match header.find('\n') {
-                Some(pos) => pos,
-                None => {
-                    tracing::warn!("QUIC: Incomplete header received");
-                    continue;
-                }
-            };
-            
-            let header_line = &header[..header_end];
-            let parts: Vec<&str> = header_line.splitn(3, ':').collect();
-            
-            if parts.len() >= 3 {
-                let filename = parts[1];
-                let file_size: u64 = parts[2].trim().parse().unwrap_or(0);
-                
-                tracing::info!("QUIC: Upload request details:");
-                tracing::info!("QUIC:   - Filename: '{}'", filename);
-                tracing::info!("QUIC:   - File size: {} bytes ({:.2} KB)", file_size, file_size as f64 / 1024.0);
-                
-                if file_size > max_size {
-                    let error_msg = format!("File too large: {} > {}", file_size, max_size);
-                    tracing::warn!("QUIC: {}", error_msg);
-                    let _ = send_stream.write_all(format!("ERROR:{}", error_msg).as_bytes()).await;
-                    continue;
-                }
-                
-                tracing::info!("QUIC: File size check passed");
-                
-                // Capture any initial data that was read along with the header
-                let initial_data = if header_end + 1 < header_len {
-                    Some(header_buf[header_end + 1..header_len].to_vec())
-                } else {
-                    None
-                };
-                
-                if let Some(ref data) = initial_data {
-                    tracing::debug!("QUIC: Captured {} bytes of initial file data from header buffer", data.len());
-                }
-                
-                // Handle file upload
-                tracing::info!("QUIC: Starting file upload process");
-                match handle_quic_file_upload(
-                    &mut recv_stream,
-                    &mut send_stream,
-                    filename,
-                    file_size,
-                    &receive_dir,
-                    allow_overwrite,
-                    received_files.clone(),
-                    initial_data,
-                ).await {
-                    Ok(_) => {
-                        tracing::info!("QUIC: ✅ File upload completed successfully");
-                        let _ = send_stream.write_all(b"SUCCESS").await;
-                    }
-                    Err(e) => {
-                        let error_msg = format!("Upload failed: {}", e);
-                        tracing::error!("QUIC: ❌ {}", error_msg);
-                        let _ = send_stream.write_all(format!("ERROR:{}", error_msg).as_bytes()).await;
-                    }
-                }
-            } else {
-                tracing::warn!("QUIC: Invalid upload header format: '{}'", header.trim());
-            }
-        } else {
-            tracing::warn!("QUIC: Unknown request type: '{}'", header.trim());
-        }
-        
-        let _ = send_stream.finish().await;
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+
+    let remote_ip = connection.remote_address().ip().to_string();
+
+    // QUIC 连接层认证：读取第一条消息作为 Token
+    if let Some(ref auth) = auth_manager {
+        // Auth will be validated per-stream below
+        tracing::debug!("QUIC: Auth enabled for connection from {}", remote_ip);
     }
-    
+
+    while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+        let mut header_buf = vec![0u8; 4096];
+        let header_len = recv
+            .read(&mut header_buf)
+            .await
+            .map_err(|e| AeroSyncError::Network(e.to_string()))?
+            .unwrap_or(0);
+
+        let header = String::from_utf8_lossy(&header_buf[..header_len]);
+        let header_str = header.trim_end_matches('\n').trim_end_matches('\r');
+
+        // 格式: UPLOAD:<filename>:<size>[:<token>]
+        if !header_str.starts_with("UPLOAD:") {
+            tracing::warn!("QUIC: Unknown command: {}", &header_str[..header_str.len().min(64)]);
+            continue;
+        }
+
+        let parts: Vec<&str> = header_str.splitn(5, ':').collect();
+        if parts.len() < 3 {
+            tracing::warn!("QUIC: Malformed UPLOAD header");
+            continue;
+        }
+
+        let filename = parts[1];
+        let file_size: u64 = parts[2].trim().parse().unwrap_or(0);
+        let token = parts.get(3).map(|t| *t);
+
+        // 认证（若启用）
+        if let Some(ref auth) = auth_manager {
+            let auth_mw = AuthMiddleware::new(Arc::clone(auth));
+            let token_header = token.map(|t| format!("Bearer {}", t));
+            match auth_mw.authenticate_http_request(token_header.as_deref(), &remote_ip) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!("QUIC: Unauthorized from {}", remote_ip);
+                    let _ = send.write_all(b"ERROR:Unauthorized").await;
+                    let _ = send.finish().await;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!("QUIC: Auth error: {}", e);
+                    continue;
+                }
+            }
+        }
+
+        if file_size > max_size {
+            let _ = send
+                .write_all(format!("ERROR:File too large: {}", file_size).as_bytes())
+                .await;
+            let _ = send.finish().await;
+            continue;
+        }
+
+        // 找到 header 结束位置，保存 header 后的初始数据
+        let header_end_in_buf = header_buf[..header_len]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(header_len);
+        let initial_data = if header_end_in_buf < header_len {
+            Some(header_buf[header_end_in_buf..header_len].to_vec())
+        } else {
+            None
+        };
+
+        match handle_quic_file_upload(
+            &mut recv,
+            filename,
+            file_size,
+            &receive_dir,
+            allow_overwrite,
+            received_files.clone(),
+            initial_data,
+            &remote_ip,
+        )
+        .await
+        {
+            Ok(_) => {
+                let _ = send.write_all(b"SUCCESS").await;
+                tracing::info!("QUIC: Sent SUCCESS response for '{}'", filename);
+            }
+            Err(e) => {
+                let _ = send
+                    .write_all(format!("ERROR:{}", e).as_bytes())
+                    .await;
+            }
+        }
+        let _ = send.finish().await;
+    }
+
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_quic_file_upload(
-    recv_stream: &mut quinn::RecvStream,
-    _send_stream: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
     filename: &str,
     expected_size: u64,
     receive_dir: &PathBuf,
     allow_overwrite: bool,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     initial_data: Option<Vec<u8>>,
+    sender_ip: &str,
 ) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    
-    tracing::info!("QUIC: Processing file upload: '{}'", filename);
-    
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+
     let file_id = Uuid::new_v4();
-    let safe_filename = sanitize_filename(filename);
-    let file_path = get_unique_file_path(receive_dir, &safe_filename, allow_overwrite);
-    
-    tracing::info!("QUIC: File ID: {}", file_id);
-    tracing::info!("QUIC: Safe filename: '{}'", safe_filename);
-    tracing::info!("QUIC: Target file path: {}", file_path.display());
-    tracing::info!("QUIC: Expected size: {} bytes", expected_size);
-    
-    // Ensure the receive directory exists
-    tracing::debug!("QUIC: Ensuring receive directory exists: {}", receive_dir.display());
+    let safe_name = sanitize_filename(filename);
+    let file_path = get_unique_file_path(receive_dir, &safe_name, allow_overwrite);
+
     tokio::fs::create_dir_all(receive_dir).await?;
-    tracing::debug!("QUIC: Receive directory confirmed");
-    
-    // Create and write file
-    tracing::info!("QUIC: Creating file: {}", file_path.display());
     let mut file = tokio::fs::File::create(&file_path).await?;
-    tracing::debug!("QUIC: File created successfully");
-    
-    let mut total_received = 0u64;
-    let mut chunk_count = 0;
-    
-    // Write initial data if present
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+
+    // 先写入 header buffer 中剩余的初始数据
     if let Some(data) = initial_data {
         if !data.is_empty() {
+            hasher.update(&data);
             file.write_all(&data).await?;
-            total_received += data.len() as u64;
-            tracing::debug!("QUIC: Wrote {} bytes of initial data", data.len());
-            
-             if total_received >= expected_size {
-                tracing::info!("QUIC: Expected file size reached with initial data, stopping transfer");
-                // Skip loop if done
-                // But we still need to flush and finish
-            }
+            total += data.len() as u64;
         }
     }
 
-    if total_received < expected_size {
-        let mut buffer = vec![0u8; 64 * 1024]; // 64KB buffer
-        tracing::info!("QUIC: Starting file data transfer loop");
-        
-        loop {
-            match recv_stream.read(&mut buffer).await {
-                Ok(Some(bytes_read)) => {
-                    total_received += bytes_read as u64;
-                    chunk_count += 1;
-                    
-                    tracing::debug!("QUIC: Received chunk {} ({} bytes, total: {} bytes, progress: {:.1}%)", 
-                        chunk_count, bytes_read, total_received, 
-                        (total_received as f64 / expected_size as f64) * 100.0);
-                    
-                    file.write_all(&buffer[..bytes_read]).await?;
-                    
-                    if total_received >= expected_size {
-                        tracing::info!("QUIC: Expected file size reached, stopping transfer");
-                        break;
-                    }
-                }
-                Ok(None) => {
-                    tracing::info!("QUIC: Stream ended, transfer complete");
-                    break; // Stream ended
-                }
-                Err(e) => {
-                    tracing::error!("QUIC: Read error: {}", e);
-                    return Err(AeroSyncError::Network(format!("Read error: {}", e)));
-                }
+    let mut buf = vec![0u8; 64 * 1024];
+    while total < expected_size {
+        match recv.read(&mut buf).await {
+            Ok(Some(n)) => {
+                hasher.update(&buf[..n]);
+                file.write_all(&buf[..n]).await?;
+                total += n as u64;
             }
+            Ok(None) => break,
+            Err(e) => return Err(AeroSyncError::Network(e.to_string())),
         }
-    } else {
-        tracing::info!("QUIC: Transfer completed with initial data only");
     }
-    
-    tracing::info!("QUIC: File data transfer completed. Received: {} bytes", total_received);
-    
-    tracing::debug!("QUIC: Flushing file to disk");
     file.flush().await?;
-    tracing::debug!("QUIC: File flushed successfully");
-    
-    // Verify file size
-    if total_received != expected_size {
-        tracing::warn!("QUIC: File size mismatch! Expected: {} bytes, Received: {} bytes", 
-            expected_size, total_received);
+
+    let actual_hash = hex::encode(hasher.finalize());
+
+    if total != expected_size {
+        tracing::warn!(
+            "QUIC: Size mismatch for '{}': expected={} actual={}",
+            filename,
+            expected_size,
+            total
+        );
     }
-    
-    // Record received file
-    let received_file = ReceivedFile {
+
+    received_files.write().await.push(ReceivedFile {
         id: file_id,
         original_name: filename.to_string(),
         saved_path: file_path.clone(),
-        size: total_received,
+        size: total,
+        sha256: Some(actual_hash.clone()),
         received_at: std::time::SystemTime::now(),
-        sender_info: None,
-    };
-    
-    tracing::info!("QUIC: Recording received file in memory");
-    received_files.write().await.push(received_file);
-    tracing::debug!("QUIC: File record added to received files list");
-    
-    tracing::info!("QUIC: ✅ File upload completed successfully!");
-    tracing::info!("QUIC:   - Original name: '{}'", filename);
-    tracing::info!("QUIC:   - Safe name: '{}'", safe_filename);
-    tracing::info!("QUIC:   - Size: {} bytes ({:.2} KB)", total_received, total_received as f64 / 1024.0);
-    tracing::info!("QUIC:   - Saved to: {}", file_path.display());
-    tracing::info!("QUIC:   - File ID: {}", file_id);
-    
+        sender_ip: Some(sender_ip.to_string()),
+    });
+
+    tracing::info!(
+        "QUIC: Received '{}' ({} bytes) sha256={} from {}",
+        filename,
+        total,
+        &actual_hash[..8],
+        sender_ip
+    );
     Ok(())
 }
+
+// ─────────────────────────────── helpers ────────────────────────────────────
 
 fn sanitize_filename(filename: &str) -> String {
     filename
@@ -780,46 +703,372 @@ fn sanitize_filename(filename: &str) -> String {
         .collect()
 }
 
-fn get_unique_file_path(receive_dir: &PathBuf, safe_filename: &str, allow_overwrite: bool) -> PathBuf {
-    let mut file_path = receive_dir.join(safe_filename);
-    
-    tracing::debug!("Generating file path for: '{}'", safe_filename);
-    tracing::debug!("Initial path: {}", file_path.display());
-    tracing::debug!("Allow overwrite: {}", allow_overwrite);
-    
-    if !allow_overwrite && file_path.exists() {
-        tracing::info!("File already exists, generating unique name");
-        let stem = file_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-        let ext = file_path.extension().unwrap_or_default().to_string_lossy().to_string();
-        let mut counter = 1;
-        
-        loop {
-            let new_name = if ext.is_empty() {
-                format!("{}_{}", stem, counter)
-            } else {
-                format!("{}_{}.{}", stem, counter, ext)
-            };
-            
-            file_path = receive_dir.join(&new_name);
-            tracing::debug!("Trying path: {}", file_path.display());
-            
-            if !file_path.exists() {
-                tracing::info!("Found unique filename: '{}'", new_name);
-                break;
-            }
-            counter += 1;
-            
-            if counter > 1000 {
-                tracing::warn!("Too many file name collisions, using counter {}", counter);
-                break;
-            }
-        }
-    } else if file_path.exists() {
-        tracing::info!("File exists but overwrite is allowed");
-    } else {
-        tracing::debug!("File does not exist, using original name");
+fn get_unique_file_path(
+    receive_dir: &PathBuf,
+    safe_name: &str,
+    allow_overwrite: bool,
+) -> PathBuf {
+    let mut path = receive_dir.join(safe_name);
+    if allow_overwrite || !path.exists() {
+        return path;
     }
-    
-    tracing::info!("Final file path: {}", file_path.display());
-    file_path
+    let stem = path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let ext = path
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    for i in 1..=9999 {
+        let new_name = if ext.is_empty() {
+            format!("{}_{}", stem, i)
+        } else {
+            format!("{}_{}.{}", stem, i, ext)
+        };
+        path = receive_dir.join(new_name);
+        if !path.exists() {
+            break;
+        }
+    }
+    path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // ── sanitize_filename ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sanitize_filename_normal() {
+        assert_eq!(sanitize_filename("hello-world_v1.2.bin"), "hello-world_v1.2.bin");
+    }
+
+    #[test]
+    fn test_sanitize_filename_replaces_spaces() {
+        let result = sanitize_filename("my file name.txt");
+        assert_eq!(result, "my_file_name.txt");
+    }
+
+    #[test]
+    fn test_sanitize_filename_replaces_slashes() {
+        let result = sanitize_filename("path/to/file.bin");
+        assert_eq!(result, "path_to_file.bin");
+    }
+
+    #[test]
+    fn test_sanitize_filename_preserves_alphanumeric() {
+        let result = sanitize_filename("ABC123.tar.gz");
+        assert_eq!(result, "ABC123.tar.gz");
+    }
+
+    // ── get_unique_file_path ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_unique_path_no_collision() {
+        let dir = TempDir::new().unwrap();
+        let path = get_unique_file_path(&dir.path().to_path_buf(), "new.bin", false);
+        assert_eq!(path, dir.path().join("new.bin"));
+    }
+
+    #[test]
+    fn test_get_unique_path_with_collision_appends_counter() {
+        let dir = TempDir::new().unwrap();
+        // Create the file so it exists
+        std::fs::write(dir.path().join("existing.bin"), b"data").unwrap();
+        let path = get_unique_file_path(&dir.path().to_path_buf(), "existing.bin", false);
+        assert_eq!(path, dir.path().join("existing_1.bin"));
+    }
+
+    #[test]
+    fn test_get_unique_path_overwrite_returns_original() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("file.bin"), b"data").unwrap();
+        let path = get_unique_file_path(&dir.path().to_path_buf(), "file.bin", true);
+        assert_eq!(path, dir.path().join("file.bin"));
+    }
+
+    #[test]
+    fn test_get_unique_path_multiple_collisions() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("data.bin"), b"a").unwrap();
+        std::fs::write(dir.path().join("data_1.bin"), b"b").unwrap();
+        let path = get_unique_file_path(&dir.path().to_path_buf(), "data.bin", false);
+        assert_eq!(path, dir.path().join("data_2.bin"));
+    }
+
+    // ── ServerConfig ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_server_config_default() {
+        let cfg = ServerConfig::default();
+        assert_eq!(cfg.http_port, 7788);
+        assert_eq!(cfg.quic_port, 7789);
+        assert_eq!(cfg.bind_address, "0.0.0.0");
+        assert!(cfg.enable_http);
+        assert!(cfg.enable_quic);
+        assert!(!cfg.allow_overwrite);
+        assert!(cfg.auth.is_none());
+    }
+
+    // ── FileReceiver lifecycle ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_receiver_initial_status_is_stopped() {
+        let cfg = ServerConfig::default();
+        let receiver = FileReceiver::new(cfg);
+        assert!(matches!(receiver.get_status().await, ServerStatus::Stopped));
+    }
+
+    #[tokio::test]
+    async fn test_receiver_get_config() {
+        let mut cfg = ServerConfig::default();
+        cfg.http_port = 9999;
+        let receiver = FileReceiver::new(cfg);
+        assert_eq!(receiver.get_config().await.http_port, 9999);
+    }
+
+    #[tokio::test]
+    async fn test_receiver_update_config() {
+        let cfg = ServerConfig::default();
+        let receiver = FileReceiver::new(cfg);
+        let mut new_cfg = ServerConfig::default();
+        new_cfg.http_port = 8888;
+        receiver.update_config(new_cfg).await.unwrap();
+        assert_eq!(receiver.get_config().await.http_port, 8888);
+    }
+
+    #[tokio::test]
+    async fn test_receiver_get_server_urls_http_only() {
+        let mut cfg = ServerConfig::default();
+        cfg.bind_address = "0.0.0.0".to_string();
+        cfg.http_port = 7788;
+        cfg.enable_quic = false;
+        let receiver = FileReceiver::new(cfg);
+        let urls = receiver.get_server_urls().await;
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].contains("7788"));
+        assert!(urls[0].starts_with("http://"));
+    }
+
+    #[tokio::test]
+    async fn test_receiver_get_server_urls_both_protocols() {
+        let cfg = ServerConfig::default();
+        let receiver = FileReceiver::new(cfg);
+        let urls = receiver.get_server_urls().await;
+        assert_eq!(urls.len(), 2);
+    }
+
+    // ── HTTP server integration ───────────────────────────────────────────────
+
+    /// Find a free port for testing
+    fn free_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn test_http_server_health_endpoint() {
+        let dir = TempDir::new().unwrap();
+        let port = free_port();
+
+        let mut cfg = ServerConfig {
+            http_port: port,
+            bind_address: "127.0.0.1".to_string(),
+            receive_directory: dir.path().to_path_buf(),
+            enable_quic: false,
+            ..ServerConfig::default()
+        };
+
+        let mut receiver = FileReceiver::new(cfg);
+        receiver.start().await.unwrap();
+
+        // Give server time to start
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{}/health", port))
+            .send()
+            .await
+            .unwrap();
+
+        assert!(resp.status().is_success());
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["received_files"], 0);
+
+        receiver.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_http_server_upload_file() {
+        let dir = TempDir::new().unwrap();
+        let port = free_port();
+
+        let mut cfg = ServerConfig {
+            http_port: port,
+            bind_address: "127.0.0.1".to_string(),
+            receive_directory: dir.path().to_path_buf(),
+            enable_quic: false,
+            ..ServerConfig::default()
+        };
+
+        let mut receiver = FileReceiver::new(cfg);
+        receiver.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let content = b"hello from test";
+        let part = reqwest::multipart::Part::bytes(content.to_vec())
+            .file_name("test_upload.bin")
+            .mime_str("application/octet-stream")
+            .unwrap();
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/upload", port))
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+
+        assert!(resp.status().is_success());
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["success"], true);
+        assert_eq!(body["size"], content.len());
+        assert!(body["sha256"].as_str().is_some());
+
+        // File should exist in receive dir
+        let files = receiver.get_received_files().await;
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].size, content.len() as u64);
+        assert!(files[0].sha256.is_some());
+        assert!(files[0].saved_path.exists());
+
+        receiver.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_http_server_upload_sha256_mismatch_rejected() {
+        let dir = TempDir::new().unwrap();
+        let port = free_port();
+
+        let mut cfg = ServerConfig {
+            http_port: port,
+            bind_address: "127.0.0.1".to_string(),
+            receive_directory: dir.path().to_path_buf(),
+            enable_quic: false,
+            ..ServerConfig::default()
+        };
+
+        let mut receiver = FileReceiver::new(cfg);
+        receiver.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let part = reqwest::multipart::Part::bytes(b"real content".to_vec())
+            .file_name("tampered.bin")
+            .mime_str("application/octet-stream")
+            .unwrap();
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/upload", port))
+            .header("X-File-Hash", "0000000000000000000000000000000000000000000000000000000000000000")
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 400);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["error"].as_str().unwrap().contains("SHA-256"));
+
+        // File should NOT be saved
+        let files = receiver.get_received_files().await;
+        assert_eq!(files.len(), 0);
+
+        receiver.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_http_server_unauthorized_without_token() {
+        let dir = TempDir::new().unwrap();
+        let port = free_port();
+
+        let auth_cfg = AuthConfig {
+            enable_auth: true,
+            secret_key: "test-secret-key-1234567890".to_string(),
+            token_lifetime_hours: 24,
+            allowed_ips: vec![],
+        };
+
+        let cfg = ServerConfig {
+            http_port: port,
+            bind_address: "127.0.0.1".to_string(),
+            receive_directory: dir.path().to_path_buf(),
+            enable_quic: false,
+            auth: Some(auth_cfg),
+            ..ServerConfig::default()
+        };
+
+        let mut receiver = FileReceiver::new(cfg);
+        receiver.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let part = reqwest::multipart::Part::bytes(b"data".to_vec())
+            .file_name("file.bin")
+            .mime_str("application/octet-stream")
+            .unwrap();
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/upload", port))
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 401);
+
+        receiver.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_http_server_status_endpoint() {
+        let dir = TempDir::new().unwrap();
+        let port = free_port();
+
+        let cfg = ServerConfig {
+            http_port: port,
+            bind_address: "127.0.0.1".to_string(),
+            receive_directory: dir.path().to_path_buf(),
+            enable_quic: false,
+            ..ServerConfig::default()
+        };
+
+        let mut receiver = FileReceiver::new(cfg);
+        receiver.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{}/status", port))
+            .send()
+            .await
+            .unwrap();
+
+        assert!(resp.status().is_success());
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "running");
+        assert_eq!(body["total_files"], 0);
+
+        receiver.stop().await.unwrap();
+    }
 }
