@@ -213,6 +213,7 @@ async fn start_http_server(
     let receive_dir_upload = receive_dir.clone();
 
     let upload = warp::path("upload")
+        .and(warp::path::tail())  // 捕获 /upload 后的路径尾（如 subdir/nested.txt）
         .and(warp::post())
         .and(warp::header::optional::<String>("authorization"))
         .and(warp::header::optional::<String>("x-file-hash"))
@@ -292,6 +293,7 @@ async fn start_http_server(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_file_upload(
+    path_tail: warp::path::Tail,  // URL 路径尾（如 "subdir/nested.txt" 或 ""）
     auth_header: Option<String>,
     expected_hash: Option<String>,
     remote_addr: Option<SocketAddr>,
@@ -339,7 +341,14 @@ async fn handle_file_upload(
             continue;
         }
 
-        let filename = part.filename().unwrap_or("unknown").to_string();
+        // 优先从 URL 路径尾提取文件名（保留子目录结构），
+        // 降级到 multipart filename
+        let url_tail = path_tail.as_str();
+        let filename = if !url_tail.is_empty() {
+            url_tail.to_string()
+        } else {
+            part.filename().unwrap_or("unknown").to_string()
+        };
         let file_id = Uuid::new_v4();
         let safe_name = sanitize_filename(&filename);
         let file_path = get_unique_file_path(&receive_dir, &safe_name, allow_overwrite);
