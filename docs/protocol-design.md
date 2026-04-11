@@ -54,13 +54,15 @@
 
 ### Phase 5 — 生产增强（规划中）
 
-| 任务 | 优先级 | 影响模块 |
-|------|--------|---------|
-| Prometheus 指标端点 `/metrics` | P2 | `aerosync-core/src/server.rs` |
-| 多接收目录路由（按 sender IP/tag 分发） | P2 | `aerosync-core/src/server.rs` |
-| WebSocket 实时传输状态推送 | P2 | `aerosync-core/src/server.rs` |
-| S3 Multipart Upload（大文件分片） | P2 | `aerosync-protocols/src/s3.rs` |
-| 配置热重载（SIGHUP） | P2 | `src/main.rs` |
+详细设计见 [docs/phase5-plan.md](phase5-plan.md)。
+
+| # | 任务 | 优先级 | 影响模块 |
+|---|------|--------|---------|
+| 5.1 | Prometheus 指标端点 `/metrics` | P1 | `aerosync-core/src/metrics.rs`（新增） |
+| 5.2 | WebSocket 实时传输进度推送 | P1 | `aerosync-core/src/server.rs` |
+| 5.3 | 多接收目录路由（按 sender IP/tag） | P2 | `aerosync-core/src/routing.rs`（新增） |
+| 5.4 | S3 Multipart Upload（大文件分片） | P2 | `aerosync-protocols/src/s3.rs` |
+| 5.5 | 配置热重载（SIGHUP） | P2 | `src/main.rs`，`aerosync-core/src/server.rs` |
 
 ---
 
