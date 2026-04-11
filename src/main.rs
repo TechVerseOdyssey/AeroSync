@@ -578,6 +578,7 @@ async fn cmd_receive(
         enable_http: true,
         enable_quic: !http_only,
         auth: auth_cfg,
+        audit_log: None,
     };
 
     println!("AeroSync receiver starting...");

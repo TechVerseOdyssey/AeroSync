@@ -1,3 +1,4 @@
+use crate::audit::{AuditLogger, Direction};
 use crate::{AeroSyncError, Result, ProgressMonitor, TransferProgress};
 use crate::progress::TransferStatus;
 use crate::resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
@@ -148,6 +149,7 @@ pub struct TransferEngine {
     task_receiver: Arc<RwLock<Option<mpsc::UnboundedReceiver<TransferTask>>>>,
     cancel_receiver: Arc<RwLock<Option<mpsc::UnboundedReceiver<Uuid>>>>,
     _task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    audit_logger: Option<Arc<AuditLogger>>,
 }
 
 impl TransferEngine {
@@ -163,11 +165,30 @@ impl TransferEngine {
             task_receiver: Arc::new(RwLock::new(Some(task_receiver))),
             cancel_receiver: Arc::new(RwLock::new(Some(cancel_receiver))),
             _task_handle: Arc::new(RwLock::new(None)),
+            audit_logger: None,
         }
     }
 
     /// 启动引擎，注入协议适配器
     pub async fn start(&self, adapter: Arc<dyn ProtocolAdapter>) -> Result<()> {
+        self.start_inner(adapter, self.audit_logger.clone()).await
+    }
+
+    /// 启动引擎，同时指定审计日志
+    pub async fn start_with_audit(
+        &mut self,
+        adapter: Arc<dyn ProtocolAdapter>,
+        audit_logger: Arc<AuditLogger>,
+    ) -> Result<()> {
+        self.audit_logger = Some(audit_logger.clone());
+        self.start_inner(adapter, Some(audit_logger)).await
+    }
+
+    async fn start_inner(
+        &self,
+        adapter: Arc<dyn ProtocolAdapter>,
+        audit_logger: Option<Arc<AuditLogger>>,
+    ) -> Result<()> {
         let task_rx = self.task_receiver.write().await.take();
         let cancel_rx = self.cancel_receiver.write().await.take();
 
@@ -176,7 +197,7 @@ impl TransferEngine {
             let config = self.config.clone();
 
             let handle = tokio::spawn(async move {
-                transfer_worker(task_rx, cancel_rx, monitor, adapter, config).await;
+                transfer_worker(task_rx, cancel_rx, monitor, adapter, config, audit_logger).await;
             });
             *self._task_handle.write().await = Some(handle);
             tracing::info!("Transfer engine started");
@@ -241,6 +262,7 @@ async fn transfer_worker(
     monitor: Arc<RwLock<ProgressMonitor>>,
     adapter: Arc<dyn ProtocolAdapter>,
     config: TransferConfig,
+    audit_logger: Option<Arc<AuditLogger>>,
 ) {
     tracing::info!(
         "Transfer worker started (protocol: {}, max_concurrent: {})",
@@ -273,6 +295,17 @@ async fn transfer_worker(
                             .expect("semaphore closed");
                         let adapter_ref = Arc::clone(&adapter);
                         let config_ref = config.clone();
+                        let audit_ref = audit_logger.clone();
+                        let task_filename = task.source_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let task_size = task.file_size;
+                        let task_dest_proto = if task.destination.starts_with("quic://") { "quic" }
+                            else if task.destination.starts_with("s3://") { "s3" }
+                            else if task.destination.starts_with("ftp://") { "ftp" }
+                            else { "http" };
+                        let task_proto_str = task_dest_proto.to_string();
 
                         running.push(tokio::spawn(async move {
                             let (progress_tx, mut progress_rx) =
@@ -283,6 +316,28 @@ async fn transfer_worker(
                             } else {
                                 adapter_ref.download(&task, progress_tx).await
                             };
+
+                            // 审计日志
+                            if let Some(ref al) = audit_ref {
+                                match &result {
+                                    Ok(_) => al.log_completed(
+                                        Direction::Send,
+                                        &task_proto_str,
+                                        &task_filename,
+                                        task_size,
+                                        None,
+                                        None,
+                                    ).await,
+                                    Err(e) => al.log_failed(
+                                        Direction::Send,
+                                        &task_proto_str,
+                                        &task_filename,
+                                        task_size,
+                                        None,
+                                        &e.to_string(),
+                                    ).await,
+                                }
+                            }
 
                             while progress_rx.try_recv().is_ok() {}
                             drop(permit); // 释放 Semaphore

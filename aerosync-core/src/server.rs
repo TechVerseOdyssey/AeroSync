@@ -1,3 +1,4 @@
+use crate::audit::{AuditLogger, Direction};
 use crate::auth::{AuthConfig, AuthManager, AuthMiddleware};
 use crate::{AeroSyncError, Result};
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,8 @@ pub struct ServerConfig {
     pub enable_quic: bool,
     /// 认证配置，None 表示不启用认证
     pub auth: Option<AuthConfig>,
+    /// 审计日志文件路径，None 表示不记录审计日志
+    pub audit_log: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -33,6 +36,7 @@ impl Default for ServerConfig {
             enable_http: true,
             enable_quic: true,
             auth: None,
+            audit_log: None,
         }
     }
 }
@@ -62,6 +66,7 @@ pub struct FileReceiver {
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     http_handle: Option<tokio::task::JoinHandle<()>>,
     quic_handle: Option<tokio::task::JoinHandle<()>>,
+    audit_logger: Option<Arc<AuditLogger>>,
 }
 
 impl FileReceiver {
@@ -72,6 +77,7 @@ impl FileReceiver {
             received_files: Arc::new(RwLock::new(Vec::new())),
             http_handle: None,
             quic_handle: None,
+            audit_logger: None,
         }
     }
 
@@ -87,6 +93,23 @@ impl FileReceiver {
 
         tokio::fs::create_dir_all(&config.receive_directory).await?;
         *self.status.write().await = ServerStatus::Starting;
+
+        // 构建 AuditLogger（如果配置了审计日志路径）
+        let audit_logger: Option<Arc<AuditLogger>> = if let Some(ref log_path) = config.audit_log {
+            match AuditLogger::new(log_path).await {
+                Ok(logger) => {
+                    tracing::info!("Audit log: {}", log_path.display());
+                    Some(Arc::new(logger))
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to open audit log {}: {}", log_path.display(), e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        self.audit_logger = audit_logger.clone();
 
         // 构建 AuthManager（如果配置了认证）
         let auth_manager = config
@@ -105,10 +128,11 @@ impl FileReceiver {
             let status = Arc::clone(&self.status);
             let received_files = Arc::clone(&self.received_files);
             let auth = auth_manager.clone();
+            let audit_http = audit_logger.clone();
 
             let handle = tokio::spawn(async move {
                 if let Err(e) =
-                    start_http_server(http_cfg, status.clone(), received_files, auth).await
+                    start_http_server(http_cfg, status.clone(), received_files, auth, audit_http).await
                 {
                     tracing::error!("HTTP server error: {}", e);
                     *status.write().await = ServerStatus::Error(e.to_string());
@@ -122,10 +146,11 @@ impl FileReceiver {
             let status = Arc::clone(&self.status);
             let received_files = Arc::clone(&self.received_files);
             let auth = auth_manager.clone();
+            let audit_quic = audit_logger.clone();
 
             let handle = tokio::spawn(async move {
                 if let Err(e) =
-                    start_quic_server(quic_cfg, status.clone(), received_files, auth).await
+                    start_quic_server(quic_cfg, status.clone(), received_files, auth, audit_quic).await
                 {
                     tracing::error!("QUIC server error: {}", e);
                     *status.write().await = ServerStatus::Error(e.to_string());
@@ -197,6 +222,7 @@ async fn start_http_server(
     _status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_manager: Option<Arc<AuthManager>>,
+    audit_logger: Option<Arc<AuditLogger>>,
 ) -> Result<()> {
     use warp::Filter;
 
@@ -212,6 +238,7 @@ async fn start_http_server(
     let received_files_upload = received_files.clone();
     let receive_dir_upload = receive_dir.clone();
 
+    let audit_upload = audit_logger.clone();
     let upload = warp::path("upload")
         .and(warp::path::tail())  // 捕获 /upload 后的路径尾（如 subdir/nested.txt）
         .and(warp::post())
@@ -223,6 +250,7 @@ async fn start_http_server(
         .and(warp::any().map(move || allow_overwrite))
         .and(warp::any().map(move || received_files_upload.clone()))
         .and(warp::any().map(move || auth_mw_upload.clone()))
+        .and(warp::any().map(move || audit_upload.clone()))
         .and_then(handle_file_upload);
 
     // ── GET /health ──────────────────────────────────────────────────────────
@@ -244,6 +272,7 @@ async fn start_http_server(
     let receive_dir_chunk = receive_dir.clone();
     let received_files_chunk = received_files.clone();
 
+    let audit_chunk = audit_logger.clone();
     let upload_chunk = warp::path!("upload" / "chunk")
         .and(warp::post())
         .and(warp::header::optional::<String>("authorization"))
@@ -253,6 +282,7 @@ async fn start_http_server(
         .and(warp::any().map(move || receive_dir_chunk.clone()))
         .and(warp::any().map(move || received_files_chunk.clone()))
         .and(warp::any().map(move || auth_mw_chunk.clone()))
+        .and(warp::any().map(move || audit_chunk.clone()))
         .and_then(handle_chunk_upload);
 
     // ── POST /upload/complete?task_id=&filename=&total_chunks=&sha256= ───────
@@ -260,6 +290,7 @@ async fn start_http_server(
     let receive_dir_complete = receive_dir.clone();
     let received_files_complete = received_files.clone();
 
+    let audit_complete = audit_logger.clone();
     let upload_complete = warp::path!("upload" / "complete")
         .and(warp::post())
         .and(warp::header::optional::<String>("authorization"))
@@ -268,6 +299,7 @@ async fn start_http_server(
         .and(warp::any().map(move || allow_overwrite))
         .and(warp::any().map(move || received_files_complete.clone()))
         .and(warp::any().map(move || auth_mw_complete.clone()))
+        .and(warp::any().map(move || audit_complete.clone()))
         .and_then(handle_chunk_complete);
 
     let cors = warp::cors()
@@ -293,7 +325,7 @@ async fn start_http_server(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_file_upload(
-    path_tail: warp::path::Tail,  // URL 路径尾（如 "subdir/nested.txt" 或 ""）
+    path_tail: warp::path::Tail,
     auth_header: Option<String>,
     expected_hash: Option<String>,
     remote_addr: Option<SocketAddr>,
@@ -302,6 +334,7 @@ async fn handle_file_upload(
     allow_overwrite: bool,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_mw: Option<Arc<AuthMiddleware>>,
+    audit_logger: Option<Arc<AuditLogger>>,
 ) -> std::result::Result<warp::reply::Response, warp::Rejection> {
     use bytes::Buf;
     use futures::TryStreamExt;
@@ -313,13 +346,16 @@ async fn handle_file_upload(
         .map(|a| a.ip().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // ── 认证 ──────────────────────────────────────────────────────────────────
+    // 认证
     if let Some(ref mw) = auth_mw {
         let auth_str = auth_header.as_deref();
         match mw.authenticate_http_request(auth_str, &client_ip) {
             Ok(true) => {}
             Ok(false) => {
                 tracing::warn!("HTTP: Unauthorized upload attempt from {}", client_ip);
+                if let Some(ref al) = audit_logger {
+                    al.log_auth_failed("http", Some(&client_ip), "Unauthorized").await;
+                }
                 let resp = mw.unauthorized_response();
                 return Ok(warp::reply::with_status(
                     warp::reply::json(&serde_json::json!({
@@ -380,16 +416,17 @@ async fn handle_file_upload(
 
         let actual_hash = hex::encode(hasher.finalize());
 
-        // ── SHA-256 校验 ─────────────────────────────────────────────────────
+        // SHA-256 校验
         if let Some(ref expected) = expected_hash {
             if &actual_hash != expected {
                 tracing::error!(
                     "HTTP: Hash mismatch for '{}': expected={} actual={}",
-                    filename,
-                    expected,
-                    actual_hash
+                    filename, expected, actual_hash
                 );
                 let _ = tokio::fs::remove_file(&file_path).await;
+                if let Some(ref al) = audit_logger {
+                    al.log_failed(Direction::Receive, "http", &filename, size, Some(&client_ip), "SHA-256 mismatch").await;
+                }
                 use warp::Reply;
                 return Ok(warp::reply::with_status(
                     warp::reply::json(&serde_json::json!({
@@ -412,6 +449,10 @@ async fn handle_file_upload(
             sender_ip: Some(client_ip.clone()),
         };
         received_files.write().await.push(received_file);
+
+        if let Some(ref al) = audit_logger {
+            al.log_completed(Direction::Receive, "http", &filename, size, Some(&actual_hash), Some(&client_ip)).await;
+        }
 
         tracing::info!(
             "HTTP: Received '{}' ({} bytes) sha256={} from {}",
@@ -500,6 +541,7 @@ async fn handle_chunk_upload(
     receive_dir: PathBuf,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_mw: Option<Arc<AuthMiddleware>>,
+    audit_logger: Option<Arc<AuditLogger>>,
 ) -> std::result::Result<warp::reply::Response, warp::Rejection> {
     use warp::Reply;
 
@@ -512,6 +554,9 @@ async fn handle_chunk_upload(
         match mw.authenticate_http_request(auth_header.as_deref(), &client_ip) {
             Ok(true) => {}
             _ => {
+                if let Some(ref al) = audit_logger {
+                    al.log_auth_failed("http", Some(&client_ip), "Unauthorized").await;
+                }
                 return Ok(warp::reply::with_status(
                     warp::reply::json(&serde_json::json!({"error": "Unauthorized"})),
                     warp::http::StatusCode::UNAUTHORIZED,
@@ -572,6 +617,7 @@ async fn handle_chunk_complete(
     allow_overwrite: bool,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_mw: Option<Arc<AuthMiddleware>>,
+    audit_logger: Option<Arc<AuditLogger>>,
 ) -> std::result::Result<warp::reply::Response, warp::Rejection> {
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncWriteExt;
@@ -582,6 +628,9 @@ async fn handle_chunk_complete(
         match mw.authenticate_http_request(auth_header.as_deref(), "chunk-complete") {
             Ok(true) => {}
             _ => {
+                if let Some(ref al) = audit_logger {
+                    al.log_auth_failed("http", None, "Unauthorized").await;
+                }
                 return Ok(warp::reply::with_status(
                     warp::reply::json(&serde_json::json!({"error": "Unauthorized"})),
                     warp::http::StatusCode::UNAUTHORIZED,
@@ -677,6 +726,10 @@ async fn handle_chunk_complete(
     };
     received_files.write().await.push(record);
 
+    if let Some(ref al) = audit_logger {
+        al.log_completed(Direction::Receive, "http", &query.filename, total_size, Some(&actual_sha256), None).await;
+    }
+
     Ok(warp::reply::with_status(
         warp::reply::json(&serde_json::json!({
             "status": "complete",
@@ -695,6 +748,7 @@ async fn start_quic_server(
     status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_manager: Option<Arc<AuthManager>>,
+    audit_logger: Option<Arc<AuditLogger>>,
 ) -> Result<()> {
     use quinn::Endpoint;
 
@@ -723,6 +777,7 @@ async fn start_quic_server(
         let max_size = config.max_file_size;
         let files = received_files.clone();
         let auth = auth_manager.clone();
+        let audit_quic_conn = audit_logger.clone();
         let _status = status.clone();
 
         tokio::spawn(async move {
@@ -733,6 +788,7 @@ async fn start_quic_server(
                 max_size,
                 files,
                 auth,
+                audit_quic_conn,
             )
             .await
             {
@@ -773,6 +829,7 @@ async fn handle_quic_connection(
     max_size: u64,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_manager: Option<Arc<AuthManager>>,
+    audit_logger: Option<Arc<AuditLogger>>,
 ) -> Result<()> {
     let remote_ip = connection.remote_address().ip().to_string();
 
@@ -817,6 +874,9 @@ async fn handle_quic_connection(
                 Ok(true) => {}
                 Ok(false) => {
                     tracing::warn!("QUIC: Unauthorized from {}", remote_ip);
+                    if let Some(ref al) = audit_logger {
+                        al.log_auth_failed("quic", Some(&remote_ip), "Unauthorized").await;
+                    }
                     let _ = send.write_all(b"ERROR:Unauthorized").await;
                     let _ = send.finish().await;
                     continue;
@@ -857,6 +917,7 @@ async fn handle_quic_connection(
             received_files.clone(),
             initial_data,
             &remote_ip,
+            audit_logger.clone(),
         )
         .await
         {
@@ -865,6 +926,9 @@ async fn handle_quic_connection(
                 tracing::info!("QUIC: Sent SUCCESS response for '{}'", filename);
             }
             Err(e) => {
+                if let Some(ref al) = audit_logger {
+                    al.log_failed(Direction::Receive, "quic", filename, file_size, Some(&remote_ip), &e.to_string()).await;
+                }
                 let _ = send
                     .write_all(format!("ERROR:{}", e).as_bytes())
                     .await;
@@ -886,6 +950,7 @@ async fn handle_quic_file_upload(
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     initial_data: Option<Vec<u8>>,
     sender_ip: &str,
+    audit_logger: Option<Arc<AuditLogger>>,
 ) -> Result<()> {
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncWriteExt;
@@ -942,6 +1007,10 @@ async fn handle_quic_file_upload(
         received_at: std::time::SystemTime::now(),
         sender_ip: Some(sender_ip.to_string()),
     });
+
+    if let Some(ref al) = audit_logger {
+        al.log_completed(Direction::Receive, "quic", filename, total, Some(&actual_hash), Some(sender_ip)).await;
+    }
 
     tracing::info!(
         "QUIC: Received '{}' ({} bytes) sha256={} from {}",
