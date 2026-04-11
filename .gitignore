@@ -33,3 +33,6 @@ node_modules/
 # Test files
 /test_files/
 /temp/
+
+# AeroSync runtime state (resume checkpoints)
+.aerosync/
