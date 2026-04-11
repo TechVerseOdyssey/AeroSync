@@ -1,10 +1,11 @@
 use crate::traits::{TransferProtocol, TransferProgress};
 use aerosync_core::{AeroSyncError, Result, TransferTask};
+use aerosync_core::resume::{ResumeState, DEFAULT_CHUNK_SIZE};
 use async_trait::async_trait;
 use reqwest::Client;
 use std::time::Duration;
 use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
@@ -42,6 +43,133 @@ impl HttpTransfer {
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
 
         Ok(Self { client, config })
+    }
+
+    /// 分片上传：将文件切分为 chunk_size 大小的块逐一上传。
+    /// 服务端路径：POST /upload/chunk?task_id=&chunk_index=&total_chunks=&filename=
+    /// 所有分片完成后发送 POST /upload/complete?... 合并。
+    ///
+    /// `base_url`: 形如 `http://host:port`（不含路径）
+    /// `state`:    ResumeState（含已完成分片，支持断点续传）
+    pub async fn upload_chunked(
+        &self,
+        file_path: &std::path::Path,
+        base_url: &str,
+        state: &mut ResumeState,
+        progress_tx: mpsc::UnboundedSender<TransferProgress>,
+    ) -> Result<()> {
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        let start_time = Instant::now();
+        let mut bytes_done = state.bytes_transferred();
+
+        tracing::info!(
+            "Chunked upload: '{}' {} chunks (already done: {:?})",
+            file_name,
+            state.total_chunks,
+            state.completed_chunks
+        );
+
+        for chunk_index in state.pending_chunks() {
+            let offset = state.chunk_offset(chunk_index);
+            let size = state.chunk_size_of(chunk_index);
+
+            // 读取分片数据
+            let mut file = File::open(file_path).await?;
+            tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(offset)).await?;
+            let mut buf = vec![0u8; size as usize];
+            file.read_exact(&mut buf).await?;
+
+            // 带重试的分片上传
+            let chunk_url = format!(
+                "{}/upload/chunk?task_id={}&chunk_index={}&total_chunks={}&filename={}",
+                base_url,
+                state.task_id,
+                chunk_index,
+                state.total_chunks,
+                urlencoding::encode(&file_name)
+            );
+
+            let mut last_err = None;
+            for attempt in 0..=self.config.max_retries {
+                let mut req = self.client.post(&chunk_url).body(buf.clone());
+                if let Some(token) = &self.config.auth_token {
+                    req = req.header("Authorization", format!("Bearer {}", token));
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        last_err = None;
+                        break;
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        last_err = Some(AeroSyncError::Network(format!(
+                            "Chunk {} failed: {} - {}",
+                            chunk_index, status, body
+                        )));
+                        tracing::warn!("Chunk {} attempt {}/{} failed: {}", chunk_index, attempt + 1, self.config.max_retries + 1, status);
+                    }
+                    Err(e) => {
+                        last_err = Some(AeroSyncError::Network(e.to_string()));
+                        tracing::warn!("Chunk {} attempt {}/{} error: {}", chunk_index, attempt + 1, self.config.max_retries + 1, e);
+                    }
+                }
+                if attempt < self.config.max_retries {
+                    tokio::time::sleep(Duration::from_millis(500 * (attempt as u64 + 1))).await;
+                }
+            }
+            if let Some(e) = last_err {
+                return Err(e);
+            }
+
+            // 标记完成，更新进度
+            state.mark_chunk_done(chunk_index);
+            bytes_done += size;
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 { bytes_done as f64 / elapsed } else { 0.0 };
+            let _ = progress_tx.send(TransferProgress {
+                bytes_transferred: bytes_done,
+                transfer_speed: speed,
+            });
+        }
+
+        // 所有分片完成，发送合并请求
+        let mut complete_url = format!(
+            "{}/upload/complete?task_id={}&filename={}&total_chunks={}",
+            base_url,
+            state.task_id,
+            urlencoding::encode(&file_name),
+            state.total_chunks,
+        );
+        if let Some(ref sha) = state.sha256 {
+            complete_url.push_str(&format!("&sha256={}", sha));
+        }
+
+        let mut req = self.client.post(&complete_url);
+        if let Some(token) = &self.config.auth_token {
+            req = req.header("Authorization", format!("Bearer {}", token));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AeroSyncError::Network(format!("Complete request failed: {}", e)))?;
+
+        if resp.status().is_success() {
+            tracing::info!("Chunked upload complete: {} ({} bytes)", file_name, state.total_size);
+            Ok(())
+        } else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(AeroSyncError::Network(format!(
+                "Complete failed: {} - {}",
+                status, body
+            )))
+        }
     }
 
     async fn upload_with_progress(

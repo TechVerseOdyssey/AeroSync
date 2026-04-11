@@ -1,6 +1,7 @@
 /// AutoAdapter: 根据 destination URL 自动选择 HTTP 或 QUIC 协议，
 /// 实现 aerosync-core 的 ProtocolAdapter trait，由 main.rs 注入。
 
+use aerosync_core::resume::ResumeState;
 use aerosync_core::transfer::{ProtocolAdapter, ProtocolProgress, TransferTask};
 use aerosync_core::{AeroSyncError, Result};
 use async_trait::async_trait;
@@ -101,6 +102,52 @@ impl ProtocolAdapter for AutoAdapter {
     fn protocol_name(&self) -> &'static str {
         "auto"
     }
+
+    async fn upload_chunked(
+        &self,
+        task: &TransferTask,
+        state: &mut ResumeState,
+        progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
+    ) -> Result<()> {
+        // 分片上传仅支持 HTTP（QUIC 暂用普通上传）
+        if task.destination.starts_with("quic://") {
+            return self.upload(task, progress_tx).await;
+        }
+
+        // 从完整 URL 中提取 base_url（scheme + host + port）
+        let base_url = extract_base_url(&task.destination)?;
+        let ht = HttpTransfer::new(self.http_config.clone())?;
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
+        let ptx = progress_tx.clone();
+        tokio::spawn(async move {
+            while let Some(p) = rx.recv().await {
+                let _ = ptx.send(ProtocolProgress {
+                    bytes_transferred: p.bytes_transferred,
+                    transfer_speed: p.transfer_speed,
+                });
+            }
+        });
+
+        ht.upload_chunked(&task.source_path, &base_url, state, tx).await
+    }
+}
+
+fn extract_base_url(url: &str) -> Result<String> {
+    // 提取 scheme://host:port，去掉路径部分
+    // 例: http://host:7788/upload → http://host:7788
+    let url = url::Url::parse(url)
+        .map_err(|e| AeroSyncError::InvalidConfig(format!("Invalid URL '{}': {}", url, e)))?;
+    let base = format!(
+        "{}://{}",
+        url.scheme(),
+        url.host_str().unwrap_or("localhost")
+    );
+    Ok(if let Some(port) = url.port() {
+        format!("{}:{}", base, port)
+    } else {
+        base
+    })
 }
 
 fn resolve_quic_config(destination: &str, base: &QuicConfig) -> Result<QuicConfig> {

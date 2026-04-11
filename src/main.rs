@@ -1,5 +1,6 @@
 use aerosync_core::{
     auth::{AuthConfig, AuthManager},
+    resume::ResumeStore,
     server::{FileReceiver, ServerConfig},
     transfer::{TransferConfig, TransferEngine, TransferTask},
     FileManager,
@@ -14,6 +15,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use uuid::Uuid as _Uuid;
 
 #[derive(Parser)]
 #[command(
@@ -68,6 +70,10 @@ enum Commands {
         /// 只显示传输计划，不实际传输
         #[arg(long)]
         dry_run: bool,
+
+        /// 禁用断点续传（强制重新传输）
+        #[arg(long)]
+        no_resume: bool,
     },
 
     /// 启动接收端，监听文件传输
@@ -121,6 +127,12 @@ enum Commands {
         #[arg(default_value = "localhost:7788")]
         host: String,
     },
+
+    /// 列出并管理未完成的断点续传任务
+    Resume {
+        #[command(subcommand)]
+        action: ResumeAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -139,6 +151,27 @@ enum TokenAction {
         token: String,
         #[arg(long)]
         secret: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ResumeAction {
+    /// 列出所有未完成的传输任务
+    List {
+        /// 状态文件目录（默认当前目录）
+        #[arg(long, default_value = ".")]
+        state_dir: PathBuf,
+    },
+    /// 清除指定 task_id 的续传状态
+    Clear {
+        task_id: String,
+        #[arg(long, default_value = ".")]
+        state_dir: PathBuf,
+    },
+    /// 清除所有未完成的续传状态
+    ClearAll {
+        #[arg(long, default_value = ".")]
+        state_dir: PathBuf,
     },
 }
 
@@ -165,8 +198,9 @@ async fn main() -> anyhow::Result<()> {
             parallel,
             no_verify,
             dry_run,
+            no_resume,
         } => {
-            cmd_send(source, destination, recursive, protocol, token, parallel, no_verify, dry_run).await?;
+            cmd_send(source, destination, recursive, protocol, token, parallel, no_verify, dry_run, no_resume).await?;
         }
 
         Commands::Receive {
@@ -190,6 +224,10 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status { host } => {
             cmd_status(host).await?;
         }
+
+        Commands::Resume { action } => {
+            cmd_resume(action).await?;
+        }
     }
 
     Ok(())
@@ -206,6 +244,7 @@ async fn cmd_send(
     _parallel: usize,
     no_verify: bool,
     dry_run: bool,
+    no_resume: bool,
 ) -> anyhow::Result<()> {
     // 收集要发送的文件列表
     let files = collect_files(&source, recursive).await?;
@@ -240,6 +279,8 @@ async fn cmd_send(
         timeout_seconds: 60,
         use_quic: !destination.starts_with("http"),
         auth_token: token.clone(),
+        enable_resume: !no_resume,
+        ..TransferConfig::default()
     };
 
     // 构建协议适配器
@@ -555,5 +596,61 @@ async fn cmd_status(host: String) -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+// ──────────────────────────── resume ────────────────────────────────────────
+
+async fn cmd_resume(action: ResumeAction) -> anyhow::Result<()> {
+    match action {
+        ResumeAction::List { state_dir } => {
+            let store = ResumeStore::new(&state_dir);
+            let pending = store.list_pending().await?;
+            if pending.is_empty() {
+                println!("No pending resume tasks.");
+            } else {
+                println!("{} pending transfer(s):\n", pending.len());
+                for s in &pending {
+                    let done = s.completed_chunks.len();
+                    let total = s.total_chunks;
+                    let pct = if total > 0 { done * 100 / total as usize } else { 0 };
+                    println!(
+                        "  [{}] {} → {}",
+                        s.task_id,
+                        s.source_path.display(),
+                        s.destination
+                    );
+                    println!(
+                        "      Progress: {}/{} chunks ({}%), {:.2} MB / {:.2} MB",
+                        done,
+                        total,
+                        pct,
+                        s.bytes_transferred() as f64 / 1_048_576.0,
+                        s.total_size as f64 / 1_048_576.0
+                    );
+                }
+                println!("\nResume with: aerosync send <source> <destination>");
+            }
+        }
+
+        ResumeAction::Clear { task_id, state_dir } => {
+            let uuid = task_id
+                .parse::<uuid::Uuid>()
+                .map_err(|_| anyhow::anyhow!("Invalid task ID: {}", task_id))?;
+            let store = ResumeStore::new(&state_dir);
+            store.delete(uuid).await?;
+            println!("Cleared resume state for task {}", task_id);
+        }
+
+        ResumeAction::ClearAll { state_dir } => {
+            let store = ResumeStore::new(&state_dir);
+            let pending = store.list_pending().await?;
+            let count = pending.len();
+            for s in pending {
+                store.delete(s.task_id).await?;
+            }
+            println!("Cleared {} resume state(s).", count);
+        }
+    }
     Ok(())
 }

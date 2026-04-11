@@ -1,5 +1,6 @@
 use crate::{AeroSyncError, Result, ProgressMonitor, TransferProgress};
 use crate::progress::TransferStatus;
+use crate::resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,6 +18,12 @@ pub struct TransferConfig {
     pub use_quic: bool,
     /// 发送方认证 Token
     pub auth_token: Option<String>,
+    /// 大于此阈值（bytes）时使用分片上传，默认 64MB
+    pub chunked_threshold: u64,
+    /// 续传状态文件存放目录（默认为当前工作目录）
+    pub resume_state_dir: PathBuf,
+    /// 是否启用断点续传（默认 true）
+    pub enable_resume: bool,
 }
 
 impl Default for TransferConfig {
@@ -28,6 +35,9 @@ impl Default for TransferConfig {
             timeout_seconds: 60,
             use_quic: true,
             auth_token: None,
+            chunked_threshold: 64 * 1024 * 1024, // 64MB
+            resume_state_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            enable_resume: true,
         }
     }
 }
@@ -95,6 +105,16 @@ pub trait ProtocolAdapter: Send + Sync {
         progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
     ) -> Result<()>;
 
+    /// 分片上传（支持断点续传）
+    /// `base_url`: 形如 `http://host:port`，不含路径
+    /// `state`: 当前续传状态（会被修改以记录已完成分片）
+    async fn upload_chunked(
+        &self,
+        task: &TransferTask,
+        state: &mut ResumeState,
+        progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
+    ) -> Result<()>;
+
     fn protocol_name(&self) -> &'static str;
 }
 
@@ -133,9 +153,10 @@ impl TransferEngine {
 
         if let (Some(task_rx), Some(cancel_rx)) = (task_rx, cancel_rx) {
             let monitor = Arc::clone(&self.progress_monitor);
+            let config = self.config.clone();
 
             let handle = tokio::spawn(async move {
-                transfer_worker(task_rx, cancel_rx, monitor, adapter).await;
+                transfer_worker(task_rx, cancel_rx, monitor, adapter, config).await;
             });
             *self._task_handle.write().await = Some(handle);
             tracing::info!("Transfer engine started");
@@ -193,6 +214,7 @@ async fn transfer_worker(
     mut _cancel_rx: mpsc::UnboundedReceiver<Uuid>,
     monitor: Arc<RwLock<ProgressMonitor>>,
     adapter: Arc<dyn ProtocolAdapter>,
+    config: TransferConfig,
 ) {
     tracing::info!("Transfer worker started (protocol: {})", adapter.protocol_name());
 
@@ -208,12 +230,12 @@ async fn transfer_worker(
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<ProtocolProgress>();
 
         let result = if task.is_upload {
-            adapter.upload(&task, progress_tx).await
+            execute_upload(&task, &adapter, &config, progress_tx).await
         } else {
             adapter.download(&task, progress_tx).await
         };
 
-        // 排空进度 channel（避免 sender 阻塞）
+        // 排空进度 channel
         while progress_rx.try_recv().is_ok() {}
 
         match result {
@@ -229,6 +251,72 @@ async fn transfer_worker(
     }
 
     tracing::info!("Transfer worker stopped");
+}
+
+/// 执行上传：根据文件大小自动选择普通上传或分片续传
+async fn execute_upload(
+    task: &TransferTask,
+    adapter: &Arc<dyn ProtocolAdapter>,
+    config: &TransferConfig,
+    progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
+) -> Result<()> {
+    let use_chunked = task.file_size >= config.chunked_threshold && task.file_size > 0;
+
+    if !use_chunked {
+        return adapter.upload(task, progress_tx).await;
+    }
+
+    // 分片上传路径
+    let store = ResumeStore::new(&config.resume_state_dir);
+
+    // 查找已有续传状态
+    let mut state = if config.enable_resume {
+        match store.find_by_file(&task.source_path, &task.destination).await {
+            Ok(Some(existing)) => {
+                tracing::info!(
+                    "Resuming upload: {}/{} chunks done",
+                    existing.completed_chunks.len(),
+                    existing.total_chunks
+                );
+                existing
+            }
+            _ => {
+                let s = ResumeState::new(
+                    task.id,
+                    task.source_path.clone(),
+                    task.destination.clone(),
+                    task.file_size,
+                    DEFAULT_CHUNK_SIZE,
+                    task.sha256.clone(),
+                );
+                store.save(&s).await.ok();
+                s
+            }
+        }
+    } else {
+        ResumeState::new(
+            task.id,
+            task.source_path.clone(),
+            task.destination.clone(),
+            task.file_size,
+            DEFAULT_CHUNK_SIZE,
+            task.sha256.clone(),
+        )
+    };
+
+    // 每完成一片立即持久化
+    let result = adapter.upload_chunked(task, &mut state, progress_tx).await;
+
+    if config.enable_resume {
+        if result.is_ok() {
+            store.delete(state.task_id).await.ok();
+        } else {
+            // 保存最新进度（部分完成）
+            store.save(&state).await.ok();
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -280,6 +368,16 @@ mod tests {
             Ok(())
         }
 
+        async fn upload_chunked(
+            &self,
+            _task: &TransferTask,
+            _state: &mut ResumeState,
+            _tx: mpsc::UnboundedSender<ProtocolProgress>,
+        ) -> Result<()> {
+            self.upload_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         fn protocol_name(&self) -> &'static str {
             "mock-success"
         }
@@ -304,6 +402,15 @@ mod tests {
             _tx: mpsc::UnboundedSender<ProtocolProgress>,
         ) -> Result<()> {
             Err(AeroSyncError::Network("simulated download failure".to_string()))
+        }
+
+        async fn upload_chunked(
+            &self,
+            _task: &TransferTask,
+            _state: &mut ResumeState,
+            _tx: mpsc::UnboundedSender<ProtocolProgress>,
+        ) -> Result<()> {
+            Err(AeroSyncError::Network("simulated chunked failure".to_string()))
         }
 
         fn protocol_name(&self) -> &'static str {
@@ -349,6 +456,8 @@ mod tests {
         let cfg = TransferConfig::default();
         assert_eq!(cfg.max_concurrent_transfers, 4);
         assert_eq!(cfg.chunk_size, 4 * 1024 * 1024);
+        assert_eq!(cfg.chunked_threshold, 64 * 1024 * 1024);
+        assert!(cfg.enable_resume);
         assert_eq!(cfg.retry_attempts, 3);
         assert!(cfg.use_quic);
         assert!(cfg.auth_token.is_none());
@@ -491,6 +600,15 @@ mod tests {
                 _tx: mpsc::UnboundedSender<ProtocolProgress>,
             ) -> Result<()> {
                 Ok(())
+            }
+
+            async fn upload_chunked(
+                &self,
+                task: &TransferTask,
+                _state: &mut ResumeState,
+                tx: mpsc::UnboundedSender<ProtocolProgress>,
+            ) -> Result<()> {
+                self.upload(task, tx).await
             }
 
             fn protocol_name(&self) -> &'static str {
