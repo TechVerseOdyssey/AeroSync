@@ -87,7 +87,9 @@ impl AuthConfig {
             return Err("Token lifetime must be greater than 0".to_string());
         }
 
-        // TODO: 验证 IP CIDR 格式
+        for cidr in &self.allowed_ips {
+            validate_cidr(cidr)?;
+        }
 
         Ok(())
     }
@@ -97,6 +99,44 @@ impl AuthConfig {
 fn generate_random_key() -> String {
     use uuid::Uuid;
     format!("{}-{}", Uuid::new_v4(), Uuid::new_v4())
+}
+
+/// 验证单条 CIDR 字符串格式（IPv4 和 IPv6）
+fn validate_cidr(cidr: &str) -> Result<(), String> {
+    let (ip_str, prefix_str) = cidr
+        .split_once('/')
+        .ok_or_else(|| format!("Invalid CIDR '{}': missing prefix length (e.g. /24)", cidr))?;
+
+    let prefix_len: u8 = prefix_str
+        .parse()
+        .map_err(|_| format!("Invalid CIDR '{}': prefix length is not a number", cidr))?;
+
+    // 判断是 IPv4 还是 IPv6
+    if ip_str.contains(':') {
+        // IPv6
+        ip_str
+            .parse::<std::net::Ipv6Addr>()
+            .map_err(|_| format!("Invalid CIDR '{}': malformed IPv6 address", cidr))?;
+        if prefix_len > 128 {
+            return Err(format!(
+                "Invalid CIDR '{}': IPv6 prefix length must be 0-128",
+                cidr
+            ));
+        }
+    } else {
+        // IPv4
+        ip_str
+            .parse::<std::net::Ipv4Addr>()
+            .map_err(|_| format!("Invalid CIDR '{}': malformed IPv4 address", cidr))?;
+        if prefix_len > 32 {
+            return Err(format!(
+                "Invalid CIDR '{}': IPv4 prefix length must be 0-32",
+                cidr
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

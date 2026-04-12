@@ -20,6 +20,7 @@ async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
 rcgen = "0.11"
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 uuid = { workspace = true }
 urlencoding = "2.1"

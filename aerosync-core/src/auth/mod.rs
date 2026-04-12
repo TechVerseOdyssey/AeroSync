@@ -59,15 +59,69 @@ impl AuthManager {
     }
 
     /// 验证 IP 是否允许访问
-    fn verify_ip_access(&self, _client_ip: &str) -> Result<bool> {
-        // TODO: 实现 IP 白名单/黑名单检查
-        // 当前版本简单允许所有 IP
-        Ok(true)
+    fn verify_ip_access(&self, client_ip: &str) -> Result<bool> {
+        // 空列表表示允许所有 IP
+        if self.config.allowed_ips.is_empty() {
+            return Ok(true);
+        }
+
+        let client_addr: std::net::IpAddr = client_ip
+            .parse()
+            .map_err(|_| crate::error::AeroSyncError::Auth(format!("Invalid client IP: {}", client_ip)))?;
+
+        for cidr in &self.config.allowed_ips {
+            if ip_in_cidr(client_addr, cidr) {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     /// 生成新的 Token
     pub fn generate_token(&self) -> Result<String> {
         self.token_manager.generate_token()
+    }
+}
+
+/// 检查 IP 地址是否在 CIDR 范围内（IPv4 和 IPv6）
+fn ip_in_cidr(ip: std::net::IpAddr, cidr: &str) -> bool {
+    let Some((net_str, prefix_str)) = cidr.split_once('/') else {
+        return false;
+    };
+    let Ok(prefix_len) = prefix_str.parse::<u32>() else {
+        return false;
+    };
+
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            let Ok(net_ip) = net_str.parse::<std::net::Ipv4Addr>() else {
+                return false;
+            };
+            if prefix_len > 32 {
+                return false;
+            }
+            if prefix_len == 0 {
+                return true;
+            }
+            let shift = 32 - prefix_len;
+            u32::from(ipv4) >> shift == u32::from(net_ip) >> shift
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            let Ok(net_ip) = net_str.parse::<std::net::Ipv6Addr>() else {
+                return false;
+            };
+            if prefix_len > 128 {
+                return false;
+            }
+            if prefix_len == 0 {
+                return true;
+            }
+            let ip_bits = u128::from(ipv6);
+            let net_bits = u128::from(net_ip);
+            let shift = 128 - prefix_len;
+            ip_bits >> shift == net_bits >> shift
+        }
     }
 }
 

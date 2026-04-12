@@ -367,8 +367,29 @@ impl TransferProtocol for HttpTransfer {
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
         if task.is_upload {
-            // TODO: Phase 2 实现分片续传
-            self.upload_file(task, progress_tx).await
+            // Phase 2: 分片续传
+            let base_url = extract_base_url(&task.destination);
+            let chunk_size = self.config.chunk_size as u64;
+
+            // 根据 offset 推算已完成的分片序号
+            let completed_chunks: Vec<u32> = if chunk_size > 0 {
+                (0..((offset / chunk_size) as u32)).collect()
+            } else {
+                vec![]
+            };
+
+            let mut state = aerosync_core::resume::ResumeState::new(
+                task.id,
+                task.source_path.clone(),
+                task.destination.clone(),
+                task.file_size,
+                chunk_size,
+                task.sha256.clone(),
+            );
+            state.completed_chunks = completed_chunks;
+
+            self.upload_chunked(&task.source_path, &base_url, &mut state, progress_tx)
+                .await
         } else {
             // HTTP Range 请求续传
             use futures::StreamExt;
@@ -423,6 +444,17 @@ impl TransferProtocol for HttpTransfer {
     fn protocol_name(&self) -> &'static str {
         "HTTP"
     }
+}
+
+/// 从完整 URL 提取 base_url（scheme + host + port，不含路径）
+fn extract_base_url(url: &str) -> String {
+    // 找到第三个 '/' 前的部分，即 "scheme://host:port"
+    let after_scheme = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let path_start = url[after_scheme..]
+        .find('/')
+        .map(|i| i + after_scheme)
+        .unwrap_or(url.len());
+    url[..path_start].to_string()
 }
 
 #[cfg(test)]

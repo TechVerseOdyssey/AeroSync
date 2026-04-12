@@ -3,6 +3,7 @@ use config::AeroSyncConfig;
 
 use aerosync_core::{
     auth::{AuthConfig, AuthManager},
+    error_advice::format_error_with_advice,
     resume::ResumeStore,
     server::{FileReceiver, ServerConfig, TlsConfig},
     transfer::{TransferConfig, TransferEngine, TransferTask},
@@ -596,6 +597,24 @@ async fn cmd_send(
         "\nCompleted: {}/{} files, Failed: {}, Avg speed: {:.2} MB/s",
         stats.completed_files, stats.total_files, stats.failed_files, speed_mb
     );
+
+    // Print friendly error advice for failed transfers
+    if stats.failed_files > 0 {
+        let transfers = m.get_active_transfers();
+        for t in &transfers {
+            if let aerosync_core::progress::TransferStatus::Failed(ref err_msg) = t.status {
+                let fake_err = aerosync_core::AeroSyncError::Network(err_msg.clone());
+                if let Some(adv) = aerosync_core::error_advice::advice_for(&fake_err) {
+                    eprintln!("\n  {}", adv.summary);
+                    eprintln!("  Suggestions:");
+                    for (i, s) in adv.suggestions.iter().enumerate() {
+                        eprintln!("    {}. {}", i + 1, s);
+                    }
+                    break; // Only print advice once
+                }
+            }
+        }
+    }
 
     Ok(())
 }

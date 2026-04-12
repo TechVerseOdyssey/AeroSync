@@ -55,6 +55,9 @@ pub struct ResumeState {
     pub created_at: u64,
     /// 最后更新时间（Unix timestamp seconds）
     pub updated_at: u64,
+    /// 协议特定的扩展元数据（如 S3 UploadId、已完成 parts）
+    #[serde(default)]
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 impl ResumeState {
@@ -84,6 +87,7 @@ impl ResumeState {
             sha256,
             created_at: now,
             updated_at: now,
+            metadata: std::collections::HashMap::new(),
         }
     }
 

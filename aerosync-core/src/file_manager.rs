@@ -45,9 +45,9 @@ impl FileManager {
             });
 
         let permissions = FilePermissions {
-            readable: true, // TODO: Implement proper permission checking per platform
+            readable: is_readable(path),
             writable: !metadata.permissions().readonly(),
-            executable: false, // TODO: Implement executable check per platform
+            executable: is_executable(path),
         };
 
         Ok(FileInfo {
@@ -94,10 +94,9 @@ impl FileManager {
         tokio::fs::metadata(path).await.is_ok()
     }
 
-    pub async fn get_available_space<P: AsRef<Path>>(_path: P) -> Result<u64> {
-        // TODO: Implement platform-specific disk space checking
-        // For now, return a large number
-        Ok(u64::MAX)
+    pub async fn get_available_space<P: AsRef<Path>>(path: P) -> Result<u64> {
+        let path = path.as_ref();
+        available_space(path)
     }
 
     pub fn validate_path<P: AsRef<Path>>(path: P) -> Result<()> {
@@ -127,6 +126,102 @@ impl FileManager {
     pub async fn verify_sha256<P: AsRef<Path>>(path: P, expected: &str) -> Result<bool> {
         let actual = Self::compute_sha256(path).await?;
         Ok(actual == expected)
+    }
+}
+
+// ── 平台相关辅助函数 ─────────────────────────────────────────────────────────
+
+/// 检查路径对当前进程是否可读
+fn is_readable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o444 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        // Windows: 能获取到 metadata 即视为可读
+        std::fs::metadata(path).is_ok()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::fs::metadata(path).is_ok()
+    }
+}
+
+/// 检查路径对当前进程是否可执行
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        // Windows: 以扩展名判断是否可执行
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| matches!(e.to_ascii_lowercase().as_str(), "exe" | "bat" | "cmd" | "com"))
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+/// 返回指定路径所在文件系统的可用空间（字节）
+fn available_space(path: &Path) -> Result<u64> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        // 路径需以 NUL 结尾传给 statvfs
+        let cpath = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| AeroSyncError::InvalidConfig("Path contains null byte".to_string()))?;
+
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::statvfs(cpath.as_ptr(), &mut stat) };
+        if ret != 0 {
+            return Err(AeroSyncError::FileIo(std::io::Error::last_os_error()));
+        }
+        Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use winapi::um::fileapi::GetDiskFreeSpaceExW;
+        use winapi::um::winnt::ULARGE_INTEGER;
+
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut free_bytes: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free_bytes,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(AeroSyncError::FileIo(std::io::Error::last_os_error()));
+        }
+        Ok(unsafe { *free_bytes.QuadPart() as u64 })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Ok(u64::MAX)
     }
 }
 
