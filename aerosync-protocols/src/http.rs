@@ -3,11 +3,12 @@ use crate::ratelimit::RateLimiter;
 use aerosync_core::{AeroSyncError, Result, TransferTask};
 use aerosync_core::resume::ResumeState;
 use async_trait::async_trait;
+use bytes::Bytes;
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
@@ -93,11 +94,13 @@ impl HttpTransfer {
             let offset = state.chunk_offset(chunk_index);
             let size = state.chunk_size_of(chunk_index);
 
-            // 读取分片数据
+            // 复用文件句柄，直接 seek 到分片起始位置
             let mut file = File::open(file_path).await?;
-            tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(offset)).await?;
-            let mut buf = vec![0u8; size as usize];
-            file.read_exact(&mut buf).await?;
+            file.seek(std::io::SeekFrom::Start(offset)).await?;
+            let mut raw = vec![0u8; size as usize];
+            file.read_exact(&mut raw).await?;
+            // Bytes 是引用计数的不可变缓冲区，clone 只复制指针，不复制数据
+            let buf = Bytes::from(raw);
 
             // 限速（消耗令牌）
             rate_limiter.consume(size).await;
@@ -114,6 +117,7 @@ impl HttpTransfer {
 
             let mut last_err = None;
             for attempt in 0..=self.config.max_retries {
+                // buf.clone() 仅复制引用计数指针，O(1)，无数据拷贝
                 let mut req = self.client.post(&chunk_url).body(buf.clone());
                 if let Some(token) = &self.config.auth_token {
                     req = req.header("Authorization", format!("Bearer {}", token));
