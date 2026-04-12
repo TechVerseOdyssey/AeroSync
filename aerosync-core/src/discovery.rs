@@ -124,8 +124,92 @@ impl AeroSyncMdns {
 
     /// 扫描局域网内的 AeroSync receiver，等待 `timeout` 后返回结果。
     ///
-    /// 结果按发现顺序排列，去重（同 fullname 只取最新）。
+    /// 双路并行：
+    /// 1. mDNS 广播（发现其他机器上的 receiver）
+    /// 2. localhost HTTP probe（发现同机 receiver，绕过 mDNS 同机回环限制）
     pub async fn discover(timeout: Duration) -> Vec<AeroSyncPeer> {
+        // 并行跑两路：mDNS 扫描 + localhost 探测
+        let (mdns_peers, local_peers) = tokio::join!(
+            tokio::task::spawn_blocking(move || Self::discover_sync(timeout)),
+            Self::probe_localhost_ports(&[7788, 7789, 8080, 9000]),
+        );
+
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut result = Vec::new();
+
+        // localhost probe 优先（更快、更精确）
+        for peer in local_peers {
+            let key = peer.addr();
+            if seen.insert(key) {
+                result.push(peer);
+            }
+        }
+        // mDNS 结果补充（去重）
+        for peer in mdns_peers.unwrap_or_default() {
+            let key = peer.addr();
+            if seen.insert(key) {
+                result.push(peer);
+            }
+        }
+        result
+    }
+
+    /// 探测 localhost 上常用端口是否有 AeroSync receiver
+    async fn probe_localhost_ports(ports: &[u16]) -> Vec<AeroSyncPeer> {
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        let mut peers = Vec::new();
+        for &port in ports {
+            let url = format!("http://127.0.0.1:{}/health", port);
+            if let Ok(resp) = client.get(&url).send().await {
+                let is_aerosync = resp
+                    .headers()
+                    .get("x-aerosync")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v == "true")
+                    .unwrap_or(false);
+                if is_aerosync {
+                    // 解析 /health JSON 获取版本信息
+                    let body: serde_json::Value =
+                        resp.json().await.unwrap_or(serde_json::Value::Null);
+                    let version = body["version"].as_str().map(|s| s.to_string());
+
+                    // 检查 /ws 是否存在（HEAD 请求，带 Upgrade 头）
+                    let ws_enabled = client
+                        .get(&format!("http://127.0.0.1:{}/ws", port))
+                        .header("Upgrade", "websocket")
+                        .header("Connection", "Upgrade")
+                        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+                        .header("Sec-WebSocket-Version", "13")
+                        .send()
+                        .await
+                        .map(|r| r.status().as_u16() == 101 || r.status().as_u16() == 400)
+                        .unwrap_or(false);
+
+                    debug!("localhost probe: found AeroSync on port {} (version={:?} ws={})", port, version, ws_enabled);
+
+                    peers.push(AeroSyncPeer {
+                        name: hostname_or_localhost(),
+                        host: "127.0.0.1".to_string(),
+                        port,
+                        version,
+                        ws_enabled,
+                        auth_required: false, // 无法从 /health 判断，保守设 false
+                    });
+                }
+            }
+        }
+        peers
+    }
+
+    /// 同步版 mDNS 扫描（在阻塞线程中执行）
+    fn discover_sync(timeout: Duration) -> Vec<AeroSyncPeer> {
         let daemon = match ServiceDaemon::new() {
             Ok(d) => d,
             Err(e) => {
@@ -143,26 +227,17 @@ impl AeroSyncMdns {
         };
 
         let mut peers: HashMap<String, AeroSyncPeer> = HashMap::new();
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = std::time::Instant::now() + timeout;
 
         loop {
-            let remaining = match deadline.checked_duration_since(tokio::time::Instant::now()) {
+            let remaining = match deadline.checked_duration_since(std::time::Instant::now()) {
                 Some(d) => d,
                 None => break,
             };
+            let poll = remaining.min(Duration::from_millis(200));
 
-            // 非阻塞读取所有已到达的事件
-            let event = tokio::time::timeout(
-                remaining.min(Duration::from_millis(100)),
-                tokio::task::spawn_blocking({
-                    let recv = receiver.clone();
-                    move || recv.recv_timeout(Duration::from_millis(80))
-                }),
-            )
-            .await;
-
-            match event {
-                Ok(Ok(Ok(mdns_sd::ServiceEvent::ServiceResolved(info)))) => {
+            match receiver.recv_timeout(poll) {
+                Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
                     let fullname = info.get_fullname().to_string();
                     let name = info.get_hostname().trim_end_matches('.').to_string();
                     let port = info.get_port();
@@ -197,10 +272,10 @@ impl AeroSyncMdns {
                         AeroSyncPeer { name, host, port, version, ws_enabled, auth_required },
                     );
                 }
-                Ok(Ok(Ok(mdns_sd::ServiceEvent::SearchStopped(_)))) => break,
-                _ => {
-                    // timeout 或其他事件，继续等待直到 deadline
-                    if tokio::time::Instant::now() >= deadline {
+                Ok(mdns_sd::ServiceEvent::SearchStopped(_)) => break,
+                Ok(_) => {} // SearchStarted / ServiceFound / ServiceRemoved — 忽略
+                Err(_) => {
+                    if std::time::Instant::now() >= deadline {
                         break;
                     }
                 }
