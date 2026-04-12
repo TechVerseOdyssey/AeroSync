@@ -37,8 +37,9 @@ tempfile = "3"
 [workspace]
 members = [
     "aerosync-core",
-    "aerosync-protocols", 
-    "aerosync-ui"
+    "aerosync-protocols",
+    "aerosync-ui",
+    "aerosync-mcp"
 ]
 resolver = "2"
 
