@@ -13,6 +13,7 @@
 /// - 上传 ID（UploadId）可通过 `ResumeState.metadata` 持久化以支持断点续传
 
 use crate::traits::{TransferProtocol, TransferProgress};
+use crate::utils::send_progress;
 use aerosync_core::{AeroSyncError, Result, TransferTask};
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
@@ -466,13 +467,7 @@ impl S3Transfer {
             parts.push((part_number, etag));
             bytes_uploaded += n as u64;
             part_number += 1;
-
-            let elapsed = start.elapsed().as_secs_f64();
-            let speed = if elapsed > 0.0 { bytes_uploaded as f64 / elapsed } else { 0.0 };
-            let _ = progress_tx.send(TransferProgress {
-                bytes_transferred: bytes_uploaded,
-                transfer_speed: speed,
-            });
+            send_progress(&progress_tx, bytes_uploaded, &start);
         }
 
         // Sort parts by part_number before completing (required by S3 API)
@@ -563,16 +558,7 @@ impl S3Transfer {
             .map_err(|e| AeroSyncError::Network(format!("S3 PUT failed: {}", e)))?;
 
         if resp.status().is_success() || resp.status().as_u16() == 200 {
-            let elapsed = start.elapsed().as_secs_f64();
-            let speed = if elapsed > 0.0 {
-                file_size as f64 / elapsed
-            } else {
-                0.0
-            };
-            let _ = progress_tx.send(TransferProgress {
-                bytes_transferred: file_size,
-                transfer_speed: speed,
-            });
+            send_progress(&progress_tx, file_size, &start);
             tracing::info!("S3: Upload OK: {} ({} bytes)", url, file_size);
             Ok(())
         } else {
@@ -628,16 +614,7 @@ impl S3Transfer {
             let chunk = chunk.map_err(|e| AeroSyncError::Network(e.to_string()))?;
             file.write_all(&chunk).await?;
             bytes_transferred += chunk.len() as u64;
-            let elapsed = start.elapsed().as_secs_f64();
-            let speed = if elapsed > 0.0 {
-                bytes_transferred as f64 / elapsed
-            } else {
-                0.0
-            };
-            let _ = progress_tx.send(TransferProgress {
-                bytes_transferred,
-                transfer_speed: speed,
-            });
+            send_progress(&progress_tx, bytes_transferred, &start);
         }
         file.flush().await?;
         Ok(())

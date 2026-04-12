@@ -28,6 +28,7 @@ async-trait = "0.1"
 dirs-next = "2"
 mdns-sd = "0.10"
 hostname = "0.3"
+zeroize = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

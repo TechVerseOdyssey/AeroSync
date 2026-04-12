@@ -1,5 +1,7 @@
 use crate::traits::{TransferProtocol, TransferProgress};
 use crate::ratelimit::RateLimiter;
+use crate::utils::send_progress;
+use zeroize::Zeroizing;
 use aerosync_core::{AeroSyncError, Result, TransferTask};
 use aerosync_core::resume::ResumeState;
 use async_trait::async_trait;
@@ -23,8 +25,8 @@ pub struct HttpConfig {
     pub timeout_seconds: u64,
     pub max_retries: u32,
     pub chunk_size: usize,
-    /// 发送方认证 Token（Bearer）
-    pub auth_token: Option<String>,
+    /// 发送方认证 Token（Bearer，drop 时自动清零内存）
+    pub auth_token: Option<Zeroizing<String>>,
     /// 上传带宽限制（bytes/s），0 = 不限速
     pub upload_limit_bps: u64,
     /// 是否接受无效的 TLS 证书（用于连接自签名 HTTPS 服务端，默认 false）
@@ -120,7 +122,7 @@ impl HttpTransfer {
                 // buf.clone() 仅复制引用计数指针，O(1)，无数据拷贝
                 let mut req = self.client.post(&chunk_url).body(buf.clone());
                 if let Some(token) = &self.config.auth_token {
-                    req = req.header("Authorization", format!("Bearer {}", token));
+                    req = req.header("Authorization", format!("Bearer {}", token.as_str()));
                 }
                 match req.send().await {
                     Ok(resp) if resp.status().is_success() => {
@@ -152,12 +154,7 @@ impl HttpTransfer {
             // 标记完成，更新进度
             state.mark_chunk_done(chunk_index);
             bytes_done += size;
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let speed = if elapsed > 0.0 { bytes_done as f64 / elapsed } else { 0.0 };
-            let _ = progress_tx.send(TransferProgress {
-                bytes_transferred: bytes_done,
-                transfer_speed: speed,
-            });
+            send_progress(&progress_tx, bytes_done, &start_time);
         }
 
         // 所有分片完成，发送合并请求
@@ -174,7 +171,7 @@ impl HttpTransfer {
 
         let mut req = self.client.post(&complete_url);
         if let Some(token) = &self.config.auth_token {
-            req = req.header("Authorization", format!("Bearer {}", token));
+            req = req.header("Authorization", format!("Bearer {}", token.as_str()));
         }
         let resp = req
             .send()
@@ -228,7 +225,7 @@ impl HttpTransfer {
 
         // 附加认证 Token
         if let Some(token) = &self.config.auth_token {
-            request = request.header("Authorization", format!("Bearer {}", token));
+            request = request.header("Authorization", format!("Bearer {}", token.as_str()));
         }
 
         // 附加 SHA-256 校验哈希
@@ -243,16 +240,13 @@ impl HttpTransfer {
             .map_err(|e| AeroSyncError::Network(format!("Upload request failed: {}", e)))?;
 
         if response.status().is_success() {
+            send_progress(&progress_tx, file_size, &start_time);
             let elapsed = start_time.elapsed().as_secs_f64();
-            let speed = if elapsed > 0.0 { file_size as f64 / elapsed } else { 0.0 };
-            let _ = progress_tx.send(TransferProgress {
-                bytes_transferred: file_size,
-                transfer_speed: speed,
-            });
+            let mb_per_sec = if elapsed > 0.0 { file_size as f64 / elapsed / (1024.0 * 1024.0) } else { 0.0 };
             tracing::info!(
                 "HTTP: Upload completed: {} bytes at {:.2} MB/s",
                 file_size,
-                speed / (1024.0 * 1024.0)
+                mb_per_sec
             );
             Ok(())
         } else {
@@ -276,7 +270,7 @@ impl HttpTransfer {
 
         let mut request = self.client.get(url);
         if let Some(token) = &self.config.auth_token {
-            request = request.header("Authorization", format!("Bearer {}", token));
+            request = request.header("Authorization", format!("Bearer {}", token.as_str()));
         }
 
         let response = request
@@ -309,12 +303,7 @@ impl HttpTransfer {
             file.write_all(&chunk).await?;
 
             bytes_transferred += chunk.len() as u64;
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let speed = if elapsed > 0.0 { bytes_transferred as f64 / elapsed } else { 0.0 };
-            let _ = progress_tx.send(TransferProgress {
-                bytes_transferred,
-                transfer_speed: speed,
-            });
+            send_progress(&progress_tx, bytes_transferred, &start_time);
         }
         file.flush().await?;
 
@@ -401,7 +390,7 @@ impl TransferProtocol for HttpTransfer {
                 .get(&task.destination)
                 .header("Range", format!("bytes={}-", offset));
             if let Some(token) = &self.config.auth_token {
-                request = request.header("Authorization", format!("Bearer {}", token));
+                request = request.header("Authorization", format!("Bearer {}", token.as_str()));
             }
             let response = request
                 .send()
@@ -429,12 +418,7 @@ impl TransferProtocol for HttpTransfer {
                 let chunk = chunk.map_err(|e| AeroSyncError::Network(e.to_string()))?;
                 file.write_all(&chunk).await?;
                 bytes_transferred += chunk.len() as u64;
-                let elapsed = start_time.elapsed().as_secs_f64();
-                let speed = if elapsed > 0.0 { bytes_transferred as f64 / elapsed } else { 0.0 };
-                let _ = progress_tx.send(TransferProgress {
-                    bytes_transferred,
-                    transfer_speed: speed,
-                });
+                send_progress(&progress_tx, bytes_transferred, &start_time);
             }
             file.flush().await?;
             Ok(())
@@ -553,7 +537,7 @@ mod tests {
         tokio::fs::write(&file_path, b"auth data").await.unwrap();
 
         let cfg = HttpConfig {
-            auth_token: Some("test-token".to_string()),
+            auth_token: Some("test-token".to_string().into()),
             ..Default::default()
         };
         let ht = HttpTransfer::new(cfg).unwrap();

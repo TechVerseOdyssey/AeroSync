@@ -5,6 +5,7 @@ pub mod adapter;
 pub mod s3;
 pub mod ftp;
 pub mod ratelimit;
+pub mod utils;
 
 pub use http::{HttpTransfer, HttpConfig};
 pub use quic::{QuicTransfer, QuicConfig};

@@ -37,6 +37,17 @@ async fn start_transfer(
     files: Vec<String>,
     destination: String,
 ) -> Result<Vec<String>, String> {
+    // 防止路径穿越：目标地址不能包含 ".." 段
+    if destination
+        .split(['/', '\\'])
+        .any(|seg| seg == "..")
+    {
+        return Err(format!(
+            "Invalid destination '{}': path traversal sequences are not allowed",
+            destination
+        ));
+    }
+
     let mut task_ids = Vec::new();
 
     for file_path in files {

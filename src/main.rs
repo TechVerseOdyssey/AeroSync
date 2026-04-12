@@ -1,5 +1,6 @@
 mod config;
 use config::AeroSyncConfig;
+use zeroize::Zeroizing;
 
 use aerosync_core::{
     auth::{AuthConfig, AuthManager},
@@ -441,7 +442,7 @@ async fn cmd_send(
         retry_attempts: app_config.transfer.retry_attempts,
         timeout_seconds: app_config.transfer.timeout_seconds,
         use_quic: !destination.starts_with("http"),
-        auth_token: token.clone().or_else(|| app_config.auth.token.clone()),
+        auth_token: token.clone().or_else(|| app_config.auth.token.clone()).map(Zeroizing::new),
         enable_resume: !no_resume,
         ..TransferConfig::default()
     };
@@ -458,7 +459,7 @@ async fn cmd_send(
         timeout_seconds: app_config.transfer.timeout_seconds,
         max_retries: app_config.transfer.retry_attempts,
         chunk_size: (app_config.transfer.chunk_size_mb * 1024 * 1024) as usize,
-        auth_token: eff_token.clone(),
+        auth_token: eff_token.clone().map(Zeroizing::new),
         upload_limit_bps,
         accept_invalid_certs: false,
     };

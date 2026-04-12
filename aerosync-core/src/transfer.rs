@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 // ────────────────────────── configuration ───────────────────────────────────
 
@@ -19,8 +20,9 @@ pub struct TransferConfig {
     pub retry_attempts: u32,
     pub timeout_seconds: u64,
     pub use_quic: bool,
-    /// 发送方认证 Token
-    pub auth_token: Option<String>,
+    /// 发送方认证 Token（drop 时自动清零内存）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<Zeroizing<String>>,
     /// 大于此阈值（bytes）时使用分片上传，默认 64MB
     pub chunked_threshold: u64,
     /// 续传状态文件存放目录（默认为当前工作目录）
@@ -417,12 +419,37 @@ async fn execute_upload(
     let mut state = if config.enable_resume {
         match store.find_by_file(&task.source_path, &task.destination).await {
             Ok(Some(existing)) => {
-                tracing::info!(
-                    "Resuming upload: {}/{} chunks done",
-                    existing.completed_chunks.len(),
-                    existing.total_chunks
-                );
-                existing
+                // 校验源文件大小未变更，防止文件被修改后用旧分片状态续传
+                let current_size = tokio::fs::metadata(&task.source_path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if current_size != existing.total_size {
+                    tracing::warn!(
+                        "Source file size changed ({} -> {}), discarding resume state",
+                        existing.total_size,
+                        current_size
+                    );
+                    let s = ResumeState::new(
+                        task.id,
+                        task.source_path.clone(),
+                        task.destination.clone(),
+                        task.file_size,
+                        DEFAULT_CHUNK_SIZE,
+                        task.sha256.clone(),
+                    );
+                    if let Err(e) = store.save(&s).await {
+                        tracing::warn!("Failed to save resume state: {}", e);
+                    }
+                    s
+                } else {
+                    tracing::info!(
+                        "Resuming upload: {}/{} chunks done",
+                        existing.completed_chunks.len(),
+                        existing.total_chunks
+                    );
+                    existing
+                }
             }
             _ => {
                 let s = ResumeState::new(
@@ -433,7 +460,9 @@ async fn execute_upload(
                     DEFAULT_CHUNK_SIZE,
                     task.sha256.clone(),
                 );
-                store.save(&s).await.ok();
+                if let Err(e) = store.save(&s).await {
+                    tracing::warn!("Failed to save resume state: {}", e);
+                }
                 s
             }
         }
@@ -452,9 +481,11 @@ async fn execute_upload(
 
     if config.enable_resume {
         if result.is_ok() {
-            store.delete(state.task_id).await.ok();
-        } else {
-            store.save(&state).await.ok();
+            if let Err(e) = store.delete(state.task_id).await {
+                tracing::warn!("Failed to delete resume state: {}", e);
+            }
+        } else if let Err(e) = store.save(&state).await {
+            tracing::warn!("Failed to save resume state after failure: {}", e);
         }
     }
 
