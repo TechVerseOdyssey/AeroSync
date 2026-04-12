@@ -615,9 +615,9 @@ async fn handle_file_upload(
 
         // 优先从 URL 路径尾提取文件名（保留子目录结构），
         // 降级到 multipart filename
-        let url_tail = path_tail.as_str();
+        let url_tail = percent_decode(path_tail.as_str());
         let filename = if !url_tail.is_empty() {
-            url_tail.to_string()
+            url_tail
         } else {
             part.filename().unwrap_or("unknown").to_string()
         };
@@ -1434,6 +1434,38 @@ async fn handle_quic_file_upload(
 }
 
 // ─────────────────────────────── helpers ────────────────────────────────────
+
+/// 将 URL percent-encoding 解码为 UTF-8 字符串（如 %E4%B8%AD → 中）
+fn percent_decode(input: &str) -> String {
+    let bytes: Vec<u8> = {
+        let mut out = Vec::with_capacity(input.len());
+        let mut chars = input.bytes().peekable();
+        while let Some(b) = chars.next() {
+            if b == b'%' {
+                // 读取接下来两个十六进制字符
+                let h1 = chars.next();
+                let h2 = chars.next();
+                if let (Some(h1), Some(h2)) = (h1, h2) {
+                    let hex = [h1, h2];
+                    if let Ok(s) = std::str::from_utf8(&hex) {
+                        if let Ok(byte) = u8::from_str_radix(s, 16) {
+                            out.push(byte);
+                            continue;
+                        }
+                    }
+                }
+                // 解析失败，原样保留 '%'
+                out.push(b'%');
+            } else if b == b'+' {
+                out.push(b' ');
+            } else {
+                out.push(b);
+            }
+        }
+        out
+    };
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
 
 fn sanitize_filename(filename: &str) -> String {
     // 拒绝路径穿越和绝对路径：有 ".." 或以 "/" 开头，则只取最后一段
