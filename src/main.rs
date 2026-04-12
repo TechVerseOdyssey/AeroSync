@@ -732,12 +732,10 @@ async fn cmd_receive(
 ) -> anyhow::Result<()> {
     // 构建认证配置
     let auth_cfg = auth_token.map(|token| {
-        // 以 token 作为 secret key 验证（接收方预期 token 与 secret 相同）
-        let secret = format!("aerosync-recv-{}", token);
-        // 创建 TokenManager 并注册这个 token
+        // 直接用 token 作为 secret key，sender 用同一个 secret 生成 JWT 即可验证通过
         AuthConfig {
             enable_auth: true,
-            secret_key: secret,
+            secret_key: token,
             token_lifetime_hours: 24,
             allowed_ips: vec![],
         }
