@@ -58,6 +58,10 @@ pub struct StartReceiverParams {
     pub auth_token: Option<String>,
     /// 允许覆盖同名文件（默认 false）
     pub overwrite: Option<bool>,
+    /// 启用 HTTPS（自动生成自签名证书，默认 false）
+    pub https: Option<bool>,
+    /// HTTPS 监听端口（默认 7790）
+    pub https_port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -365,6 +369,8 @@ impl AeroSyncMcpServer {
             enable_quic: true,
             enable_metrics: true,
             enable_ws: true,
+            enable_https: params.https.unwrap_or(false),
+            https_port: params.https_port.unwrap_or(7790),
             ..ServerConfig::default()
         };
 

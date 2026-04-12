@@ -137,6 +137,14 @@ enum Commands {
         /// TLS 私钥文件路径（PEM 格式，用于 QUIC）
         #[arg(long)]
         tls_key: Option<PathBuf>,
+
+        /// 启用 HTTPS（自动生成自签名证书，或使用 --tls-cert/--tls-key 指定外部证书）
+        #[arg(long)]
+        https: bool,
+
+        /// HTTPS 监听端口（默认 7790）
+        #[arg(long, default_value = "7790")]
+        https_port: u16,
     },
 
     /// Token 管理
@@ -330,8 +338,10 @@ async fn main() -> anyhow::Result<()> {
             http_only,
             tls_cert,
             tls_key,
+            https,
+            https_port,
         } => {
-            cmd_receive(port, quic_port, save_to, bind, auth_token, one_shot, overwrite, max_size, http_only, tls_cert, tls_key, &app_config, cli.config.clone()).await?;
+            cmd_receive(port, quic_port, save_to, bind, auth_token, one_shot, overwrite, max_size, http_only, tls_cert, tls_key, https, https_port, &app_config, cli.config.clone()).await?;
         }
 
         Commands::Token { action } => {
@@ -449,6 +459,7 @@ async fn cmd_send(
         chunk_size: (app_config.transfer.chunk_size_mb * 1024 * 1024) as usize,
         auth_token: eff_token.clone(),
         upload_limit_bps,
+        accept_invalid_certs: false,
     };
     let quic_config = QuicConfig {
         auth_token: eff_token.clone(),
@@ -727,6 +738,8 @@ async fn cmd_receive(
     http_only: bool,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
+    https: bool,
+    https_port: u16,
     app_config: &AeroSyncConfig,
     config_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
@@ -760,12 +773,17 @@ async fn cmd_receive(
         enable_ws: app_config.ws.enabled,
         ws_event_buffer: app_config.ws.event_buffer,
         routing: app_config.routing.clone(),
+        enable_https: https,
+        https_port,
     };
 
     println!("AeroSync receiver starting...");
     println!("  HTTP:  {}:{}", bind, port);
     if !http_only {
         println!("  QUIC:  {}:{}", bind, quic_port);
+    }
+    if https {
+        println!("  HTTPS: {}:{}", bind, https_port);
     }
     println!("  Save:  {}", save_to.display());
     if overwrite {

@@ -44,6 +44,10 @@ pub struct ServerConfig {
     pub ws_event_buffer: usize,
     /// 多目录路由规则（None 表示不启用路由）
     pub routing: Option<RouterConfig>,
+    /// 是否启用 HTTPS（自动生成自签名证书，或使用 tls 字段指定外部证书）
+    pub enable_https: bool,
+    /// HTTPS 监听端口（默认 7790）
+    pub https_port: u16,
 }
 
 impl Default for ServerConfig {
@@ -64,6 +68,8 @@ impl Default for ServerConfig {
             enable_ws: true,
             ws_event_buffer: 256,
             routing: None,
+            enable_https: false,
+            https_port: 7790,
         }
     }
 }
@@ -104,6 +110,7 @@ pub struct FileReceiver {
     status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     http_handle: Option<tokio::task::JoinHandle<()>>,
+    https_handle: Option<tokio::task::JoinHandle<()>>,
     quic_handle: Option<tokio::task::JoinHandle<()>>,
     reload_handle: Option<tokio::task::JoinHandle<()>>,
     audit_logger: Option<Arc<AuditLogger>>,
@@ -122,6 +129,7 @@ impl FileReceiver {
             status: Arc::new(RwLock::new(ServerStatus::Stopped)),
             received_files: Arc::new(RwLock::new(Vec::new())),
             http_handle: None,
+            https_handle: None,
             quic_handle: None,
             reload_handle: None,
             audit_logger: None,
@@ -221,6 +229,26 @@ impl FileReceiver {
             self.quic_handle = Some(handle);
         }
 
+        if config.enable_https {
+            let https_cfg = config.clone();
+            let status = Arc::clone(&self.status);
+            let received_files = Arc::clone(&self.received_files);
+            let auth = auth_manager.clone();
+            let audit_https = audit_logger.clone();
+            let metrics_https = Arc::clone(&self.metrics);
+            let ws_tx_https = self.ws_tx.clone();
+
+            let handle = tokio::spawn(async move {
+                if let Err(e) =
+                    start_https_server(https_cfg, status.clone(), received_files, auth, audit_https, metrics_https, ws_tx_https).await
+                {
+                    tracing::error!("HTTPS server error: {}", e);
+                    *status.write().await = ServerStatus::Error(e.to_string());
+                }
+            });
+            self.https_handle = Some(handle);
+        }
+
         *self.status.write().await = ServerStatus::Running;
         tracing::info!(
             "File receiver started on HTTP:{} QUIC:{}",
@@ -254,6 +282,9 @@ impl FileReceiver {
     pub async fn stop(&mut self) -> Result<()> {
         *self.status.write().await = ServerStatus::Stopped;
         if let Some(h) = self.http_handle.take() {
+            h.abort();
+        }
+        if let Some(h) = self.https_handle.take() {
             h.abort();
         }
         if let Some(h) = self.quic_handle.take() {
@@ -305,6 +336,9 @@ impl FileReceiver {
         let mut urls = Vec::new();
         if config.enable_http {
             urls.push(format!("http://{}:{}/upload", host, config.http_port));
+        }
+        if config.enable_https {
+            urls.push(format!("https://{}:{}/upload", host, config.https_port));
         }
         if config.enable_quic {
             urls.push(format!("quic://{}:{}", host, config.quic_port));
@@ -380,9 +414,28 @@ async fn watch_config_reload_task(
     }
 }
 
-// ─────────────────────────────── HTTP server ────────────────────────────────
+// ─────────────────────────────── TLS helpers ────────────────────────────────
 
-async fn start_http_server(
+/// 生成自签名证书，返回 (cert_pem_bytes, key_pem_bytes)
+fn generate_self_signed_pem() -> Result<(Vec<u8>, Vec<u8>)> {
+    let cert = rcgen::generate_simple_self_signed(vec![
+        "localhost".into(),
+        "127.0.0.1".into(),
+        "0.0.0.0".into(),
+    ])
+    .map_err(|e| AeroSyncError::System(format!("Failed to generate self-signed cert: {}", e)))?;
+
+    let cert_pem = cert
+        .serialize_pem()
+        .map_err(|e| AeroSyncError::System(format!("Failed to serialize cert PEM: {}", e)))?
+        .into_bytes();
+    let key_pem = cert.serialize_private_key_pem().into_bytes();
+    Ok((cert_pem, key_pem))
+}
+
+// ─────────────────────────────── HTTPS server ───────────────────────────────
+
+async fn start_https_server(
     config: ServerConfig,
     _status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
@@ -391,7 +444,28 @@ async fn start_http_server(
     metrics: Arc<Metrics>,
     ws_tx: WsBroadcast,
 ) -> Result<()> {
-    use warp::Filter;
+    // 获取 TLS 证书材料（PEM 格式，warp 接受 PEM）
+    let (cert_pem, key_pem) = if let Some(ref tls_cfg) = config.tls {
+        // 从外部 PEM 文件读取
+        let cert = tokio::fs::read(&tls_cfg.cert_path).await.map_err(|e| {
+            AeroSyncError::System(format!(
+                "Cannot read HTTPS cert {}: {}",
+                tls_cfg.cert_path.display(),
+                e
+            ))
+        })?;
+        let key = tokio::fs::read(&tls_cfg.key_path).await.map_err(|e| {
+            AeroSyncError::System(format!(
+                "Cannot read HTTPS key {}: {}",
+                tls_cfg.key_path.display(),
+                e
+            ))
+        })?;
+        (cert, key)
+    } else {
+        // 自动生成自签名证书
+        generate_self_signed_pem()?
+    };
 
     let receive_dir = config.receive_directory.clone();
     let max_size = config.max_file_size;
@@ -399,25 +473,78 @@ async fn start_http_server(
     let enable_metrics = config.enable_metrics;
     let enable_ws = config.enable_ws;
 
-    // 构建路由器（可选）
     let router: Option<Arc<Router>> = config.routing.clone().map(|routing_cfg| {
         Arc::new(Router::new(routing_cfg, receive_dir.clone()))
     });
-
-    // 认证中间件（可选）
     let auth_mw = auth_manager.map(|m| Arc::new(AuthMiddleware::new(m)));
+
+    let routes = build_warp_routes(
+        receive_dir,
+        max_size,
+        allow_overwrite,
+        enable_metrics,
+        enable_ws,
+        router,
+        auth_mw,
+        audit_logger,
+        metrics,
+        ws_tx,
+        received_files,
+    );
+
+    let addr: SocketAddr = format!("{}:{}", config.bind_address, config.https_port)
+        .parse()
+        .map_err(|e| AeroSyncError::InvalidConfig(format!("Invalid HTTPS address: {}", e)))?;
+
+    tracing::info!(
+        "HTTPS server listening on https://{} ({})",
+        addr,
+        if config.tls.is_some() {
+            "external cert"
+        } else {
+            "self-signed cert"
+        }
+    );
+
+    warp::serve(routes)
+        .tls()
+        .cert(cert_pem)
+        .key(key_pem)
+        .run(addr)
+        .await;
+
+    Ok(())
+}
+
+// ─────────────────────────────── HTTP server ────────────────────────────────
+
+/// 构建所有 warp 路由（HTTP 和 HTTPS 共用）
+#[allow(clippy::too_many_arguments)]
+fn build_warp_routes(
+    receive_dir: PathBuf,
+    max_size: u64,
+    allow_overwrite: bool,
+    enable_metrics: bool,
+    enable_ws: bool,
+    router: Option<Arc<Router>>,
+    auth_mw: Option<Arc<AuthMiddleware>>,
+    audit_logger: Option<Arc<AuditLogger>>,
+    metrics: Arc<Metrics>,
+    ws_tx: WsBroadcast,
+    received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+) -> impl warp::Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    use warp::Filter;
 
     // ── POST /upload ────────────────────────────────────────────────────────
     let auth_mw_upload = auth_mw.clone();
     let received_files_upload = received_files.clone();
     let receive_dir_upload = receive_dir.clone();
-
     let audit_upload = audit_logger.clone();
     let metrics_upload = Arc::clone(&metrics);
     let ws_tx_upload = ws_tx.clone();
     let router_upload = router.clone();
     let upload = warp::path("upload")
-        .and(warp::path::tail())  // 捕获 /upload 后的路径尾（如 subdir/nested.txt）
+        .and(warp::path::tail())
         .and(warp::post())
         .and(warp::header::optional::<String>("authorization"))
         .and(warp::header::optional::<String>("x-file-hash"))
@@ -448,11 +575,10 @@ async fn start_http_server(
         .and(warp::any().map(move || received_files_status.clone()))
         .and_then(handle_status_request);
 
-    // ── POST /upload/chunk?task_id=&chunk_index=&total_chunks=&filename= ─────
+    // ── POST /upload/chunk ────────────────────────────────────────────────────
     let auth_mw_chunk = auth_mw.clone();
     let receive_dir_chunk = receive_dir.clone();
     let received_files_chunk = received_files.clone();
-
     let audit_chunk = audit_logger.clone();
     let metrics_chunk = Arc::clone(&metrics);
     let upload_chunk = warp::path!("upload" / "chunk")
@@ -468,11 +594,10 @@ async fn start_http_server(
         .and(warp::any().map(move || metrics_chunk.clone()))
         .and_then(handle_chunk_upload);
 
-    // ── POST /upload/complete?task_id=&filename=&total_chunks=&sha256= ───────
+    // ── POST /upload/complete ─────────────────────────────────────────────────
     let auth_mw_complete = auth_mw.clone();
     let receive_dir_complete = receive_dir.clone();
     let received_files_complete = received_files.clone();
-
     let audit_complete = audit_logger.clone();
     let metrics_complete = Arc::clone(&metrics);
     let ws_tx_complete = ws_tx.clone();
@@ -494,12 +619,11 @@ async fn start_http_server(
     // ── GET /metrics ──────────────────────────────────────────────────────────
     let metrics_arc = Arc::clone(&metrics);
     let receive_dir_m = receive_dir.clone();
-    let metrics_enabled_flag = enable_metrics;
     let metrics_route = warp::path("metrics")
         .and(warp::get())
         .and(warp::any().map(move || Arc::clone(&metrics_arc)))
         .and(warp::any().map(move || receive_dir_m.clone()))
-        .and(warp::any().map(move || metrics_enabled_flag))
+        .and(warp::any().map(move || enable_metrics))
         .and_then(|m: Arc<Metrics>, dir: PathBuf, enabled: bool| async move {
             use warp::Reply;
             if !enabled {
@@ -517,13 +641,12 @@ async fn start_http_server(
     // ── GET /ws (WebSocket) ───────────────────────────────────────────────────
     let ws_tx_ws = ws_tx.clone();
     let metrics_ws = Arc::clone(&metrics);
-    let ws_enabled_flag = enable_ws;
     let ws_route = warp::path("ws")
         .and(warp::get())
         .and(warp::ws())
         .and(warp::any().map(move || ws_tx_ws.subscribe()))
         .and(warp::any().map(move || Arc::clone(&metrics_ws)))
-        .and(warp::any().map(move || ws_enabled_flag))
+        .and(warp::any().map(move || enable_ws))
         .and_then(|ws: warp::ws::Ws, rx: broadcast::Receiver<WsEvent>, m: Arc<Metrics>, enabled: bool| async move {
             if !enabled {
                 return Err::<warp::reply::Response, _>(warp::reject::not_found());
@@ -537,14 +660,49 @@ async fn start_http_server(
         .allow_headers(vec!["content-type", "authorization", "x-file-hash", "x-aerosync-tag"])
         .allow_methods(vec!["GET", "POST", "OPTIONS"]);
 
-    let routes = upload_chunk
+    upload_chunk
         .or(upload_complete)
         .or(upload)
         .or(health)
         .or(status_route)
         .or(metrics_route)
         .or(ws_route)
-        .with(cors);
+        .with(cors)
+}
+
+async fn start_http_server(
+    config: ServerConfig,
+    _status: Arc<RwLock<ServerStatus>>,
+    received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    auth_manager: Option<Arc<AuthManager>>,
+    audit_logger: Option<Arc<AuditLogger>>,
+    metrics: Arc<Metrics>,
+    ws_tx: WsBroadcast,
+) -> Result<()> {
+    let receive_dir = config.receive_directory.clone();
+    let max_size = config.max_file_size;
+    let allow_overwrite = config.allow_overwrite;
+    let enable_metrics = config.enable_metrics;
+    let enable_ws = config.enable_ws;
+
+    let router: Option<Arc<Router>> = config.routing.clone().map(|routing_cfg| {
+        Arc::new(Router::new(routing_cfg, receive_dir.clone()))
+    });
+    let auth_mw = auth_manager.map(|m| Arc::new(AuthMiddleware::new(m)));
+
+    let routes = build_warp_routes(
+        receive_dir,
+        max_size,
+        allow_overwrite,
+        enable_metrics,
+        enable_ws,
+        router,
+        auth_mw,
+        audit_logger,
+        metrics,
+        ws_tx,
+        received_files,
+    );
 
     let addr: SocketAddr = format!("{}:{}", config.bind_address, config.http_port)
         .parse()

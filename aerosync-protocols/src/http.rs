@@ -26,6 +26,8 @@ pub struct HttpConfig {
     pub auth_token: Option<String>,
     /// 上传带宽限制（bytes/s），0 = 不限速
     pub upload_limit_bps: u64,
+    /// 是否接受无效的 TLS 证书（用于连接自签名 HTTPS 服务端，默认 false）
+    pub accept_invalid_certs: bool,
 }
 
 impl Default for HttpConfig {
@@ -36,6 +38,7 @@ impl Default for HttpConfig {
             chunk_size: 4 * 1024 * 1024, // 4MB
             auth_token: None,
             upload_limit_bps: 0,
+            accept_invalid_certs: false,
         }
     }
 }
@@ -44,6 +47,7 @@ impl HttpTransfer {
     pub fn new(config: HttpConfig) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.timeout_seconds))
+            .danger_accept_invalid_certs(config.accept_invalid_certs)
             .build()
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
 

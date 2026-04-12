@@ -13,7 +13,7 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }
 crossbeam-channel = { workspace = true }
 futures = { workspace = true }
-warp = { version = "0.3", features = ["websocket"] }
+warp = { version = "0.3", features = ["websocket", "tls"] }
 quinn = { workspace = true }
 rustls = { workspace = true }
 rcgen = "0.11"
