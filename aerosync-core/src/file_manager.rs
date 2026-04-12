@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use tokio::io::AsyncReadExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
@@ -114,11 +115,19 @@ impl FileManager {
         Ok(())
     }
 
-    /// 计算文件的 SHA-256 哈希（十六进制字符串）
+    /// 计算文件的 SHA-256 哈希（十六进制字符串），流式分块读取，支持大文件
     pub async fn compute_sha256<P: AsRef<Path>>(path: P) -> Result<String> {
-        let data = tokio::fs::read(path).await?;
+        const BUF_SIZE: usize = 1024 * 1024; // 1 MB chunks
+        let mut file = tokio::fs::File::open(path).await?;
         let mut hasher = Sha256::new();
-        hasher.update(&data);
+        let mut buf = vec![0u8; BUF_SIZE];
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
         Ok(hex::encode(hasher.finalize()))
     }
 

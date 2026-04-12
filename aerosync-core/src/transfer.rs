@@ -258,7 +258,7 @@ impl TransferEngine {
 
 async fn transfer_worker(
     mut task_rx: mpsc::UnboundedReceiver<TransferTask>,
-    mut _cancel_rx: mpsc::UnboundedReceiver<Uuid>,
+    mut cancel_rx: mpsc::UnboundedReceiver<Uuid>,
     monitor: Arc<RwLock<ProgressMonitor>>,
     adapter: Arc<dyn ProtocolAdapter>,
     config: TransferConfig,
@@ -277,6 +277,12 @@ async fn transfer_worker(
 
     loop {
         tokio::select! {
+            // ── 取消信号 ────────────────────────────────────────────────────
+            Some(cancel_id) = cancel_rx.recv() => {
+                tracing::info!("Cancel requested: {}", cancel_id);
+                monitor.write().await.cancel_transfer(cancel_id);
+            }
+
             // ── 接收新任务 ──────────────────────────────────────────────────
             maybe_task = task_rx.recv() => {
                 match maybe_task {
@@ -289,10 +295,19 @@ async fn transfer_worker(
                         );
                         monitor.write().await.update_progress(task_id, 0, 0.0);
 
-                        let permit = Arc::clone(&sem)
-                            .acquire_owned()
-                            .await
-                            .expect("semaphore closed");
+                        // 任务入队前已被取消（cancel 信号先于 task 到达）
+                        if monitor.read().await.is_cancelled(&task_id) {
+                            tracing::info!("Task {} cancelled before start, skipping", task_id);
+                            continue;
+                        }
+
+                        let permit = match Arc::clone(&sem).acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => {
+                                tracing::error!("Semaphore closed, stopping transfer worker");
+                                break;
+                            }
+                        };
                         let adapter_ref = Arc::clone(&adapter);
                         let config_ref = config.clone();
                         let audit_ref = audit_logger.clone();

@@ -99,6 +99,27 @@ impl ProgressMonitor {
         }
     }
 
+    pub fn cancel_transfer(&mut self, task_id: Uuid) {
+        if let Some(transfer) = self.active_transfers.get_mut(&task_id) {
+            // 只取消尚未完成的任务
+            if !matches!(
+                transfer.status,
+                TransferStatus::Completed | TransferStatus::Failed(_) | TransferStatus::Cancelled
+            ) {
+                transfer.status = TransferStatus::Cancelled;
+                self.stats.failed_files += 1;
+            }
+        }
+    }
+
+    /// 返回任务是否已被取消（供 worker 在启动前检查）
+    pub fn is_cancelled(&self, task_id: &Uuid) -> bool {
+        self.active_transfers
+            .get(task_id)
+            .map(|t| matches!(t.status, TransferStatus::Cancelled))
+            .unwrap_or(false)
+    }
+
     pub fn get_stats(&self) -> &TransferStats {
         &self.stats
     }
