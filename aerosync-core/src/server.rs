@@ -1,5 +1,6 @@
 use crate::audit::{AuditLogger, Direction};
 use crate::auth::{AuthConfig, AuthManager, AuthMiddleware};
+use crate::discovery::{AeroSyncMdns, MdnsHandle};
 use crate::metrics::Metrics;
 use crate::routing::{Router, RouterConfig};
 use crate::{AeroSyncError, Result};
@@ -108,6 +109,8 @@ pub struct FileReceiver {
     audit_logger: Option<Arc<AuditLogger>>,
     metrics: Arc<Metrics>,
     ws_tx: WsBroadcast,
+    /// mDNS 广播句柄 — Some 表示正在广播，drop 时自动注销
+    mdns_handle: Option<MdnsHandle>,
 }
 
 impl FileReceiver {
@@ -124,6 +127,7 @@ impl FileReceiver {
             audit_logger: None,
             metrics: Metrics::new(),
             ws_tx,
+            mdns_handle: None,
         }
     }
 
@@ -223,6 +227,27 @@ impl FileReceiver {
             config.http_port,
             config.quic_port
         );
+
+        // mDNS 广播（局域网自动发现）
+        let instance_name = hostname_for_mdns();
+        let auth_required = config.auth.is_some();
+        let ws_enabled = config.enable_ws;
+        match AeroSyncMdns::register(
+            &instance_name,
+            config.http_port,
+            env!("CARGO_PKG_VERSION"),
+            ws_enabled,
+            auth_required,
+        ) {
+            Ok(handle) => {
+                self.mdns_handle = Some(handle);
+                tracing::info!("mDNS: broadcasting as '{}' on port {}", instance_name, config.http_port);
+            }
+            Err(e) => {
+                tracing::warn!("mDNS broadcast unavailable (non-fatal): {}", e);
+            }
+        }
+
         Ok(())
     }
 
@@ -237,6 +262,8 @@ impl FileReceiver {
         if let Some(h) = self.reload_handle.take() {
             h.abort();
         }
+        // drop MdnsHandle → 自动注销 mDNS 广播
+        self.mdns_handle = None;
         tracing::info!("File receiver stopped");
         Ok(())
     }
@@ -1967,4 +1994,12 @@ mod tests {
 
         receiver.stop().await.unwrap();
     }
+}
+
+/// 获取本机主机名用于 mDNS 实例名，失败时回退到 "aerosync"
+fn hostname_for_mdns() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .unwrap_or_else(|| "aerosync".to_string())
 }

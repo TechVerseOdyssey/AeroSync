@@ -7,6 +7,7 @@ use aerosync_core::{
     server::{FileReceiver, ServerConfig, TlsConfig},
     transfer::{TransferConfig, TransferEngine, TransferTask},
     preflight::preflight_check,
+    discovery::AeroSyncMdns,
     FileManager,
 };
 use aerosync_protocols::{
@@ -208,6 +209,22 @@ enum Commands {
         #[arg(long, default_value = "2")]
         retry_delay: u64,
     },
+
+    /// 扫描局域网内的 AeroSync receiver（mDNS 发现）
+    ///
+    /// 示例:
+    ///   aerosync discover                  # 扫描 3 秒，打印所有 receiver
+    ///   aerosync discover --timeout 5      # 扫描 5 秒
+    ///   aerosync discover --json           # JSON 格式输出（适合脚本）
+    Discover {
+        /// 扫描等待时间（秒，默认 3）
+        #[arg(long, default_value = "3")]
+        timeout: u64,
+
+        /// 以 JSON 格式输出（每行一个 receiver，便于脚本解析）
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -335,6 +352,10 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Watch { host, filter, format, reconnect, max_retries, retry_delay } => {
             cmd_watch(host, filter, format, reconnect, max_retries, retry_delay).await?;
+        }
+
+        Commands::Discover { timeout, json } => {
+            cmd_discover(timeout, json).await?;
         }
     }
 
@@ -1228,6 +1249,58 @@ fn print_event_pretty(v: &serde_json::Value) {
         ),
         _ => println!("[{}] {}", event, v),
     }
+}
+
+// ──────────────────────────── discover ──────────────────────────────────────
+
+async fn cmd_discover(timeout_secs: u64, json: bool) -> anyhow::Result<()> {
+    let timeout = Duration::from_secs(timeout_secs);
+
+    if !json {
+        eprintln!("Scanning for AeroSync receivers on local network ({timeout_secs}s)…");
+    }
+
+    let mut peers = AeroSyncMdns::discover(timeout).await;
+
+    // 排序：按 host 字母顺序，输出稳定
+    peers.sort_by(|a, b| a.host.cmp(&b.host).then(a.port.cmp(&b.port)));
+
+    if json {
+        for peer in &peers {
+            let obj = serde_json::json!({
+                "name":         peer.name,
+                "host":         peer.host,
+                "port":         peer.port,
+                "addr":         peer.addr(),
+                "version":      peer.version,
+                "ws_enabled":   peer.ws_enabled,
+                "auth_required": peer.auth_required,
+            });
+            println!("{}", obj);
+        }
+    } else if peers.is_empty() {
+        println!("No AeroSync receivers found.");
+        println!("Tip: make sure receiver is running with: aerosync receive");
+    } else {
+        println!("\nFound {} receiver(s):\n", peers.len());
+        println!("{:<20} {:<22} {:<10} {:<6} {:<6}",
+            "NAME", "ADDRESS", "VERSION", "WS", "AUTH");
+        println!("{}", "-".repeat(68));
+        for peer in &peers {
+            println!(
+                "{:<20} {:<22} {:<10} {:<6} {:<6}",
+                peer.name,
+                peer.addr(),
+                peer.version.as_deref().unwrap_or("-"),
+                if peer.ws_enabled { "yes" } else { "no" },
+                if peer.auth_required { "yes" } else { "no" },
+            );
+        }
+        println!();
+        println!("Use: aerosync send <file> <ADDRESS> [--token <TOKEN>]");
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

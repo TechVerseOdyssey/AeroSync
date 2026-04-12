@@ -12,6 +12,7 @@
 4. [P1 已实现设计参考](#4-p1-已实现设计参考)
 5. [P2 已实现设计参考](#5-p2-已实现设计参考)
 6. [协议交互时序](#6-协议交互时序)
+7. [多机连接实战指南](#7-多机连接实战指南)
 
 ---
 
@@ -40,8 +41,9 @@
 | 19 | 配置热重载（SIGHUP） | P2 | ✅ 已实现 | `watch_config_reload()`；可热重载 auth/routing/limits；端口变更 warn + 忽略 |
 | 20 | S3 Multipart Upload | P2 | ✅ 已实现 | 三步 API：initiate/upload_part/complete；超阈值自动切换；abort on failure |
 | 21 | `aerosync watch` WebSocket 订阅命令 | P2 | ✅ 已实现 | CLI 原生订阅 `/ws`；pretty/json 双格式；`--filter` 事件过滤；agent 友好 |
+| 22 | mDNS 局域网服务发现 | P2 | ✅ 已实现 | receiver 启动时自动广播 `_aerosync._tcp.local.`；`aerosync discover` 扫描局域网 |
 
-**已实现 21 项 / 部分实现 0 项 / 未实现 0 项 — Phase 4 + Phase 5 + 补丁功能全部完成 🎉**
+**已实现 22 项 / 部分实现 0 项 / 未实现 0 项 — Phase 4 + Phase 5 + 补丁功能全部完成 🎉**
 
 ---
 
@@ -599,4 +601,365 @@ URL 格式：`s3://bucket-name/path/to/key`
 
 ---
 
-*最后更新：2026-04-11（Phase 4 + Phase 5 + aerosync watch（含重连）全部完成 🎉，累计 219 个测试，0 失败）*
+*最后更新：2026-04-12（mDNS 服务发现 + 多机连接指南完成，累计 231 个测试，0 失败）*
+
+---
+
+## 7. 多机连接实战指南
+
+本章描述两台或多台机器之间真实使用 AeroSync 的完整流程：**服务发现 → 能力协商 → 连接建立 → 传输 → 事件订阅**。
+
+---
+
+### 7.1 服务发现
+
+#### 方式一：mDNS 自动发现（局域网推荐）
+
+receiver 启动后自动在局域网广播 `_aerosync._tcp.local.`，sender 无需手动输入 IP。
+
+**实现**：`aerosync-core/src/discovery.rs`，`AeroSyncMdns::register()` 在 `FileReceiver::start()` 中自动调用。
+
+**mDNS TXT 记录**：
+
+| 字段 | 值 | 说明 |
+|------|-----|------|
+| `version` | `0.2.0` | AeroSync 版本号 |
+| `ws` | `true/false` | WebSocket 是否启用 |
+| `auth` | `true/false` | 是否需要认证 token |
+
+**发现 receiver：**
+
+```bash
+# 扫描局域网，等待 3 秒（默认）
+aerosync discover
+
+# 扫描 5 秒，JSON 格式（适合脚本）
+aerosync discover --timeout 5 --json
+```
+
+**示例输出：**
+
+```
+Scanning for AeroSync receivers on local network (3s)…
+
+Found 2 receiver(s):
+
+NAME                 ADDRESS                VERSION    WS     AUTH
+--------------------------------------------------------------------
+machine-b.local      192.168.1.20:7788      0.2.0      yes    no
+gpu-server.local     10.0.0.5:7788          0.2.0      yes    yes
+```
+
+**JSON 模式（脚本）：**
+
+```bash
+# 取第一个 receiver 的地址
+ADDR=$(aerosync discover --json | head -1 | python3 -c "import sys,json; print(json.load(sys.stdin)['addr'])")
+aerosync send ./file.bin "$ADDR"
+```
+
+#### 方式二：手动指定 IP（跨网络 / 无 mDNS 场景）
+
+```bash
+# 直接用 host:port，自动协商协议
+aerosync send ./file.bin 192.168.1.20:7788
+
+# 强制 HTTP（NAT/防火墙限制 UDP 时）
+aerosync send ./file.bin http://192.168.1.20:7788/upload
+```
+
+---
+
+### 7.2 能力协商
+
+连接建立前有两步自动协商：
+
+#### 第一步：协议协商（`src/main.rs: negotiate_protocol()`）
+
+```
+sender 输入 host:port（无协议前缀）
+  │
+  ├─► GET http://host:port/health  (2s timeout)
+  │         Response Header: X-AeroSync: true ?
+  │
+  ├─ 是 AeroSync ──► 升级 QUIC: quic://host:(port+1)/upload
+  └─ 非 AeroSync / 超时 ──► 降级 HTTP: http://host:port/upload
+```
+
+输入已有协议前缀（`http://`、`quic://`、`s3://`、`ftp://`）时**跳过协商**，直接使用指定协议。
+
+#### 第二步：Preflight 磁盘检查（`aerosync-core/src/preflight.rs`）
+
+```
+GET http://host:port/health
+← { version, free_bytes, total_bytes, received_files }
+
+if free_bytes < total_transfer_size:
+    abort("Insufficient disk space on receiver")
+else:
+    proceed with transfer
+```
+
+`--no-preflight` 跳过此检查。`free_bytes == 0` 时（旧版 receiver）视为空间充足，不中断。
+
+---
+
+### 7.3 连接建立全流程时序
+
+```
+Machine A (sender)                     Machine B (receiver, IP=192.168.1.20)
+      │                                          │
+      │  [mDNS] _aerosync._tcp.local broadcast   │ ← receiver 启动时自动广播
+      │ ◄──────────────────────────────────────  │
+      │                                          │
+      │  aerosync discover                       │
+      │  → 发现 192.168.1.20:7788               │
+      │                                          │
+      │  GET /health (协议探测)                  │
+      │ ────────────────────────────────────────►│
+      │  200 OK  X-AeroSync: true                │
+      │ ◄──────────────────────────────────────  │
+      │                                          │
+      │  (升级到 QUIC, port 7789)                │
+      │                                          │
+      │  GET /health (preflight 磁盘检查)        │
+      │ ────────────────────────────────────────►│
+      │  { free_bytes: 500GB, version: "0.2.0" } │
+      │ ◄──────────────────────────────────────  │
+      │                                          │
+      │  QUIC connect → 192.168.1.20:7789        │
+      │ ────────────────────────────────────────►│
+      │  TLS 1.3 handshake (自签名证书)           │
+      │ ◄──────────────────────────────────────► │
+      │                                          │
+      │  UPLOAD:file.bin:1073741824:Bearer_token │
+      │ ────────────────────────────────────────►│
+      │                                          │
+      │  stream bytes (多并发流)                  │
+      │ ════════════════════════════════════════►│
+      │                                          │
+      │  OK:sha256hex                            │
+      │ ◄──────────────────────────────────────  │
+      │                                          │
+      │  (可选) GET /ws (WebSocket 订阅)         │
+      │ ────────────────────────────────────────►│
+      │  { event: "completed", filename: ... }   │
+      │ ◄──────────────────────────────────────  │
+```
+
+---
+
+### 7.4 认证
+
+#### 配置认证
+
+```bash
+# receiver 端
+aerosync receive --auth-token my_secret_token
+
+# sender 端
+aerosync send ./file.bin 192.168.1.20:7788 --token my_secret_token
+```
+
+#### 认证流程（HTTP）
+
+```
+HTTP Header: Authorization: Bearer my_secret_token
+  → AuthMiddleware::extract_token_from_header()
+  → AuthManager::authenticate(token, client_ip)
+  → 失败 → 401 Unauthorized，记录审计日志
+  → 成功 → 继续处理上传
+```
+
+支持格式：
+- `Authorization: Bearer <token>`
+- `X-Auth-Token: <token>`（直接 token）
+
+#### Token 管理
+
+```bash
+# 生成长期 token 并保存
+aerosync token generate --save --label "machine-b-prod"
+
+# 列出所有 token
+aerosync token list
+
+# 撤销 token
+aerosync token revoke <token-prefix>
+```
+
+---
+
+### 7.5 跨网络场景（NAT / 防火墙）
+
+AeroSync **不内置 NAT 穿透**，跨网络需借助外部手段：
+
+| 场景 | 推荐方案 | 说明 |
+|------|----------|------|
+| 同局域网 | mDNS 自动发现 | 零配置，`aerosync discover` 直接找到 |
+| receiver 有公网 IP | 直接连接 | 防火墙放行 TCP 7788（HTTP）和 UDP 7789（QUIC）|
+| 双方都在 NAT 后 | Tailscale / WireGuard | 建立 VPN 后用虚拟 IP 连接 |
+| 企业内网 | SSH 反向隧道 | `ssh -R 7788:localhost:7788 jump-server` |
+| UDP 被封锁（QUIC 不通） | 强制 HTTP | 用 `http://host:7788/upload` 显式 URL |
+| Docker / 容器 | 映射端口 | `-p 7788:7788 -p 7789:7789/udp` |
+
+#### QUIC 端口说明
+
+| 协议 | 端口 | 类型 | 用途 |
+|------|------|------|------|
+| HTTP | 7788（默认） | TCP | 文件上传、/health、/ws、/metrics |
+| QUIC | 7789（默认） | UDP | 高性能文件传输 |
+
+防火墙规则（以 iptables 为例）：
+
+```bash
+# receiver 机器上
+iptables -A INPUT -p tcp --dport 7788 -j ACCEPT
+iptables -A INPUT -p udp --dport 7789 -j ACCEPT
+```
+
+#### 仅 HTTP 模式（禁用 QUIC）
+
+```bash
+# receiver 端禁用 QUIC
+aerosync receive --http-only
+
+# sender 端强制 HTTP
+aerosync send ./file.bin http://host:7788/upload
+```
+
+---
+
+### 7.6 多机 Agent 协作
+
+两个 agent 通过 AeroSync 通信的完整操作流程：
+
+**机器 B（receiver agent）：**
+
+```bash
+# 方式一：Python agent（自动管理 aerosync receive 子进程）
+python examples/receiver_agent.py \
+  --save-dir /data/inbox \
+  --host 0.0.0.0:7788
+
+# 方式二：直接启动 aerosync receive
+aerosync receive --save-to /data/inbox --port 7788
+# 另一终端订阅事件
+aerosync watch --reconnect --format json 2>/dev/null \
+  | jq -r 'select(.event=="completed") | .filename'
+```
+
+**机器 A（sender agent）：**
+
+```bash
+# 自动发现局域网内的 receiver
+aerosync discover
+
+# Python agent（自动监控目录 + 订阅 WS 回传）
+python examples/sender_agent.py \
+  --watch-dir /data/outbox \
+  --host 192.168.1.20:7788 \
+  --results-dir /data/results
+
+# 或直接发送
+aerosync send ./payload.bin 192.168.1.20:7788
+```
+
+**跨机 WS 订阅（sender 监听 receiver 事件）：**
+
+```bash
+# 机器 A 订阅机器 B 的事件流
+aerosync watch 192.168.1.20:7788 --reconnect --format json 2>/dev/null \
+  | jq -r 'select(.event=="completed") | "File arrived: \(.filename) (\(.size) bytes)"'
+```
+
+---
+
+### 7.7 `aerosync discover` 命令参考
+
+**实现**：`src/main.rs: cmd_discover()`，调用 `AeroSyncMdns::discover()` 扫描局域网。
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--timeout <s>` | `3` | 扫描等待时间（秒） |
+| `--json` | false | JSON 格式输出（每行一个 receiver） |
+
+**JSON 输出字段**：
+
+```json
+{
+  "name":          "machine-b.local",
+  "host":          "192.168.1.20",
+  "port":          7788,
+  "addr":          "192.168.1.20:7788",
+  "version":       "0.2.0",
+  "ws_enabled":    true,
+  "auth_required": false
+}
+```
+
+**脚本集成示例**：
+
+```bash
+# 自动发现并发送到第一个无认证的 receiver
+ADDR=$(aerosync discover --json \
+  | jq -r 'select(.auth_required == false) | .addr' \
+  | head -1)
+[ -n "$ADDR" ] && aerosync send ./file.bin "$ADDR"
+
+# 发现所有支持 WS 的 receiver 并订阅
+aerosync discover --json \
+  | jq -r 'select(.ws_enabled == true) | .addr' \
+  | while read addr; do
+      aerosync watch "$addr" --reconnect &
+    done
+```
+
+---
+
+### 7.8 mDNS 服务发现实现参考
+
+**实现**：`aerosync-core/src/discovery.rs`
+
+**核心接口**：
+
+```rust
+/// 广播句柄 — 保持存活则持续广播，drop 时自动注销
+pub struct MdnsHandle { ... }
+
+pub struct AeroSyncMdns;
+
+impl AeroSyncMdns {
+    /// receiver 端：在局域网广播自身（FileReceiver::start() 自动调用）
+    pub fn register(
+        instance_name: &str,
+        port: u16,
+        version: &str,
+        ws_enabled: bool,
+        auth_required: bool,
+    ) -> Result<MdnsHandle, mdns_sd::Error>;
+
+    /// sender 端 / discover 命令：扫描局域网内所有 AeroSync receiver
+    pub async fn discover(timeout: Duration) -> Vec<AeroSyncPeer>;
+}
+
+pub struct AeroSyncPeer {
+    pub name:          String,
+    pub host:          String,   // IPv4 优先
+    pub port:          u16,
+    pub version:       Option<String>,
+    pub ws_enabled:    bool,
+    pub auth_required: bool,
+}
+
+impl AeroSyncPeer {
+    pub fn addr(&self) -> String;  // "host:port"
+}
+```
+
+**集成点**：
+- `FileReceiver::start()` → 自动调用 `AeroSyncMdns::register()`
+- `FileReceiver::stop()` → 自动 drop `MdnsHandle`，注销广播
+- `cmd_discover()` → 调用 `AeroSyncMdns::discover()`
+
+**mDNS 不可用时的行为**：广播失败只打印 `warn` 日志，不影响 receiver 正常工作（non-fatal）。
