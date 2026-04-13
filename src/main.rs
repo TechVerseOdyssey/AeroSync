@@ -463,7 +463,7 @@ async fn cmd_send(
         accept_invalid_certs: false,
     };
     let quic_config = QuicConfig {
-        auth_token: eff_token.clone(),
+        auth_token: eff_token.clone().map(Zeroizing::new),
         ..QuicConfig::default()
     };
     let adapter = Arc::new(AutoAdapter::new(http_config, quic_config));

@@ -1,4 +1,5 @@
 use crate::traits::{TransferProtocol, TransferProgress};
+use zeroize::Zeroizing;
 use aerosync_core::{AeroSyncError, Result, TransferTask};
 use async_trait::async_trait;
 use quinn::{ClientConfig, Connection, Endpoint};
@@ -81,7 +82,7 @@ pub struct QuicConfig {
     pub max_idle_timeout: u64,
     pub keep_alive_interval: u64,
     /// 发送方认证 Token（在 UPLOAD 消息头中传递）
-    pub auth_token: Option<String>,
+    pub auth_token: Option<Zeroizing<String>>,
 }
 
 impl Default for QuicConfig {
@@ -162,7 +163,7 @@ impl QuicTransfer {
 
         // 格式: UPLOAD:<filename>:<size>[:<token>]\n
         let header = if let Some(token) = &self.config.auth_token {
-            format!("UPLOAD:{}:{}:{}\n", file_name, file_size, token)
+            format!("UPLOAD:{}:{}:{}\n", file_name, file_size, token.as_str())
         } else {
             format!("UPLOAD:{}:{}\n", file_name, file_size)
         };

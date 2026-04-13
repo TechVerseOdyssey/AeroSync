@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use zeroize::Zeroizing;
 use tokio::sync::Mutex;
 
 use aerosync_core::{
@@ -127,17 +128,17 @@ impl AeroSyncMcpServer {
             .unwrap_or(0);
 
         let http_config = HttpConfig {
-            auth_token: params.token.clone(),
+            auth_token: params.token.clone().map(Zeroizing::new),
             upload_limit_bps,
             ..HttpConfig::default()
         };
         let quic_config = QuicConfig {
-            auth_token: params.token.clone(),
+            auth_token: params.token.clone().map(Zeroizing::new),
             ..QuicConfig::default()
         };
         let adapter = Arc::new(AutoAdapter::new(http_config, quic_config));
         let config = TransferConfig {
-            auth_token: params.token.clone(),
+            auth_token: params.token.clone().map(Zeroizing::new),
             ..TransferConfig::default()
         };
         let engine = TransferEngine::new(config);
@@ -261,16 +262,16 @@ impl AeroSyncMcpServer {
         let no_verify = params.no_verify.unwrap_or(false);
 
         let http_config = HttpConfig {
-            auth_token: params.token.clone(),
+            auth_token: params.token.clone().map(Zeroizing::new),
             ..HttpConfig::default()
         };
         let quic_config = QuicConfig {
-            auth_token: params.token.clone(),
+            auth_token: params.token.clone().map(Zeroizing::new),
             ..QuicConfig::default()
         };
         let adapter = Arc::new(AutoAdapter::new(http_config, quic_config));
         let config = TransferConfig {
-            auth_token: params.token.clone(),
+            auth_token: params.token.clone().map(Zeroizing::new),
             ..TransferConfig::default()
         };
         let engine = TransferEngine::new(config);

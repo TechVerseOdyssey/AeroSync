@@ -337,9 +337,9 @@ mod tests {
     #[test]
     fn test_resolve_quic_config_inherits_auth_token() {
         let mut base = default_quic_config();
-        base.auth_token = Some("secret-token".to_string());
+        base.auth_token = Some("secret-token".to_string().into());
         let result = resolve_quic_config("quic://127.0.0.1:7789", &base).unwrap();
-        assert_eq!(result.auth_token, Some("secret-token".to_string()));
+        assert_eq!(result.auth_token, Some("secret-token".to_string().into()));
     }
 
     // ── 6. AutoAdapter construction ───────────────────────────────────────────
