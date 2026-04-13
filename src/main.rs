@@ -4,7 +4,6 @@ use zeroize::Zeroizing;
 
 use aerosync_core::{
     auth::{AuthConfig, AuthManager},
-    error_advice::format_error_with_advice,
     resume::ResumeStore,
     server::{FileReceiver, ServerConfig, TlsConfig},
     transfer::{TransferConfig, TransferEngine, TransferTask},
