@@ -18,7 +18,7 @@ quinn = { workspace = true }
 rustls = { workspace = true }
 rcgen = "0.11"
 bytes = "1.0"
-reqwest = { version = "0.11", features = ["multipart", "json", "stream"] }
+reqwest = { workspace = true }
 rustls-native-certs = "0.6"
 rustls-pemfile = "1"
 sha2 = "0.10"

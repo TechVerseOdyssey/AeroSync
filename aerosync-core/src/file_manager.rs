@@ -101,8 +101,19 @@ impl FileManager {
     }
 
     pub fn validate_path<P: AsRef<Path>>(path: P) -> Result<()> {
+        Self::validate_path_with_base(path, None)
+    }
+
+    /// 校验路径合法性。
+    ///
+    /// 检查项：
+    /// 1. 路径不能为空字符串
+    /// 2. 路径不能包含 null byte
+    /// 3. 路径不能含有 `..` 组件（防止目录穿越）
+    /// 4. 若提供 `base_dir`，则路径经 canonicalize 后必须在 `base_dir` 内部
+    pub fn validate_path_with_base<P: AsRef<Path>>(path: P, base_dir: Option<&Path>) -> Result<()> {
         let path = path.as_ref();
-        
+
         if path.to_string_lossy().is_empty() {
             return Err(AeroSyncError::InvalidConfig("Empty path".to_string()));
         }
@@ -110,6 +121,31 @@ impl FileManager {
         let path_str = path.to_string_lossy();
         if path_str.contains('\0') {
             return Err(AeroSyncError::InvalidConfig("Path contains null character".to_string()));
+        }
+
+        // 禁止路径中出现 `..` 组件，防止目录穿越攻击
+        use std::path::Component;
+        if path.components().any(|c| c == Component::ParentDir) {
+            return Err(AeroSyncError::InvalidConfig(
+                "Path must not contain '..' components".to_string(),
+            ));
+        }
+
+        // 若提供了 base_dir，确认路径在其内部（通过 canonicalize 解析符号链接）
+        if let Some(base) = base_dir {
+            let canonical_base = std::fs::canonicalize(base).map_err(|e| {
+                AeroSyncError::InvalidConfig(format!("Cannot canonicalize base_dir: {}", e))
+            })?;
+            let canonical_path = std::fs::canonicalize(path).map_err(|e| {
+                AeroSyncError::InvalidConfig(format!("Cannot canonicalize path: {}", e))
+            })?;
+            if !canonical_path.starts_with(&canonical_base) {
+                return Err(AeroSyncError::InvalidConfig(format!(
+                    "Path '{}' is outside the allowed base directory '{}'",
+                    canonical_path.display(),
+                    canonical_base.display()
+                )));
+            }
         }
 
         Ok(())

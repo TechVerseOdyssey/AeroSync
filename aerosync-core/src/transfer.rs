@@ -16,9 +16,13 @@ use zeroize::Zeroizing;
 pub struct TransferConfig {
     /// 最大并发传输任务数（Semaphore permits）
     pub max_concurrent_transfers: usize,
+    /// 分片上传时每个分片的大小（bytes），默认 4MB，取值范围 1 ~ chunked_threshold
     pub chunk_size: usize,
+    /// 单次传输失败后的最大重试次数，默认 3，0 表示不重试
     pub retry_attempts: u32,
+    /// 单次请求超时（秒），默认 60，0 表示不超时
     pub timeout_seconds: u64,
+    /// 是否优先使用 QUIC 协议（默认 true；远端不支持时自动降级到 HTTP）
     pub use_quic: bool,
     /// 发送方认证 Token（drop 时自动清零内存）
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,6 +70,32 @@ impl TransferConfig {
         } else {
             1
         }
+    }
+
+    /// 校验配置合法性，返回第一个违规字段的错误描述。
+    ///
+    /// 规则：
+    /// - `max_concurrent_transfers` 必须 > 0
+    /// - `chunk_size` 必须 > 0
+    /// - `chunk_size` 必须 <= `chunked_threshold`
+    pub fn validate(&self) -> Result<()> {
+        if self.max_concurrent_transfers == 0 {
+            return Err(AeroSyncError::InvalidConfig(
+                "max_concurrent_transfers must be > 0".to_string(),
+            ));
+        }
+        if self.chunk_size == 0 {
+            return Err(AeroSyncError::InvalidConfig(
+                "chunk_size must be > 0".to_string(),
+            ));
+        }
+        if self.chunk_size as u64 > self.chunked_threshold {
+            return Err(AeroSyncError::InvalidConfig(format!(
+                "chunk_size ({}) must be <= chunked_threshold ({})",
+                self.chunk_size, self.chunked_threshold
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -680,17 +710,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_successful_upload_completes() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("failed to create temp dir");
         let file_path = dir.path().join("upload.bin");
-        tokio::fs::write(&file_path, b"test data").await.unwrap();
+        tokio::fs::write(&file_path, b"test data").await.expect("failed to write temp file");
 
         let engine = TransferEngine::new(TransferConfig::default());
         let (adapter, up_count, _) = SuccessAdapter::new();
-        engine.start(adapter).await.unwrap();
+        engine.start(adapter).await.expect("engine start failed");
 
         let task = TransferTask::new_upload(file_path, "http://host/upload".to_string(), 9);
         let task_id = task.id;
-        engine.add_transfer(task).await.unwrap();
+        engine.add_transfer(task).await.expect("add_transfer failed");
         sleep(Duration::from_millis(200)).await;
 
         let monitor = engine.get_progress_monitor().await;

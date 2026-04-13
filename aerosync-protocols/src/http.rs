@@ -47,6 +47,12 @@ impl Default for HttpConfig {
 }
 
 impl HttpTransfer {
+    /// 创建一个新的 `HttpTransfer` 实例，内部会构造独立的 `reqwest::Client`（即独立连接池）。
+    ///
+    /// **注意**：每次调用 `new()` 都会分配一个新的连接池。若在同一进程中需要多个
+    /// `HttpTransfer` 实例（例如同时上传到不同目标），建议改用
+    /// [`HttpTransfer::new_with_client`]，共享同一个 `Arc<Client>`，以复用连接池、
+    /// 减少文件描述符消耗并提升性能。
     pub fn new(config: HttpConfig) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.timeout_seconds))
