@@ -1,7 +1,7 @@
-/// Integration tests for MCP get_transfer_status and SQLite TaskStore.
-///
-/// 4. MCP task registry — unknown id, completed, failed, running states
-/// 5. TaskStore round-trip — persist → reload → states survive simulated restart
+//! Integration tests for MCP get_transfer_status and SQLite TaskStore.
+//!
+//! 4. MCP task registry — unknown id, completed, failed, running states
+//! 5. TaskStore round-trip — persist → reload → states survive simulated restart
 
 use aerosync_mcp::{
     server::{AeroSyncMcpServer, BackgroundTaskStatus, TaskEntry},

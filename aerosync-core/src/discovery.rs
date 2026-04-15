@@ -182,7 +182,7 @@ impl AeroSyncMdns {
 
                     // 检查 /ws 是否存在（HEAD 请求，带 Upgrade 头）
                     let ws_enabled = client
-                        .get(&format!("http://127.0.0.1:{}/ws", port))
+                        .get(format!("http://127.0.0.1:{}/ws", port))
                         .header("Upgrade", "websocket")
                         .header("Connection", "Upgrade")
                         .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
@@ -229,11 +229,7 @@ impl AeroSyncMdns {
         let mut peers: HashMap<String, AeroSyncPeer> = HashMap::new();
         let deadline = std::time::Instant::now() + timeout;
 
-        loop {
-            let remaining = match deadline.checked_duration_since(std::time::Instant::now()) {
-                Some(d) => d,
-                None => break,
-            };
+        while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
             let poll = remaining.min(Duration::from_millis(200));
 
             match receiver.recv_timeout(poll) {

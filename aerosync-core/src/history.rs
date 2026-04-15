@@ -39,6 +39,7 @@ pub struct HistoryEntry {
 
 impl HistoryEntry {
     /// 创建一条成功的传输记录
+    #[allow(clippy::too_many_arguments)]
     pub fn success(
         filename: impl Into<String>,
         saved_path: Option<PathBuf>,

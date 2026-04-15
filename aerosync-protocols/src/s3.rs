@@ -1,16 +1,16 @@
-/// S3 协议适配器
-///
-/// 支持 AWS S3 和兼容 S3 API 的存储服务（如 MinIO）。
-/// URL 格式：s3://bucket/path/to/file
-///
-/// 认证策略：
-/// - 若设置了 endpoint（MinIO 等），使用 Bearer token 认证
-/// - 否则，使用完整的 AWS Signature Version 4 (SigV4) 认证
-///
-/// Multipart Upload（大文件分片上传）：
-/// - 文件大小超过 `multipart_threshold` 时自动切换为分片上传
-/// - 三步流程：Initiate → Upload Part(s) → Complete
-/// - 上传 ID（UploadId）可通过 `ResumeState.metadata` 持久化以支持断点续传
+//! S3 协议适配器
+//!
+//! 支持 AWS S3 和兼容 S3 API 的存储服务（如 MinIO）。
+//! URL 格式：s3://bucket/path/to/file
+//!
+//! 认证策略：
+//! - 若设置了 endpoint（MinIO 等），使用 Bearer token 认证
+//! - 否则，使用完整的 AWS Signature Version 4 (SigV4) 认证
+//!
+//! Multipart Upload（大文件分片上传）：
+//! - 文件大小超过 `multipart_threshold` 时自动切换为分片上传
+//! - 三步流程：Initiate → Upload Part(s) → Complete
+//! - 上传 ID（UploadId）可通过 `ResumeState.metadata` 持久化以支持断点续传
 
 use crate::traits::{TransferProtocol, TransferProgress};
 use crate::utils::send_progress;
@@ -755,7 +755,7 @@ fn unix_to_datetime(ts: u64) -> (u32, u32, u32, u32, u32, u32) {
 }
 
 fn is_leap(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// HMAC-SHA256: key × data → 32-byte digest
@@ -956,12 +956,9 @@ mod tests {
         // The request will fail (no server) but we verify it doesn't try to initiate multipart
         let result = s3.upload_auto(tmp.path(), url, tx).await;
         // Expected: Network error (no server) from simple PUT path
-        match result {
-            Err(AeroSyncError::Network(msg)) => {
-                // Should be a PUT error, not an "Initiate Multipart" error
-                assert!(!msg.contains("Initiate Multipart"), "Should use simple PUT for small files, got: {}", msg);
-            }
-            _ => {} // Other error types are also acceptable
+        if let Err(AeroSyncError::Network(msg)) = result {
+            // Should be a PUT error, not an "Initiate Multipart" error
+            assert!(!msg.contains("Initiate Multipart"), "Should use simple PUT for small files, got: {}", msg);
         }
     }
 
@@ -987,15 +984,12 @@ mod tests {
 
         let result = s3.upload_auto(tmp.path(), url, tx).await;
         // Expected: Network error from Initiate Multipart (no server), not from simple PUT
-        match result {
-            Err(AeroSyncError::Network(msg)) => {
-                assert!(
-                    msg.contains("Initiate Multipart") || msg.contains("connection refused") || msg.contains("failed"),
-                    "Expected multipart error, got: {}",
-                    msg
-                );
-            }
-            _ => {}
+        if let Err(AeroSyncError::Network(msg)) = result {
+            assert!(
+                msg.contains("Initiate Multipart") || msg.contains("connection refused") || msg.contains("failed"),
+                "Expected multipart error, got: {}",
+                msg
+            );
         }
     }
 }

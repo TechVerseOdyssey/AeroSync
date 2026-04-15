@@ -1,13 +1,13 @@
-/// Multi-destination routing module
-///
-/// Allows the server to route incoming files to different directories based on
-/// configurable rules. Rules are matched in order; the first match wins.
-/// If no rule matches, the default `receive_directory` is used.
-///
-/// Rule matching criteria (all optional, each defaults to "match any"):
-/// - `tag`       — string sent by the client via the `X-AeroSync-Tag` header
-/// - `sender_ip` — exact IP match or CIDR prefix (prefix match on string)
-/// - `extension` — file extension without the leading dot (case-insensitive)
+//! Multi-destination routing module
+//!
+//! Allows the server to route incoming files to different directories based on
+//! configurable rules. Rules are matched in order; the first match wins.
+//! If no rule matches, the default `receive_directory` is used.
+//!
+//! Rule matching criteria (all optional, each defaults to "match any"):
+//! - `tag`       — string sent by the client via the `X-AeroSync-Tag` header
+//! - `sender_ip` — exact IP match or CIDR prefix (prefix match on string)
+//! - `extension` — file extension without the leading dot (case-insensitive)
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

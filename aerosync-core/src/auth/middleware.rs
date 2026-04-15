@@ -27,8 +27,8 @@ impl AuthMiddleware {
     pub fn extract_token_from_header(&self, auth_header: Option<&str>) -> Option<String> {
         if let Some(header) = auth_header {
             // Bearer Token 格式
-            if header.starts_with("Bearer ") {
-                return Some(header[7..].to_string());
+            if let Some(stripped) = header.strip_prefix("Bearer ") {
+                return Some(stripped.to_string());
             }
             // 直接 Token
             return Some(header.to_string());

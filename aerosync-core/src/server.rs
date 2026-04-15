@@ -6,7 +6,7 @@ use crate::routing::{Router, RouterConfig};
 use crate::{AeroSyncError, Result};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
@@ -188,13 +188,12 @@ impl FileReceiver {
         let auth_manager = config
             .auth
             .clone()
-            .map(|auth_cfg| {
+            .and_then(|auth_cfg| {
                 AuthManager::new(auth_cfg)
-                    .map(|m| Arc::new(m))
+                    .map(Arc::new)
                     .map_err(|e| tracing::warn!("Auth init failed: {}", e))
                     .ok()
-            })
-            .flatten();
+            });
 
         if config.enable_http {
             let http_cfg = config.clone();
@@ -984,8 +983,8 @@ fn get_disk_space(path: &std::path::Path) -> (u64, u64) {
         unsafe {
             let mut stat: libc::statvfs = MaybeUninit::zeroed().assume_init();
             if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
-                let free = stat.f_bavail as u64 * stat.f_bsize as u64;
-                let total = stat.f_blocks as u64 * stat.f_bsize as u64;
+                let free = stat.f_bavail as u64 * stat.f_bsize;
+                let total = stat.f_blocks as u64 * stat.f_bsize;
                 return (free, total);
             }
         }
@@ -1611,7 +1610,7 @@ async fn handle_quic_connection(
 
         let filename = parts[1];
         let file_size: u64 = parts[2].trim().parse().unwrap_or(0);
-        let token = parts.get(3).map(|t| *t);
+        let token = parts.get(3).copied();
 
         // 认证（若启用）
         if let Some(ref auth) = auth_manager {
@@ -1808,9 +1807,7 @@ fn sanitize_filename(filename: &str) -> String {
     let filename = if filename.contains("..") || filename.starts_with('/') {
         // 仅保留最后一个路径段
         filename
-            .split('/')
-            .filter(|s| !s.is_empty() && *s != ".." && *s != ".")
-            .last()
+            .split('/').rfind(|s| !s.is_empty() && *s != ".." && *s != ".")
             .unwrap_or("file")
     } else {
         filename
@@ -1837,7 +1834,7 @@ fn sanitize_filename(filename: &str) -> String {
 }
 
 fn get_unique_file_path(
-    receive_dir: &PathBuf,
+    receive_dir: &Path,
     safe_name: &str,
     allow_overwrite: bool,
 ) -> PathBuf {
@@ -1846,7 +1843,7 @@ fn get_unique_file_path(
         return path;
     }
     // 分离父目录、文件名主体和扩展名，仅在文件名主体后追加计数器
-    let parent = path.parent().unwrap_or(receive_dir.as_path()).to_path_buf();
+    let parent = path.parent().unwrap_or(receive_dir).to_path_buf();
     let stem = path
         .file_stem()
         .unwrap_or_default()
@@ -1869,6 +1866,14 @@ fn get_unique_file_path(
         }
     }
     path
+}
+
+/// 获取本机主机名用于 mDNS 实例名，失败时回退到 "aerosync"
+fn hostname_for_mdns() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .unwrap_or_else(|| "aerosync".to_string())
 }
 
 #[cfg(test)]
@@ -1921,7 +1926,7 @@ mod tests {
     #[test]
     fn test_get_unique_path_no_collision() {
         let dir = TempDir::new().unwrap();
-        let path = get_unique_file_path(&dir.path().to_path_buf(), "new.bin", false);
+        let path = get_unique_file_path(dir.path(), "new.bin", false);
         assert_eq!(path, dir.path().join("new.bin"));
     }
 
@@ -1930,7 +1935,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // Create the file so it exists
         std::fs::write(dir.path().join("existing.bin"), b"data").unwrap();
-        let path = get_unique_file_path(&dir.path().to_path_buf(), "existing.bin", false);
+        let path = get_unique_file_path(dir.path(), "existing.bin", false);
         assert_eq!(path, dir.path().join("existing_1.bin"));
     }
 
@@ -1938,7 +1943,7 @@ mod tests {
     fn test_get_unique_path_overwrite_returns_original() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("file.bin"), b"data").unwrap();
-        let path = get_unique_file_path(&dir.path().to_path_buf(), "file.bin", true);
+        let path = get_unique_file_path(dir.path(), "file.bin", true);
         assert_eq!(path, dir.path().join("file.bin"));
     }
 
@@ -1947,7 +1952,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("data.bin"), b"a").unwrap();
         std::fs::write(dir.path().join("data_1.bin"), b"b").unwrap();
-        let path = get_unique_file_path(&dir.path().to_path_buf(), "data.bin", false);
+        let path = get_unique_file_path(dir.path(), "data.bin", false);
         assert_eq!(path, dir.path().join("data_2.bin"));
     }
 
@@ -1976,29 +1981,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_receiver_get_config() {
-        let mut cfg = ServerConfig::default();
-        cfg.http_port = 9999;
-        let receiver = FileReceiver::new(cfg);
+        let receiver = FileReceiver::new(ServerConfig { http_port: 9999, ..ServerConfig::default() });
         assert_eq!(receiver.get_config().await.http_port, 9999);
     }
 
     #[tokio::test]
     async fn test_receiver_update_config() {
-        let cfg = ServerConfig::default();
-        let receiver = FileReceiver::new(cfg);
-        let mut new_cfg = ServerConfig::default();
-        new_cfg.http_port = 8888;
+        let receiver = FileReceiver::new(ServerConfig::default());
+        let new_cfg = ServerConfig { http_port: 8888, ..ServerConfig::default() };
         receiver.update_config(new_cfg).await.unwrap();
         assert_eq!(receiver.get_config().await.http_port, 8888);
     }
 
     #[tokio::test]
     async fn test_receiver_get_server_urls_http_only() {
-        let mut cfg = ServerConfig::default();
-        cfg.bind_address = "0.0.0.0".to_string();
-        cfg.http_port = 7788;
-        cfg.enable_quic = false;
-        let receiver = FileReceiver::new(cfg);
+        let receiver = FileReceiver::new(ServerConfig {
+            bind_address: "0.0.0.0".to_string(),
+            http_port: 7788,
+            enable_quic: false,
+            ..ServerConfig::default()
+        });
         let urls = receiver.get_server_urls().await;
         assert_eq!(urls.len(), 1);
         assert!(urls[0].contains("7788"));
@@ -2362,12 +2364,4 @@ mod tests {
 
         receiver.stop().await.unwrap();
     }
-}
-
-/// 获取本机主机名用于 mDNS 实例名，失败时回退到 "aerosync"
-fn hostname_for_mdns() -> String {
-    hostname::get()
-        .ok()
-        .and_then(|s| s.into_string().ok())
-        .unwrap_or_else(|| "aerosync".to_string())
 }

@@ -1,7 +1,7 @@
-/// FTP 协议适配器
-///
-/// 使用 suppaftp（tokio 异步后端）实现 FTP/FTPS 文件传输。
-/// URL 格式：ftp://host:port/path/to/file
+//! FTP 协议适配器
+//!
+//! 使用 suppaftp（tokio 异步后端）实现 FTP/FTPS 文件传输。
+//! URL 格式：ftp://host:port/path/to/file
 
 use crate::traits::{TransferProtocol, TransferProgress};
 use aerosync_core::{AeroSyncError, Result, TransferTask};

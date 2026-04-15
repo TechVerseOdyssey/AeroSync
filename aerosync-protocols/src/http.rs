@@ -588,7 +588,7 @@ mod tests {
             .and(warp::multipart::form().max_length(1024 * 1024))
             .and_then(|auth: String, mut form: warp::multipart::FormData| async move {
                 use futures::TryStreamExt;
-                while let Some(_) = form.try_next().await.unwrap_or(None) {}
+                while form.try_next().await.unwrap_or(None).is_some() {}
                 if auth == "Bearer test-token" {
                     Ok::<_, Infallible>(warp::reply::with_status(
                         "ok",
@@ -634,7 +634,7 @@ mod tests {
             .and_then(
                 |hash: Option<String>, mut form: warp::multipart::FormData| async move {
                     use futures::TryStreamExt;
-                    while let Some(_) = form.try_next().await.unwrap_or(None) {}
+                    while form.try_next().await.unwrap_or(None).is_some() {}
                     if hash.is_some() {
                         Ok::<_, Infallible>(warp::reply::with_status(
                             "ok",
@@ -680,7 +680,7 @@ mod tests {
             .and(warp::multipart::form().max_length(1024 * 1024))
             .and_then(|mut form: warp::multipart::FormData| async move {
                 use futures::TryStreamExt;
-                while let Some(_) = form.try_next().await.unwrap_or(None) {}
+                while form.try_next().await.unwrap_or(None).is_some() {}
                 Ok::<_, Infallible>(warp::reply::with_status(
                     "rejected",
                     warp::http::StatusCode::FORBIDDEN,

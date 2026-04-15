@@ -1,8 +1,8 @@
-/// 断点续传状态管理
-///
-/// 状态文件存储路径：`{state_dir}/.aerosync/{task_id}.json`
-/// 每个传输任务对应一个 JSON 文件，记录已完成的分片列表。
-/// 完成后删除文件；重启后自动检测并恢复。
+//! 断点续传状态管理
+//!
+//! 状态文件存储路径：`{state_dir}/.aerosync/{task_id}.json`
+//! 每个传输任务对应一个 JSON 文件，记录已完成的分片列表。
+//! 完成后删除文件；重启后自动检测并恢复。
 
 use crate::{AeroSyncError, Result};
 use serde::{Deserialize, Serialize};
@@ -73,7 +73,7 @@ impl ResumeState {
         let total_chunks = if total_size == 0 {
             1
         } else {
-            ((total_size + chunk_size - 1) / chunk_size) as u32
+            total_size.div_ceil(chunk_size) as u32
         };
         let now = now_secs();
         Self {
@@ -120,7 +120,7 @@ impl ResumeState {
     /// 计算指定分片的实际大小
     pub fn chunk_size_of(&self, index: u32) -> u64 {
         let last = self.total_chunks.saturating_sub(1);
-        if index == last && self.total_size % self.chunk_size != 0 {
+        if index == last && !self.total_size.is_multiple_of(self.chunk_size) {
             self.total_size % self.chunk_size
         } else {
             self.chunk_size

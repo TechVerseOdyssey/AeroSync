@@ -1,5 +1,5 @@
-/// AutoAdapter: 根据 destination URL 自动选择 HTTP 或 QUIC 协议，
-/// 实现 aerosync-core 的 ProtocolAdapter trait，由 main.rs 注入。
+//! AutoAdapter: 根据 destination URL 自动选择 HTTP 或 QUIC 协议，
+//! 实现 aerosync-core 的 ProtocolAdapter trait，由 main.rs 注入。
 
 use aerosync_core::resume::ResumeState;
 use aerosync_core::transfer::{ProtocolAdapter, ProtocolProgress, TransferTask};

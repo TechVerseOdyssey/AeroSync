@@ -158,6 +158,12 @@ pub struct AeroSyncMcpServer {
     secret: Option<Zeroizing<String>>,
 }
 
+impl Default for AeroSyncMcpServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[tool_router]
 impl AeroSyncMcpServer {
     pub fn new() -> Self {
@@ -236,7 +242,7 @@ impl AeroSyncMcpServer {
         let dest_url = negotiate_protocol(&params.destination).await;
         let no_verify = params.no_verify.unwrap_or(false);
         let upload_limit_bps = params.limit.as_deref()
-            .and_then(|s| aerosync_protocols::ratelimit::parse_limit(s))
+            .and_then(aerosync_protocols::ratelimit::parse_limit)
             .unwrap_or(0);
 
         // 生成唯一任务 ID，立即注册为 Pending
@@ -995,6 +1001,7 @@ async fn collect_files_recursive(
     Ok(result)
 }
 
+#[allow(clippy::type_complexity)]
 fn collect_files_recursive_boxed(
     base: std::path::PathBuf,
     dir: std::path::PathBuf,

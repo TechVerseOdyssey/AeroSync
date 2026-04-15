@@ -1,9 +1,9 @@
-/// 流水线端到端集成测试
-///
-/// 验证 AutoAdapter + TransferEngine 在并发上传 100 个小文件时的完整传输链路：
-/// - MultiProgress-style 并发（最多 16 个文件同时传输）
-/// - 每个文件独立校验成功
-/// - 服务端 warp 接收并记录所有文件
+//! 流水线端到端集成测试
+//!
+//! 验证 AutoAdapter + TransferEngine 在并发上传 100 个小文件时的完整传输链路：
+//! - MultiProgress-style 并发（最多 16 个文件同时传输）
+//! - 每个文件独立校验成功
+//! - 服务端 warp 接收并记录所有文件
 
 use aerosync_core::transfer::{TransferConfig, TransferEngine, TransferTask};
 use aerosync_protocols::{http::HttpConfig, quic::QuicConfig, AutoAdapter};

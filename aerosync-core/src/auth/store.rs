@@ -72,7 +72,7 @@ impl TokenStore {
             return Ok(TokenFile::default());
         }
         let content = std::fs::read_to_string(&self.path)
-            .map_err(|e| AeroSyncError::FileIo(e))?;
+            .map_err(AeroSyncError::FileIo)?;
         toml::from_str(&content)
             .map_err(|e| AeroSyncError::System(format!("tokens.toml parse error: {}", e)))
     }

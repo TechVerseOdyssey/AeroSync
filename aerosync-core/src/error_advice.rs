@@ -1,8 +1,8 @@
-/// Error advice module
-///
-/// Provides human-readable descriptions and actionable suggestions for the
-/// most common AeroSync errors. Called from the CLI to print friendly output
-/// when a top-level operation fails.
+//! Error advice module
+//!
+//! Provides human-readable descriptions and actionable suggestions for the
+//! most common AeroSync errors. Called from the CLI to print friendly output
+//! when a top-level operation fails.
 
 use crate::AeroSyncError;
 

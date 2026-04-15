@@ -24,6 +24,12 @@ pub struct FilePermissions {
 
 pub struct FileManager;
 
+impl Default for FileManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileManager {
     pub fn new() -> Self {
         Self

@@ -70,7 +70,7 @@ impl ProgressMonitor {
             transfer.bytes_transferred = bytes_transferred;
             transfer.transfer_speed = speed;
             transfer.status = TransferStatus::InProgress;
-            transfer.elapsed_time = transfer.elapsed_time + Duration::from_millis(100);
+            transfer.elapsed_time += Duration::from_millis(100);
 
             if speed > 0.0 && bytes_transferred < transfer.total_bytes {
                 let remaining_bytes = transfer.total_bytes - bytes_transferred;

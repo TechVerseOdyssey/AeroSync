@@ -1,8 +1,8 @@
-/// Integration tests for Phase 2+3 new HTTP endpoints:
-///
-/// 1. GET /health  — enhanced fields (active_transfers, queue_depth, protocols, version)
-/// 2. POST /upload/batch — multipart batch, multi-file save, correct response shape
-/// 3. POST /upload Content-Length precheck — 413 on oversized Content-Length header
+//! Integration tests for Phase 2+3 new HTTP endpoints:
+//!
+//! 1. GET /health  — enhanced fields (active_transfers, queue_depth, protocols, version)
+//! 2. POST /upload/batch — multipart batch, multi-file save, correct response shape
+//! 3. POST /upload Content-Length precheck — 413 on oversized Content-Length header
 
 use aerosync_core::server::{FileReceiver, ServerConfig};
 use std::time::Duration;

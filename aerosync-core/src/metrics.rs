@@ -1,11 +1,11 @@
-/// Prometheus exposition format metrics exporter
-///
-/// Maintains atomic counters for all transfer events and exposes them
-/// as a `GET /metrics` endpoint in the standard Prometheus text format.
-///
-/// Design: zero-lock counters using `AtomicU64` and `AtomicI64`.
-/// The `render()` method accepts current disk space values (obtained just
-/// before calling) to avoid storing mutable gauge state.
+//! Prometheus exposition format metrics exporter
+//!
+//! Maintains atomic counters for all transfer events and exposes them
+//! as a `GET /metrics` endpoint in the standard Prometheus text format.
+//!
+//! Design: zero-lock counters using `AtomicU64` and `AtomicI64`.
+//! The `render()` method accepts current disk space values (obtained just
+//! before calling) to avoid storing mutable gauge state.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

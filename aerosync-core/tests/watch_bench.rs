@@ -1,13 +1,13 @@
-/// aerosync watch 并发连接性能压测
-///
-/// 使用 `#[tokio::test]` 驱动，无需 criterion；
-/// 通过 `cargo test -p aerosync-core --test watch_bench -- --nocapture` 查看输出。
-///
-/// 覆盖场景：
-///   bench_broadcast_latency_vs_clients   — 1/10/50/100 并发客户端时的广播延迟 (p50/p99)
-///   bench_event_throughput_single_client — 单客户端 1000 事件吞吐量
-///   bench_concurrent_connect_time        — 100 客户端并发建连总耗时
-///   bench_broadcast_with_slow_consumer   — 慢消费者不阻塞其他客户端
+//! aerosync watch 并发连接性能压测
+//!
+//! 使用 `#[tokio::test]` 驱动，无需 criterion；
+//! 通过 `cargo test -p aerosync-core --test watch_bench -- --nocapture` 查看输出。
+//!
+//! 覆盖场景：
+//!   bench_broadcast_latency_vs_clients   — 1/10/50/100 并发客户端时的广播延迟 (p50/p99)
+//!   bench_event_throughput_single_client — 单客户端 1000 事件吞吐量
+//!   bench_concurrent_connect_time        — 100 客户端并发建连总耗时
+//!   bench_broadcast_with_slow_consumer   — 慢消费者不阻塞其他客户端
 
 use aerosync_core::server::{FileReceiver, ServerConfig, WsEvent};
 use futures::StreamExt;

@@ -42,6 +42,12 @@ pub struct EventBus {
     handlers: Vec<Box<dyn UiEventHandler>>,
 }
 
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventBus {
     pub fn new() -> Self {
         Self {

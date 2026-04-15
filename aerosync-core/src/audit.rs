@@ -151,7 +151,7 @@ impl AuditLogger {
             .append(true)
             .open(path)
             .await
-            .map_err(|e| AeroSyncError::FileIo(e))?;
+            .map_err(AeroSyncError::FileIo)?;
 
         Ok(Self {
             file: Arc::new(Mutex::new(file)),
@@ -169,10 +169,10 @@ impl AuditLogger {
         let mut file = self.file.lock().await;
         file.write_all(line.as_bytes())
             .await
-            .map_err(|e| AeroSyncError::FileIo(e))?;
+            .map_err(AeroSyncError::FileIo)?;
         file.flush()
             .await
-            .map_err(|e| AeroSyncError::FileIo(e))?;
+            .map_err(AeroSyncError::FileIo)?;
 
         Ok(())
     }
@@ -186,8 +186,7 @@ impl AuditLogger {
     pub async fn read_all(&self) -> Result<Vec<AuditRecord>> {
         let content = tokio::fs::read_to_string(&self.path)
             .await
-            .map_err(|e| AeroSyncError::FileIo(e))?;
-
+            .map_err(AeroSyncError::FileIo)?;
         let records = content
             .lines()
             .filter(|l| !l.trim().is_empty())

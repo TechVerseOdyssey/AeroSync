@@ -1,10 +1,10 @@
-/// Integration tests: aerosync watch 重连机制验证
-///
-/// 每个测试场景：
-/// 1. 启动真实 FileReceiver（HTTP only，随机端口）
-/// 2. 用 tokio-tungstenite 客户端连接 /ws
-/// 3. 广播 WsEvent，验证客户端收到
-/// 4. 模拟断连 / 服务停止，验证重连行为
+//! Integration tests: aerosync watch 重连机制验证
+//!
+//! 每个测试场景：
+//! 1. 启动真实 FileReceiver（HTTP only，随机端口）
+//! 2. 用 tokio-tungstenite 客户端连接 /ws
+//! 3. 广播 WsEvent，验证客户端收到
+//! 4. 模拟断连 / 服务停止，验证重连行为
 
 use aerosync_core::server::{FileReceiver, ServerConfig, WsEvent};
 use futures::StreamExt;

@@ -381,6 +381,7 @@ async fn main() -> anyhow::Result<()> {
 
 // ──────────────────────────── send ──────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_send(
     source: PathBuf,
     destination: String,
@@ -456,7 +457,7 @@ async fn cmd_send(
     // 构建协议适配器
     let eff_token = token.clone().or_else(|| app_config.auth.token.clone());
     let upload_limit_bps = limit.as_deref()
-        .and_then(|s| parse_limit(s))
+        .and_then(parse_limit)
         .unwrap_or(0);
     if upload_limit_bps > 0 {
         println!("Upload limit: {:.1} KB/s", upload_limit_bps as f64 / 1024.0);
@@ -754,6 +755,7 @@ async fn negotiate_protocol(dest: &str) -> String {
 
 // ──────────────────────────── receive ───────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_receive(
     port: u16,
     quic_port: u16,
