@@ -1,8 +1,12 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use zeroize::Zeroizing;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use aerosync_core::{
+    audit::AuditLogger,
     auth::AuthConfig,
     discovery::AeroSyncMdns,
     server::{FileReceiver, ServerConfig},
@@ -18,6 +22,38 @@ use rmcp::{
 use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
+
+// ───────────────────────── 后台任务状态注册表 ───────────────────────────────
+
+/// 后台传输任务的状态
+#[derive(Debug, Clone)]
+pub enum BackgroundTaskStatus {
+    /// 任务已提交，等待开始
+    Pending,
+    /// 传输进行中
+    Running,
+    /// 传输成功完成
+    Completed { files: usize, bytes: u64, speed_mbs: f64 },
+    /// 传输失败
+    Failed(String),
+}
+
+/// 后台任务条目，含状态和最后更新时间（用于 TTL 清理）
+struct TaskEntry {
+    status: BackgroundTaskStatus,
+    /// 描述（如 "send_file: /path/to/file → http://host:7788"）
+    description: String,
+    last_updated: Instant,
+}
+
+/// 任务注册表，task_id → TaskEntry
+type TaskRegistry = Arc<Mutex<HashMap<Uuid, TaskEntry>>>;
+
+/// 清理超过 1 小时未更新的任务条目
+fn evict_expired(registry: &mut HashMap<Uuid, TaskEntry>) {
+    let cutoff = Instant::now() - Duration::from_secs(3600);
+    registry.retain(|_, entry| entry.last_updated > cutoff);
+}
 
 // ─────────────────────── 工具参数结构体 ────────────────────────────────────
 
@@ -83,11 +119,19 @@ pub struct DiscoverParams {
     pub timeout: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetTransferStatusParams {
+    /// send_file/send_directory 返回的 task_id
+    pub task_id: String,
+}
+
 // ────────────────────────── MCP Server ─────────────────────────────────────
 
 #[derive(Clone)]
 pub struct AeroSyncMcpServer {
     receiver: Arc<Mutex<Option<FileReceiver>>>,
+    audit: Option<Arc<AuditLogger>>,
+    tasks: TaskRegistry,
 }
 
 #[tool_router]
@@ -95,15 +139,25 @@ impl AeroSyncMcpServer {
     pub fn new() -> Self {
         Self {
             receiver: Arc::new(Mutex::new(None)),
+            audit: None,
+            tasks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    pub fn with_audit(mut self, logger: Arc<AuditLogger>) -> Self {
+        self.audit = Some(logger);
+        self
+    }
+
     /// 发送单个文件到指定地址（自动协商 QUIC/HTTP 协议）
-    #[tool(description = "Send a single file to a remote address. Automatically negotiates QUIC or HTTP protocol. Supports S3 and FTP destinations.")]
+    #[tool(description = "Send a single file to a remote address. Automatically negotiates QUIC or HTTP protocol. Returns immediately with a task_id; use get_transfer_status to poll progress.")]
     async fn send_file(
         &self,
         rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<SendFileParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(audit) = &self.audit {
+            audit.log_tool_call("send_file", &format!("source={} destination={}", params.source, params.destination)).await;
+        }
         let source = std::path::PathBuf::from(&params.source);
 
         let meta = match tokio::fs::metadata(&source).await {
@@ -127,105 +181,125 @@ impl AeroSyncMcpServer {
             .and_then(|s| aerosync_protocols::ratelimit::parse_limit(s))
             .unwrap_or(0);
 
-        let http_config = HttpConfig {
-            auth_token: params.token.clone().map(Zeroizing::new),
-            upload_limit_bps,
-            ..HttpConfig::default()
-        };
-        let quic_config = QuicConfig {
-            auth_token: params.token.clone().map(Zeroizing::new),
-            ..QuicConfig::default()
-        };
-        let adapter = Arc::new(AutoAdapter::new(http_config, quic_config));
-        let config = TransferConfig {
-            auth_token: params.token.clone().map(Zeroizing::new),
-            ..TransferConfig::default()
-        };
-        let engine = TransferEngine::new(config);
-        engine.start(adapter).await.map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("Failed to start transfer engine: {}", e), None)
-        })?;
+        // 生成唯一任务 ID，立即注册为 Pending
+        let task_id = Uuid::new_v4();
+        let description = format!("send_file: {} → {}", params.source, params.destination);
+        {
+            let mut tasks = self.tasks.lock().await;
+            evict_expired(&mut tasks);
+            tasks.insert(task_id, TaskEntry {
+                status: BackgroundTaskStatus::Pending,
+                description: description.clone(),
+                last_updated: Instant::now(),
+            });
+        }
 
-        let sha256 = if !no_verify {
-            FileManager::compute_sha256(&source).await.ok()
-        } else {
-            None
-        };
+        // 克隆后台任务所需的状态
+        let tasks_bg = Arc::clone(&self.tasks);
+        let source_bg = source.clone();
+        let dest_url_bg = dest_url.clone();
 
-        let rel = source.file_name()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| source.clone());
-        let task_dest = format!("{}/{}", dest_url.trim_end_matches('/'), rel.display());
-
-        let mut task = TransferTask::new_upload(source.clone(), task_dest, file_size);
-        task.sha256 = sha256;
-        let task_id = task.id;
-
-        engine.add_transfer(task).await.map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("Failed to add transfer: {}", e), None)
-        })?;
-
-        let monitor = engine.get_progress_monitor().await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
-
-        loop {
-            let done = {
-                let m = monitor.read().await;
-                let stats = m.get_stats();
-                stats.completed_files + stats.failed_files >= stats.total_files
-            };
-            if done { break; }
-            if tokio::time::Instant::now() >= deadline {
-                return Ok(CallToolResult::success(vec![Content::text(
-                    json!({"success": false, "error": "Transfer timed out after 10 minutes"}).to_string()
-                )]));
+        tokio::spawn(async move {
+            // 标记为 Running
+            {
+                let mut t = tasks_bg.lock().await;
+                if let Some(e) = t.get_mut(&task_id) {
+                    e.status = BackgroundTaskStatus::Running;
+                    e.last_updated = Instant::now();
+                }
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
 
-        let m = monitor.read().await;
-        let stats = m.get_stats();
+            let result: Result<(usize, u64, f64), String> = async {
+                let http_config = HttpConfig {
+                    auth_token: params.token.clone().map(Zeroizing::new),
+                    upload_limit_bps,
+                    ..HttpConfig::default()
+                };
+                let quic_config = QuicConfig {
+                    auth_token: params.token.clone().map(Zeroizing::new),
+                    ..QuicConfig::default()
+                };
+                let adapter = Arc::new(AutoAdapter::new(http_config, quic_config));
+                let config = TransferConfig {
+                    auth_token: params.token.clone().map(Zeroizing::new),
+                    ..TransferConfig::default()
+                };
+                let engine = TransferEngine::new(config);
+                engine.start(adapter).await.map_err(|e| format!("Failed to start engine: {}", e))?;
 
-        if stats.failed_files > 0 {
-            let error_msg = m.get_active_transfers().iter()
-                .find(|t| t.task_id == task_id)
-                .and_then(|t| match &t.status {
-                    aerosync_core::progress::TransferStatus::Failed(e) => Some(e.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| "Unknown error".to_string());
+                let sha256 = if !no_verify {
+                    FileManager::compute_sha256(&source_bg).await.ok()
+                } else {
+                    None
+                };
+                let rel = source_bg.file_name()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| source_bg.clone());
+                let task_dest = format!("{}/{}", dest_url_bg.trim_end_matches('/'), rel.display());
+                let mut transfer_task = TransferTask::new_upload(source_bg.clone(), task_dest, file_size);
+                transfer_task.sha256 = sha256;
+                engine.add_transfer(transfer_task).await.map_err(|e| format!("Failed to add transfer: {}", e))?;
 
-            Ok(CallToolResult::success(vec![Content::text(
-                json!({
-                    "success": false,
-                    "error": error_msg,
-                    "file": params.source,
-                    "destination": params.destination
-                }).to_string()
-            )]))
-        } else {
-            let speed_mb = stats.overall_speed / 1_048_576.0;
-            Ok(CallToolResult::success(vec![Content::text(
-                json!({
-                    "success": true,
-                    "data": {
-                        "file": params.source,
-                        "destination": params.destination,
-                        "protocol": if dest_url.starts_with("quic") { "QUIC" } else { "HTTP" },
-                        "size_bytes": file_size,
-                        "avg_speed_mbs": format!("{:.2}", speed_mb)
+                let monitor = engine.get_progress_monitor().await;
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(3600);
+                loop {
+                    let (done, failed) = {
+                        let m = monitor.read().await;
+                        let stats = m.get_stats();
+                        (stats.completed_files + stats.failed_files >= stats.total_files, stats.failed_files > 0)
+                    };
+                    if done {
+                        let m = monitor.read().await;
+                        let stats = m.get_stats();
+                        if failed {
+                            let err = m.get_active_transfers().iter()
+                                .find_map(|t| match &t.status {
+                                    aerosync_core::progress::TransferStatus::Failed(e) => Some(e.clone()),
+                                    _ => None,
+                                })
+                                .unwrap_or_else(|| "Unknown error".to_string());
+                            return Err(err);
+                        }
+                        return Ok((stats.completed_files, file_size, stats.overall_speed / 1_048_576.0));
                     }
-                }).to_string()
-            )]))
-        }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err("Transfer timed out after 1 hour".to_string());
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }.await;
+
+            // 更新最终状态
+            let mut t = tasks_bg.lock().await;
+            if let Some(e) = t.get_mut(&task_id) {
+                e.status = match result {
+                    Ok((files, bytes, speed_mbs)) => BackgroundTaskStatus::Completed { files, bytes, speed_mbs },
+                    Err(msg) => BackgroundTaskStatus::Failed(msg),
+                };
+                e.last_updated = Instant::now();
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            json!({
+                "success": true,
+                "task_id": task_id.to_string(),
+                "message": "Transfer started in background. Use get_transfer_status with the task_id to check progress."
+            }).to_string()
+        )]))
     }
 
+
+
     /// 递归发送整个目录到远端，保留子目录结构
-    #[tool(description = "Recursively send an entire directory to a remote address. Preserves directory structure. All files are sent concurrently.")]
+    #[tool(description = "Recursively send an entire directory to a remote address. Preserves directory structure. Returns immediately with a task_id; use get_transfer_status to poll progress.")]
     async fn send_directory(
         &self,
         rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<SendDirectoryParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(audit) = &self.audit {
+            audit.log_tool_call("send_directory", &format!("source={} destination={}", params.source, params.destination)).await;
+        }
         let source = std::path::PathBuf::from(&params.source);
 
         match tokio::fs::metadata(&source).await {
@@ -261,72 +335,98 @@ impl AeroSyncMcpServer {
         let dest_url = negotiate_protocol(&params.destination).await;
         let no_verify = params.no_verify.unwrap_or(false);
 
-        let http_config = HttpConfig {
-            auth_token: params.token.clone().map(Zeroizing::new),
-            ..HttpConfig::default()
-        };
-        let quic_config = QuicConfig {
-            auth_token: params.token.clone().map(Zeroizing::new),
-            ..QuicConfig::default()
-        };
-        let adapter = Arc::new(AutoAdapter::new(http_config, quic_config));
-        let config = TransferConfig {
-            auth_token: params.token.clone().map(Zeroizing::new),
-            ..TransferConfig::default()
-        };
-        let engine = TransferEngine::new(config);
-        engine.start(adapter).await.map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("Failed to start transfer engine: {}", e), None)
-        })?;
-
-        for (path, rel, size) in &files {
-            let sha256 = if !no_verify {
-                FileManager::compute_sha256(path).await.ok()
-            } else {
-                None
-            };
-            let task_dest = format!("{}/{}", dest_url.trim_end_matches('/'), rel.display());
-            let mut task = TransferTask::new_upload(path.clone(), task_dest, *size);
-            task.sha256 = sha256;
-            engine.add_transfer(task).await.map_err(|e| {
-                rmcp::ErrorData::internal_error(format!("Failed to add transfer: {}", e), None)
-            })?;
+        // 生成唯一任务 ID，立即注册为 Pending
+        let task_id = Uuid::new_v4();
+        let description = format!("send_directory: {} → {} ({} files)", params.source, params.destination, files.len());
+        {
+            let mut tasks = self.tasks.lock().await;
+            evict_expired(&mut tasks);
+            tasks.insert(task_id, TaskEntry {
+                status: BackgroundTaskStatus::Pending,
+                description: description.clone(),
+                last_updated: Instant::now(),
+            });
         }
 
-        let monitor = engine.get_progress_monitor().await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3600);
+        let files_count = files.len();
+        let tasks_bg = Arc::clone(&self.tasks);
 
-        loop {
-            let done = {
-                let m = monitor.read().await;
-                let stats = m.get_stats();
-                stats.completed_files + stats.failed_files >= stats.total_files
-            };
-            if done { break; }
-            if tokio::time::Instant::now() >= deadline {
-                return Ok(CallToolResult::success(vec![Content::text(
-                    json!({"success": false, "error": "Transfer timed out"}).to_string()
-                )]));
+        tokio::spawn(async move {
+            {
+                let mut t = tasks_bg.lock().await;
+                if let Some(e) = t.get_mut(&task_id) {
+                    e.status = BackgroundTaskStatus::Running;
+                    e.last_updated = Instant::now();
+                }
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
 
-        let m = monitor.read().await;
-        let stats = m.get_stats();
-        let speed_mb = stats.overall_speed / 1_048_576.0;
+            let result: Result<(usize, u64, f64), String> = async {
+                let http_config = HttpConfig {
+                    auth_token: params.token.clone().map(Zeroizing::new),
+                    ..HttpConfig::default()
+                };
+                let quic_config = QuicConfig {
+                    auth_token: params.token.clone().map(Zeroizing::new),
+                    ..QuicConfig::default()
+                };
+                let adapter = Arc::new(AutoAdapter::new(http_config, quic_config));
+                let config = TransferConfig {
+                    auth_token: params.token.clone().map(Zeroizing::new),
+                    ..TransferConfig::default()
+                };
+                let engine = TransferEngine::new(config);
+                engine.start(adapter).await.map_err(|e| format!("Failed to start engine: {}", e))?;
+
+                for (path, rel, size) in &files {
+                    let sha256 = if !no_verify {
+                        FileManager::compute_sha256(path).await.ok()
+                    } else {
+                        None
+                    };
+                    let task_dest = format!("{}/{}", dest_url.trim_end_matches('/'), rel.display());
+                    let mut transfer_task = TransferTask::new_upload(path.clone(), task_dest, *size);
+                    transfer_task.sha256 = sha256;
+                    engine.add_transfer(transfer_task).await.map_err(|e| format!("Failed to add transfer: {}", e))?;
+                }
+
+                let monitor = engine.get_progress_monitor().await;
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(3600);
+                loop {
+                    let done = {
+                        let m = monitor.read().await;
+                        let stats = m.get_stats();
+                        stats.completed_files + stats.failed_files >= stats.total_files
+                    };
+                    if done {
+                        let m = monitor.read().await;
+                        let stats = m.get_stats();
+                        let speed_mbs = stats.overall_speed / 1_048_576.0;
+                        return Ok((stats.completed_files, total_size, speed_mbs));
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err("Transfer timed out after 1 hour".to_string());
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }.await;
+
+            let mut t = tasks_bg.lock().await;
+            if let Some(e) = t.get_mut(&task_id) {
+                e.status = match result {
+                    Ok((files, bytes, speed_mbs)) => BackgroundTaskStatus::Completed { files, bytes, speed_mbs },
+                    Err(msg) => BackgroundTaskStatus::Failed(msg),
+                };
+                e.last_updated = Instant::now();
+            }
+        });
 
         Ok(CallToolResult::success(vec![Content::text(
             json!({
-                "success": stats.failed_files == 0,
-                "data": {
-                    "directory": params.source,
-                    "destination": params.destination,
-                    "total_files": stats.total_files,
-                    "completed": stats.completed_files,
-                    "failed": stats.failed_files,
-                    "total_size_bytes": total_size,
-                    "avg_speed_mbs": format!("{:.2}", speed_mb)
-                }
+                "success": true,
+                "task_id": task_id.to_string(),
+                "files_queued": files_count,
+                "total_size_bytes": total_size,
+                "message": "Directory transfer started in background. Use get_transfer_status with the task_id to check progress."
             }).to_string()
         )]))
     }
@@ -337,6 +437,9 @@ impl AeroSyncMcpServer {
         &self,
         rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<StartReceiverParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(audit) = &self.audit {
+            audit.log_tool_call("start_receiver", &format!("port={:?} save_to={:?}", params.port, params.save_to)).await;
+        }
         let mut lock = self.receiver.lock().await;
 
         if lock.is_some() {
@@ -402,6 +505,9 @@ impl AeroSyncMcpServer {
     /// 停止当前运行的接收端服务器
     #[tool(description = "Stop the currently running file receiver server.")]
     async fn stop_receiver(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(audit) = &self.audit {
+            audit.log_tool_call("stop_receiver", "").await;
+        }
         let mut lock = self.receiver.lock().await;
 
         match lock.take() {
@@ -424,6 +530,9 @@ impl AeroSyncMcpServer {
     /// 查询接收端状态和已接收的文件列表
     #[tool(description = "Get the status of the receiver server and list all files received so far.")]
     async fn get_receiver_status(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(audit) = &self.audit {
+            audit.log_tool_call("get_receiver_status", "").await;
+        }
         let lock = self.receiver.lock().await;
 
         match &*lock {
@@ -467,6 +576,9 @@ impl AeroSyncMcpServer {
         &self,
         rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<ListHistoryParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(audit) = &self.audit {
+            audit.log_tool_call("list_history", &format!("limit={:?}", params.limit)).await;
+        }
         let store_path = HistoryStore::default_path();
         if !store_path.exists() {
             return Ok(CallToolResult::success(vec![Content::text(
@@ -534,6 +646,9 @@ impl AeroSyncMcpServer {
         &self,
         rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<DiscoverParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(audit) = &self.audit {
+            audit.log_tool_call("discover_receivers", &format!("timeout={:?}", params.timeout)).await;
+        }
         let timeout = Duration::from_secs(params.timeout.unwrap_or(3));
         let mut peers = AeroSyncMdns::discover(timeout).await;
         peers.sort_by(|a, b| a.host.cmp(&b.host).then(a.port.cmp(&b.port)));
@@ -560,11 +675,55 @@ impl AeroSyncMcpServer {
             }).to_string()
         )]))
     }
+
+    /// 查询后台传输任务状态
+    #[tool(description = "Query the status of a background transfer task started by send_file or send_directory.")]
+    async fn get_transfer_status(
+        &self,
+        rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<GetTransferStatusParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let id = match Uuid::parse_str(&params.task_id) {
+            Ok(id) => id,
+            Err(_) => {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    json!({"success": false, "error": "Invalid task_id format"}).to_string()
+                )]));
+            }
+        };
+
+        let tasks = self.tasks.lock().await;
+        match tasks.get(&id) {
+            None => Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Task not found (may have expired after 1 hour)"}).to_string()
+            )])),
+            Some(entry) => {
+                let status_json = match &entry.status {
+                    BackgroundTaskStatus::Pending => json!({"state": "pending", "description": entry.description}),
+                    BackgroundTaskStatus::Running => json!({"state": "running", "description": entry.description}),
+                    BackgroundTaskStatus::Completed { files, bytes, speed_mbs } => json!({
+                        "state": "completed",
+                        "description": entry.description,
+                        "files": files,
+                        "bytes": bytes,
+                        "avg_speed_mbs": format!("{:.2}", speed_mbs)
+                    }),
+                    BackgroundTaskStatus::Failed(msg) => json!({
+                        "state": "failed",
+                        "description": entry.description,
+                        "error": msg
+                    }),
+                };
+                Ok(CallToolResult::success(vec![Content::text(
+                    json!({"success": true, "data": status_json}).to_string()
+                )]))
+            }
+        }
+    }
 }
 
 #[tool_handler(
     name = "aerosync-mcp",
-    instructions = "AeroSync file transfer tools. Use send_file or send_directory to transfer files to a remote host. Use start_receiver to listen for incoming files, get_receiver_status to check received files, and stop_receiver when done. Use discover_receivers to find AeroSync peers on the local network. Use list_history to view past transfers."
+    instructions = "AeroSync file transfer tools. Use send_file or send_directory to transfer files (returns task_id immediately). Use get_transfer_status to poll progress. Use start_receiver to listen for incoming files, get_receiver_status to check received files, and stop_receiver when done. Use discover_receivers to find AeroSync peers on the local network. Use list_history to view past transfers."
 )]
 impl ServerHandler for AeroSyncMcpServer {}
 

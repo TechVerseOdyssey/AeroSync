@@ -563,9 +563,11 @@ fn build_warp_routes(
 
     // ── GET /health ──────────────────────────────────────────────────────────
     let received_files_health = received_files.clone();
+    let metrics_health = metrics.clone();
     let health = warp::path("health")
         .and(warp::get())
         .and(warp::any().map(move || received_files_health.clone()))
+        .and(warp::any().map(move || metrics_health.clone()))
         .and_then(handle_health);
 
     // ── GET /status ──────────────────────────────────────────────────────────
@@ -895,6 +897,7 @@ async fn handle_file_upload(
 
 async fn handle_health(
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    metrics: Arc<Metrics>,
 ) -> std::result::Result<impl warp::Reply, warp::Rejection> {
     let count = received_files.read().await.len();
 
@@ -906,6 +909,9 @@ async fn handle_health(
         "received_files": count,
         "free_bytes": free_bytes,
         "total_bytes": total_bytes,
+        "active_transfers": metrics.active_transfers(),
+        "queue_depth": metrics.queue_depth(),
+        "protocols": ["http", "quic"],
         "version": env!("CARGO_PKG_VERSION"),
     }));
     // X-AeroSync header 让客户端识别对端为 AeroSync 服务，触发 QUIC 自动升级

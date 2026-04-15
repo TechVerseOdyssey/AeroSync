@@ -61,6 +61,8 @@ pub enum AuditEvent {
     AuthFailed,
     /// 单个分片上传完成（仅用于调试日志级别）
     ChunkUploaded { index: u32, total: u32 },
+    /// MCP 工具调用
+    McpToolCall,
 }
 
 /// 传输方向
@@ -275,6 +277,26 @@ impl AuditLogger {
                 result: AuditResult::Err(reason.to_string()),
             })
             .await;
+    }
+
+    /// 记录 MCP 工具调用
+    ///
+    /// `tool_name`: MCP 工具名称（如 "send_file"）  
+    /// `params_summary`: 参数摘要字符串（不含敏感信息，如 Token）
+    pub async fn log_tool_call(&self, tool_name: &str, params_summary: &str) {
+        let _ = self
+            .log(AuditEntry {
+                event: AuditEvent::McpToolCall,
+                direction: Direction::Send,
+                protocol: "mcp".to_string(),
+                filename: tool_name.to_string(),
+                size: 0,
+                sha256: None,
+                remote_ip: None,
+                result: AuditResult::Ok,
+            })
+            .await;
+        tracing::debug!(tool = tool_name, params = params_summary, "MCP tool call");
     }
 }
 

@@ -15,6 +15,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 bytes = "1.0"
+rand = "0.8"
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }

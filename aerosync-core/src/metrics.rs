@@ -23,6 +23,10 @@ pub struct Metrics {
     pub ws_connections_total: AtomicU64,
     /// Current active WebSocket connections (incremented on connect, decremented on disconnect)
     active_ws_connections: AtomicU64,
+    /// Number of transfers currently in progress
+    active_transfers: AtomicU64,
+    /// Number of transfers waiting to be processed
+    queue_depth: AtomicU64,
 }
 
 impl Metrics {
@@ -47,6 +51,30 @@ impl Metrics {
     pub fn inc_ws_connections(&self) {
         self.ws_connections_total.fetch_add(1, Ordering::Relaxed);
         self.active_ws_connections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_active_transfers(&self) {
+        self.active_transfers.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dec_active_transfers(&self) {
+        let _ = self.active_transfers.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |v| Some(v.saturating_sub(1)),
+        );
+    }
+
+    pub fn active_transfers(&self) -> u64 {
+        self.active_transfers.load(Ordering::Relaxed)
+    }
+
+    pub fn set_queue_depth(&self, n: u64) {
+        self.queue_depth.store(n, Ordering::Relaxed);
+    }
+
+    pub fn queue_depth(&self) -> u64 {
+        self.queue_depth.load(Ordering::Relaxed)
     }
 
     pub fn dec_ws_connections(&self) {
@@ -111,6 +139,18 @@ impl Metrics {
         out.push_str("# HELP aerosync_disk_total_bytes Total disk capacity in bytes at the receive directory\n");
         out.push_str("# TYPE aerosync_disk_total_bytes gauge\n");
         out.push_str(&format!("aerosync_disk_total_bytes {}\n", total_bytes));
+
+        // active_transfers (gauge)
+        let active_tr = self.active_transfers();
+        out.push_str("# HELP aerosync_active_transfers Current number of in-progress file transfers\n");
+        out.push_str("# TYPE aerosync_active_transfers gauge\n");
+        out.push_str(&format!("aerosync_active_transfers {}\n", active_tr));
+
+        // queue_depth (gauge)
+        let qd = self.queue_depth();
+        out.push_str("# HELP aerosync_queue_depth Number of transfers waiting in queue\n");
+        out.push_str("# TYPE aerosync_queue_depth gauge\n");
+        out.push_str(&format!("aerosync_queue_depth {}\n", qd));
 
         out
     }

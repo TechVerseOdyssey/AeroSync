@@ -6,6 +6,7 @@ use aerosync_core::{AeroSyncError, Result, TransferTask};
 use aerosync_core::resume::ResumeState;
 use async_trait::async_trait;
 use bytes::Bytes;
+use rand::Rng;
 use reqwest::Client;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -185,7 +186,13 @@ impl HttpTransfer {
                     }
                 }
                 if attempt < self.config.max_retries {
-                    tokio::time::sleep(Duration::from_millis(500 * (attempt as u64 + 1))).await;
+                    // 指数退避 + ±20% jitter：100ms, 200ms, 400ms...上限 30s
+                    let base_ms = 100u64 * (1u64 << attempt.min(8));
+                    let delay_ms = base_ms.min(30_000);
+                    let jitter_range = (delay_ms / 5) as i64;
+                    let jitter = rand::thread_rng().gen_range(-jitter_range..=jitter_range);
+                    let actual_ms = (delay_ms as i64 + jitter).max(50) as u64;
+                    tokio::time::sleep(Duration::from_millis(actual_ms)).await;
                 }
             }
             if let Some(e) = last_err {
@@ -239,8 +246,7 @@ impl HttpTransfer {
         sha256: Option<&str>,
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
-        let file = File::open(file_path).await?;
-        let file_size = file.metadata().await?.len();
+        let file_size = File::open(file_path).await?.metadata().await?.len();
         let start_time = Instant::now();
 
         let file_name = file_path
@@ -249,55 +255,69 @@ impl HttpTransfer {
             .unwrap_or("file")
             .to_string();
 
-        // 流式读取文件，避免整文件读入内存
-        let stream = ReaderStream::new(file);
-        let body = reqwest::Body::wrap_stream(stream);
-
-        let file_part = reqwest::multipart::Part::stream_with_length(body, file_size)
-            .file_name(file_name.clone())
-            .mime_str("application/octet-stream")
-            .map_err(|e| AeroSyncError::Network(format!("Failed to create multipart part: {}", e)))?;
-
-        let form = reqwest::multipart::Form::new().part("file", file_part);
-
         tracing::info!("HTTP: Uploading '{}' ({} bytes) to {}", file_name, file_size, url);
 
-        let mut request = self.client.post(url).multipart(form);
+        let mut last_err: Option<AeroSyncError> = None;
 
-        // 附加认证 Token
-        if let Some(token) = &self.config.auth_token {
-            request = request.header("Authorization", format!("Bearer {}", token.as_str()));
+        for attempt in 0..=self.config.max_retries {
+            // 每次重试重新打开文件（流只能消费一次）
+            let file = File::open(file_path).await?;
+            let stream = ReaderStream::new(file);
+            let body = reqwest::Body::wrap_stream(stream);
+
+            let file_part = reqwest::multipart::Part::stream_with_length(body, file_size)
+                .file_name(file_name.clone())
+                .mime_str("application/octet-stream")
+                .map_err(|e| AeroSyncError::Network(format!("Failed to create multipart part: {}", e)))?;
+
+            let form = reqwest::multipart::Form::new().part("file", file_part);
+
+            let mut request = self.client.post(url).multipart(form);
+
+            if let Some(token) = &self.config.auth_token {
+                request = request.header("Authorization", format!("Bearer {}", token.as_str()));
+            }
+            if let Some(hash) = sha256 {
+                request = request.header("X-File-Hash", hash);
+                request = request.header("X-Hash-Algorithm", "sha256");
+            }
+
+            match request.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    send_progress(&progress_tx, file_size, &start_time);
+                    let elapsed = start_time.elapsed().as_secs_f64();
+                    let mb_per_sec = if elapsed > 0.0 { file_size as f64 / elapsed / (1024.0 * 1024.0) } else { 0.0 };
+                    tracing::info!(
+                        "HTTP: Upload completed: {} bytes at {:.2} MB/s",
+                        file_size,
+                        mb_per_sec
+                    );
+                    return Ok(());
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    tracing::warn!("Upload attempt {}/{} failed: {} - {}", attempt + 1, self.config.max_retries + 1, status, body);
+                    last_err = Some(AeroSyncError::Network(format!("Upload failed: {} - {}", status, body)));
+                }
+                Err(e) => {
+                    tracing::warn!("Upload attempt {}/{} error: {}", attempt + 1, self.config.max_retries + 1, e);
+                    last_err = Some(AeroSyncError::Network(format!("Upload request failed: {}", e)));
+                }
+            }
+
+            if attempt < self.config.max_retries {
+                // 指数退避 + ±20% jitter：100ms, 200ms, 400ms...上限 30s
+                let base_ms = 100u64 * (1u64 << attempt.min(8));
+                let delay_ms = base_ms.min(30_000);
+                let jitter_range = (delay_ms / 5) as i64;
+                let jitter = rand::thread_rng().gen_range(-jitter_range..=jitter_range);
+                let actual_ms = (delay_ms as i64 + jitter).max(50) as u64;
+                tokio::time::sleep(Duration::from_millis(actual_ms)).await;
+            }
         }
 
-        // 附加 SHA-256 校验哈希
-        if let Some(hash) = sha256 {
-            request = request.header("X-File-Hash", hash);
-            request = request.header("X-Hash-Algorithm", "sha256");
-        }
-
-        let response = request
-            .send()
-            .await
-            .map_err(|e| AeroSyncError::Network(format!("Upload request failed: {}", e)))?;
-
-        if response.status().is_success() {
-            send_progress(&progress_tx, file_size, &start_time);
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let mb_per_sec = if elapsed > 0.0 { file_size as f64 / elapsed / (1024.0 * 1024.0) } else { 0.0 };
-            tracing::info!(
-                "HTTP: Upload completed: {} bytes at {:.2} MB/s",
-                file_size,
-                mb_per_sec
-            );
-            Ok(())
-        } else {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            Err(AeroSyncError::Network(format!(
-                "Upload failed with status: {} - {}",
-                status, error_text
-            )))
-        }
+        Err(last_err.unwrap_or_else(|| AeroSyncError::Network("Upload failed: no attempts made".into())))
     }
 
     async fn download_with_progress(
