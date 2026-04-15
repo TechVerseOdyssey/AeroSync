@@ -283,6 +283,7 @@ fn resolve_quic_config(destination: &str, base: &QuicConfig) -> Result<QuicConfi
         max_idle_timeout: base.max_idle_timeout,
         keep_alive_interval: base.keep_alive_interval,
         auth_token: base.auth_token.clone(),
+        pinned_server_certs: base.pinned_server_certs.clone(),
     })
 }
 

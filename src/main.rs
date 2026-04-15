@@ -91,6 +91,11 @@ enum Commands {
         /// 上传带宽限速，格式: 512KB / 10MB / 1MB/s（0 或不指定 = 不限速）
         #[arg(long)]
         limit: Option<String>,
+
+        /// 服务端 DER 格式证书文件，用于 TLS 证书钉扎（可多次指定）
+        /// 示例: --pin-cert server.der --pin-cert ca.der
+        #[arg(long, value_name = "CERT_DER")]
+        pin_cert: Vec<PathBuf>,
     },
 
     /// 启动接收端，监听文件传输
@@ -323,8 +328,9 @@ async fn main() -> anyhow::Result<()> {
             no_resume,
             no_preflight,
             limit,
+            pin_cert,
         } => {
-            cmd_send(source, destination, recursive, protocol, token, parallel, no_verify, dry_run, no_resume, no_preflight, limit, &app_config).await?;
+            cmd_send(source, destination, recursive, protocol, token, parallel, no_verify, dry_run, no_resume, no_preflight, limit, pin_cert, &app_config).await?;
         }
 
         Commands::Receive {
@@ -387,6 +393,7 @@ async fn cmd_send(
     no_resume: bool,
     no_preflight: bool,
     limit: Option<String>,
+    pin_cert: Vec<PathBuf>,
     app_config: &AeroSyncConfig,
 ) -> anyhow::Result<()> {
     // 收集要发送的文件列表
@@ -461,9 +468,11 @@ async fn cmd_send(
         auth_token: eff_token.clone().map(Zeroizing::new),
         upload_limit_bps,
         accept_invalid_certs: false,
+        pinned_server_certs: pin_cert.clone(),
     };
     let quic_config = QuicConfig {
         auth_token: eff_token.clone().map(Zeroizing::new),
+        pinned_server_certs: pin_cert,
         ..QuicConfig::default()
     };
     let adapter = Arc::new(AutoAdapter::new(http_config, quic_config));

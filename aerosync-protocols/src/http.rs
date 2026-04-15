@@ -7,6 +7,7 @@ use aerosync_core::resume::ResumeState;
 use async_trait::async_trait;
 use bytes::Bytes;
 use reqwest::Client;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File;
@@ -30,7 +31,11 @@ pub struct HttpConfig {
     /// 上传带宽限制（bytes/s），0 = 不限速
     pub upload_limit_bps: u64,
     /// 是否接受无效的 TLS 证书（用于连接自签名 HTTPS 服务端，默认 false）
+    /// **已弃用**：生产环境请改用 `pinned_server_certs` 进行证书钉扎。
     pub accept_invalid_certs: bool,
+    /// 服务端 DER 格式证书文件路径列表（用于证书钉扎）。
+    /// 非空时只信任列表中的证书，忽略系统 CA，同时 `accept_invalid_certs` 无效。
+    pub pinned_server_certs: Vec<PathBuf>,
 }
 
 impl Default for HttpConfig {
@@ -42,6 +47,7 @@ impl Default for HttpConfig {
             auth_token: None,
             upload_limit_bps: 0,
             accept_invalid_certs: false,
+            pinned_server_certs: vec![],
         }
     }
 }
@@ -54,9 +60,38 @@ impl HttpTransfer {
     /// [`HttpTransfer::new_with_client`]，共享同一个 `Arc<Client>`，以复用连接池、
     /// 减少文件描述符消耗并提升性能。
     pub fn new(config: HttpConfig) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(config.timeout_seconds))
-            .danger_accept_invalid_certs(config.accept_invalid_certs)
+        let mut builder = Client::builder()
+            .timeout(Duration::from_secs(config.timeout_seconds));
+
+        if !config.pinned_server_certs.is_empty() {
+            // 证书钉扎模式：只信任指定证书，禁用系统 CA
+            builder = builder.tls_built_in_root_certs(false);
+            for cert_path in &config.pinned_server_certs {
+                let der = std::fs::read(cert_path).map_err(|e| {
+                    AeroSyncError::InvalidConfig(format!(
+                        "Cannot read pinned cert {}: {}",
+                        cert_path.display(),
+                        e
+                    ))
+                })?;
+                let cert = reqwest::Certificate::from_der(&der).map_err(|e| {
+                    AeroSyncError::InvalidConfig(format!(
+                        "Invalid DER cert {}: {}",
+                        cert_path.display(),
+                        e
+                    ))
+                })?;
+                builder = builder.add_root_certificate(cert);
+            }
+        } else if config.accept_invalid_certs {
+            tracing::warn!(
+                "accept_invalid_certs=true is insecure; \
+                use pinned_server_certs for production TLS pinning"
+            );
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+
+        let client = builder
             .build()
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
 
@@ -758,5 +793,49 @@ mod tests {
         let ht = HttpTransfer::new(HttpConfig::default()).unwrap();
         assert_eq!(ht.protocol_name(), "HTTP");
         assert!(ht.supports_resume());
+    }
+
+    // ── 11. Certificate pinning ───────────────────────────────────────────────
+    #[test]
+    fn test_http_pinned_cert_field_in_default() {
+        let cfg = HttpConfig::default();
+        assert!(cfg.pinned_server_certs.is_empty());
+    }
+
+    #[test]
+    fn test_http_new_with_nonexistent_cert_returns_err() {
+        let config = HttpConfig {
+            pinned_server_certs: vec![PathBuf::from("/nonexistent/cert.der")],
+            ..HttpConfig::default()
+        };
+        let result = HttpTransfer::new(config);
+        assert!(result.is_err());
+        match result {
+            Err(aerosync_core::AeroSyncError::InvalidConfig(msg)) => {
+                assert!(msg.contains("Cannot read pinned cert"), "Got: {}", msg);
+            }
+            Err(e) => panic!("Wrong error type: {:?}", e),
+            Ok(_) => panic!("Should have failed"),
+        }
+    }
+
+    #[test]
+    fn test_http_new_with_invalid_der_returns_err() {
+        let dir = tempdir().unwrap();
+        let cert_path = dir.path().join("bad.der");
+        std::fs::write(&cert_path, b"not a real DER certificate").unwrap();
+        let config = HttpConfig {
+            pinned_server_certs: vec![cert_path],
+            ..HttpConfig::default()
+        };
+        let result = HttpTransfer::new(config);
+        assert!(result.is_err());
+        match result {
+            Err(aerosync_core::AeroSyncError::InvalidConfig(msg)) => {
+                assert!(msg.contains("Invalid DER cert"), "Got: {}", msg);
+            }
+            Err(e) => panic!("Wrong error type: {:?}", e),
+            Ok(_) => panic!("Should have failed"),
+        }
     }
 }

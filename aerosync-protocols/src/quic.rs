@@ -6,6 +6,7 @@ use quinn::{ClientConfig, Connection, Endpoint};
 use rustls::{ClientConfig as TlsClientConfig, Certificate, ServerName};
 use rustls::client::{ServerCertVerifier, ServerCertVerified};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::fs::File;
@@ -35,7 +36,6 @@ impl PinnedCertVerifier {
     }
 
     /// 生产模式：只接受固定的证书列表。
-    #[allow(dead_code)]
     fn with_pinned(certs: Vec<Vec<u8>>) -> Arc<Self> {
         Arc::new(Self {
             accepted_certs: certs,
@@ -83,6 +83,9 @@ pub struct QuicConfig {
     pub keep_alive_interval: u64,
     /// 发送方认证 Token（在 UPLOAD 消息头中传递）
     pub auth_token: Option<Zeroizing<String>>,
+    /// 服务端 DER 格式证书文件路径列表（用于证书钉扎）。
+    /// 非空时只信任列表中的证书，替代开发模式。
+    pub pinned_server_certs: Vec<PathBuf>,
 }
 
 impl Default for QuicConfig {
@@ -94,15 +97,31 @@ impl Default for QuicConfig {
             max_idle_timeout: 60_000,
             keep_alive_interval: 5_000,
             auth_token: None,
+            pinned_server_certs: vec![],
         }
     }
 }
 
 impl QuicTransfer {
     pub fn new(config: QuicConfig) -> Result<Self> {
+        let verifier = if !config.pinned_server_certs.is_empty() {
+            // 生产钉扎模式：加载 DER 文件
+            let certs: Result<Vec<Vec<u8>>> = config.pinned_server_certs.iter()
+                .map(|p| {
+                    std::fs::read(p).map_err(|e| AeroSyncError::InvalidConfig(
+                        format!("Cannot read pinned cert {}: {}", p.display(), e)
+                    ))
+                })
+                .collect();
+            PinnedCertVerifier::with_pinned(certs?)
+        } else {
+            // 开发模式 fallback（打印警告）
+            PinnedCertVerifier::dev_mode()
+        };
+
         let mut tls_config = TlsClientConfig::builder()
             .with_safe_defaults()
-            .with_custom_certificate_verifier(PinnedCertVerifier::dev_mode())
+            .with_custom_certificate_verifier(verifier)
             .with_no_client_auth();
 
         tls_config.alpn_protocols = config
@@ -306,5 +325,35 @@ impl TransferProtocol for QuicTransfer {
 
     fn protocol_name(&self) -> &'static str {
         "QUIC"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── 1. QuicConfig defaults ────────────────────────────────────────────────
+    #[test]
+    fn test_quic_pinned_cert_field_in_default() {
+        let cfg = QuicConfig::default();
+        assert!(cfg.pinned_server_certs.is_empty());
+    }
+
+    // ── 2. Certificate pinning: nonexistent file ──────────────────────────────
+    #[test]
+    fn test_quic_new_with_nonexistent_cert_returns_err() {
+        let config = QuicConfig {
+            pinned_server_certs: vec![PathBuf::from("/nonexistent/server.der")],
+            ..QuicConfig::default()
+        };
+        let result = QuicTransfer::new(config);
+        assert!(result.is_err());
+        match result {
+            Err(AeroSyncError::InvalidConfig(msg)) => {
+                assert!(msg.contains("Cannot read pinned cert"), "Got: {}", msg);
+            }
+            Err(e) => panic!("Wrong error type: {:?}", e),
+            Ok(_) => panic!("Should have failed"),
+        }
     }
 }
