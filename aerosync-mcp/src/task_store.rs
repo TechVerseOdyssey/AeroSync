@@ -2,6 +2,10 @@
 //!
 //! Survives process restarts: tasks in Pending/Running state at shutdown are
 //! reloaded as Failed("process restarted") so callers learn why they stopped.
+//!
+//! ## Schema versions
+//! - v0 (original): `tasks` without `resume_json_path`
+//! - v1: added `resume_json_path TEXT` column for断点续传恢复
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,6 +34,7 @@ impl TaskStore {
         let conn = Connection::open(path)?;
         // WAL mode: better read/write concurrency, crash-safe
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        // Base schema
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS tasks (
                 id          TEXT PRIMARY KEY,
@@ -42,6 +47,14 @@ impl TaskStore {
                 updated_at  INTEGER NOT NULL   -- Unix seconds
             );",
         )?;
+        // Schema migration v0 → v1: add resume_json_path column
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 1 {
+            conn.execute_batch(
+                "ALTER TABLE tasks ADD COLUMN resume_json_path TEXT;
+                 PRAGMA user_version = 1;",
+            )?;
+        }
         Ok(Self {
             path: path.to_owned(),
             conn: Arc::new(Mutex::new(conn)),
@@ -50,9 +63,15 @@ impl TaskStore {
 
     /// Persist a task entry (upsert).
     pub async fn upsert(&self, id: Uuid, entry: &TaskEntry) {
+        self.upsert_with_resume(id, entry, None).await;
+    }
+
+    /// Persist a task entry with an optional断点续传 JSON path (upsert).
+    pub async fn upsert_with_resume(&self, id: Uuid, entry: &TaskEntry, resume_path: Option<&Path>) {
         let (status, files, bytes, speed_mbs, error) = encode_status(&entry.status);
         let id_str = id.to_string();
         let description = entry.description.clone();
+        let resume_str = resume_path.map(|p| p.to_string_lossy().into_owned());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -60,17 +79,18 @@ impl TaskStore {
 
         let conn = self.conn.lock().await;
         let result = conn.execute(
-            "INSERT INTO tasks (id, description, status, files, bytes, speed_mbs, error, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO tasks (id, description, status, files, bytes, speed_mbs, error, updated_at, resume_json_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
-                description = excluded.description,
-                status      = excluded.status,
-                files       = excluded.files,
-                bytes       = excluded.bytes,
-                speed_mbs   = excluded.speed_mbs,
-                error       = excluded.error,
-                updated_at  = excluded.updated_at",
-            params![id_str, description, status, files, bytes, speed_mbs, error, now],
+                description      = excluded.description,
+                status           = excluded.status,
+                files            = excluded.files,
+                bytes            = excluded.bytes,
+                speed_mbs        = excluded.speed_mbs,
+                error            = excluded.error,
+                updated_at       = excluded.updated_at,
+                resume_json_path = excluded.resume_json_path",
+            params![id_str, description, status, files, bytes, speed_mbs, error, now, resume_str],
         );
         if let Err(e) = result {
             tracing::warn!("TaskStore: failed to upsert task {}: {}", id_str, e);
@@ -147,6 +167,72 @@ impl TaskStore {
         }
 
         tracing::info!("TaskStore: loaded {} tasks from {}", result.len(), self.path.display());
+        result
+    }
+
+    /// Load tasks that have a `resume_json_path` and were pending/running at shutdown.
+    ///
+    /// These are candidates for断点续传恢复：the caller should re-launch them using
+    /// the persisted `ResumeState` JSON.
+    pub async fn load_resumable(&self) -> Vec<(Uuid, TaskEntry, PathBuf)> {
+        let conn = self.conn.lock().await;
+        let mut stmt = match conn.prepare(
+            "SELECT id, description, status, resume_json_path
+             FROM tasks
+             WHERE resume_json_path IS NOT NULL
+               AND status IN ('pending', 'running')",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("TaskStore: failed to prepare load_resumable query: {}", e);
+                return vec![];
+            }
+        };
+
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,  // id
+                row.get::<_, String>(1)?,  // description
+                row.get::<_, String>(2)?,  // status (ignored — always pending/running)
+                row.get::<_, String>(3)?,  // resume_json_path
+            ))
+        });
+
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("TaskStore: failed to query resumable tasks: {}", e);
+                return vec![];
+            }
+        };
+
+        let mut result = Vec::new();
+        for row in rows.flatten() {
+            let (id_str, description, _, resume_path_str) = row;
+            let id = match id_str.parse::<Uuid>() {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let resume_path = PathBuf::from(&resume_path_str);
+            // Skip if the JSON file no longer exists (already cleaned up)
+            if !resume_path.exists() {
+                continue;
+            }
+            result.push((
+                id,
+                TaskEntry {
+                    status: BackgroundTaskStatus::Pending,
+                    description,
+                    last_updated: std::time::Instant::now(),
+                },
+                resume_path,
+            ));
+        }
+
+        tracing::info!(
+            "TaskStore: {} resumable tasks found",
+            result.len()
+        );
         result
     }
 
@@ -307,5 +393,52 @@ mod tests {
             BackgroundTaskStatus::Failed(msg) => assert_eq!(msg, "disk full"),
             other => panic!("unexpected: {:?}", other),
         }
+    }
+
+    // ── Feature 2: upsert_with_resume + load_resumable ───────────────────────
+    #[tokio::test]
+    async fn test_upsert_with_resume_and_load_resumable() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("tasks.db");
+        let store = TaskStore::open(&db_path).unwrap();
+
+        // 创建一个伪 resume JSON 文件（load_resumable 会检查文件是否存在）
+        let resume_file = dir.path().join("resume.json");
+        tokio::fs::write(&resume_file, b"{}").await.unwrap();
+
+        let id = Uuid::new_v4();
+        let entry = make_entry(BackgroundTaskStatus::Running);
+        store.upsert_with_resume(id, &entry, Some(&resume_file)).await;
+
+        // load_resumable 应返回这个任务
+        let resumable = store.load_resumable().await;
+        assert_eq!(resumable.len(), 1);
+        let (loaded_id, _, loaded_path) = &resumable[0];
+        assert_eq!(*loaded_id, id);
+        assert_eq!(loaded_path, &resume_file);
+
+        // 完成后用 upsert_with_resume(None) 清除 resume 路径
+        let done_entry = make_entry(BackgroundTaskStatus::Completed { files: 1, bytes: 100, speed_mbs: 5.0 });
+        store.upsert_with_resume(id, &done_entry, None).await;
+
+        // completed 状态不出现在 load_resumable 结果中
+        let resumable2 = store.load_resumable().await;
+        assert!(resumable2.is_empty(), "completed task should not appear in resumable");
+    }
+
+    #[tokio::test]
+    async fn test_load_resumable_skips_missing_json_file() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("tasks.db");
+        let store = TaskStore::open(&db_path).unwrap();
+
+        // resume_json_path 指向不存在的文件
+        let nonexistent = dir.path().join("ghost.json");
+        let id = Uuid::new_v4();
+        store.upsert_with_resume(id, &make_entry(BackgroundTaskStatus::Pending), Some(&nonexistent)).await;
+
+        // 文件不存在，load_resumable 应跳过
+        let resumable = store.load_resumable().await;
+        assert!(resumable.is_empty(), "task with missing JSON should be skipped");
     }
 }

@@ -1,4 +1,4 @@
-use aerosync_mcp::{server, task_store::TaskStore};
+use aerosync_mcp::{recovery::recover_pending_transfers, server, task_store::TaskStore};
 use rmcp::{ServiceExt, transport::stdio};
 use std::sync::Arc;
 
@@ -49,6 +49,12 @@ async fn main() -> anyhow::Result<()> {
                 count,
                 db_path.display()
             );
+            // 断点续传恢复：重新启动上次未完成的分片传输
+            let resume_base_dir = aerosync_dir.clone();
+            let recovered = recover_pending_transfers(&builder, Arc::clone(&store), &resume_base_dir).await;
+            if recovered > 0 {
+                tracing::info!("Recovery: {} transfer(s) resumed in background", recovered);
+            }
         }
         Err(e) => {
             tracing::warn!("Failed to open task store at {}: {}, proceeding without persistence", db_path.display(), e);

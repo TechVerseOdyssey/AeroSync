@@ -1,7 +1,7 @@
 //! AutoAdapter: 根据 destination URL 自动选择 HTTP 或 QUIC 协议，
 //! 实现 aerosync-core 的 ProtocolAdapter trait，由 main.rs 注入。
 
-use aerosync_core::resume::ResumeState;
+use aerosync_core::resume::{ResumeState, ResumeStore};
 use aerosync_core::transfer::{ProtocolAdapter, ProtocolProgress, TransferTask};
 use aerosync_core::{AeroSyncError, Result};
 use async_trait::async_trait;
@@ -22,6 +22,8 @@ pub struct AutoAdapter {
     shared_client: Arc<Client>,
     s3_config: Option<S3Config>,
     ftp_config: Option<FtpConfig>,
+    /// 可选的断点续传持久化存储，注入后每完成一个分片自动保存进度
+    resume_store: Option<Arc<ResumeStore>>,
 }
 
 impl AutoAdapter {
@@ -37,7 +39,14 @@ impl AutoAdapter {
             shared_client: Arc::new(client),
             s3_config: None,
             ftp_config: None,
+            resume_store: None,
         }
+    }
+
+    /// Builder: 注入断点续传持久化存储
+    pub fn with_resume_store(mut self, store: Arc<ResumeStore>) -> Self {
+        self.resume_store = Some(store);
+        self
     }
 
     /// Builder: 配置 S3 协议支持（MinIO 或 AWS S3）
@@ -223,7 +232,15 @@ impl ProtocolAdapter for AutoAdapter {
 
         // 从完整 URL 中提取 base_url（scheme + host + port）
         let base_url = extract_base_url(&task.destination)?;
-        let ht = HttpTransfer::new_with_client(Arc::clone(&self.shared_client), self.http_config.clone());
+        let ht = if let Some(store) = &self.resume_store {
+            HttpTransfer::new_with_client_and_resume(
+                Arc::clone(&self.shared_client),
+                self.http_config.clone(),
+                Arc::clone(store),
+            )
+        } else {
+            HttpTransfer::new_with_client(Arc::clone(&self.shared_client), self.http_config.clone())
+        };
 
         let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
         let ptx = progress_tx.clone();

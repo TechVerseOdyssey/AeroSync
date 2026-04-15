@@ -4,7 +4,7 @@ use crate::utils::send_progress;
 use crate::circuit_breaker::CircuitBreaker;
 use zeroize::Zeroizing;
 use aerosync_core::{AeroSyncError, Result, TransferTask};
-use aerosync_core::resume::ResumeState;
+use aerosync_core::resume::{ResumeState, ResumeStore};
 use async_trait::async_trait;
 use bytes::Bytes;
 use memmap2::MmapOptions;
@@ -23,6 +23,8 @@ pub struct HttpTransfer {
     client: Arc<Client>,
     config: HttpConfig,
     circuit_breaker: Arc<CircuitBreaker>,
+    /// 可选的断点续传状态持久化存储，每完成一个分片后保存进度
+    resume_store: Option<Arc<ResumeStore>>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +45,12 @@ pub struct HttpConfig {
     /// 并发分片上传路数（仅对 >5MB 文件生效），默认 4。
     /// 设为 1 等同于串行上传。
     pub concurrent_chunks: usize,
+    /// 网络级别重连最大次数（区别于 per-chunk 重试），默认 5。
+    /// 仅网络错误（连接拒绝/超时）触发重连，4xx 业务错误不触发。
+    pub max_reconnect_attempts: u32,
+    /// 重连指数退避基础等待时间（ms），默认 3000。
+    /// 实际等待：base * 2^attempt，最大 60s。
+    pub reconnect_base_delay_ms: u64,
 }
 
 impl Default for HttpConfig {
@@ -56,6 +64,8 @@ impl Default for HttpConfig {
             accept_invalid_certs: false,
             pinned_server_certs: vec![],
             concurrent_chunks: 4,
+            max_reconnect_attempts: 5,
+            reconnect_base_delay_ms: 3_000,
         }
     }
 }
@@ -103,17 +113,63 @@ impl HttpTransfer {
             .build()
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
 
-        Ok(Self { client: Arc::new(client), config, circuit_breaker: Arc::new(CircuitBreaker::with_defaults()) })
+        Ok(Self { client: Arc::new(client), config, circuit_breaker: Arc::new(CircuitBreaker::with_defaults()), resume_store: None })
     }
 
     /// 使用外部共享 client 构造，避免每次创建新连接池。
     pub fn new_with_client(client: Arc<Client>, config: HttpConfig) -> Self {
-        Self { client, config, circuit_breaker: Arc::new(CircuitBreaker::with_defaults()) }
+        Self { client, config, circuit_breaker: Arc::new(CircuitBreaker::with_defaults()), resume_store: None }
     }
 
-    /// 分片上传入口：根据文件大小和配置自动选择串行或并发模式。
+    /// 使用外部共享 client + ResumeStore 构造（每分片完成后持久化续传状态）。
+    pub fn new_with_client_and_resume(client: Arc<Client>, config: HttpConfig, store: Arc<ResumeStore>) -> Self {
+        Self { client, config, circuit_breaker: Arc::new(CircuitBreaker::with_defaults()), resume_store: Some(store) }
+    }
+
+    /// 判断错误是否属于网络级别故障（连接拒绝、超时、DNS 等），
+    /// 返回 true 表示可重连，返回 false 表示业务错误（4xx）不重连。
+    fn is_network_error(e: &AeroSyncError) -> bool {
+        match e {
+            AeroSyncError::Network(msg) => {
+                let m = msg.to_lowercase();
+                // 4xx 响应：认证失败/不存在等业务错误 → 不重连
+                if m.contains("401") || m.contains("403") || m.contains("404")
+                    || m.contains("400") || m.contains("413")
+                {
+                    return false;
+                }
+                // 连接级别错误 → 重连
+                true
+            }
+            AeroSyncError::FileIo(_) => false, // 本地 IO 错误不重连
+            _ => false,
+        }
+    }
+
+    /// 轮询 `{base_url}/health`，直到返回 200 或超时。
+    /// 返回 true 表示服务已恢复，false 表示超时仍不健康。
+    async fn wait_until_healthy(client: &Client, base_url: &str, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let health_url = format!("{}/health", base_url);
+        let poll_interval = Duration::from_secs(2);
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            match client.get(&health_url).timeout(Duration::from_secs(5)).send().await {
+                Ok(r) if r.status().is_success() => return true,
+                _ => {}
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
+    /// 分片上传入口：根据文件大小和配置自动选择串行或并发模式，
+    /// 并在网络故障时进行指数退避重连（最多 `max_reconnect_attempts` 次）。
+    ///
     /// - ≤5 MB：串行单流（`upload_chunked_serial`）
     /// - >5 MB：mmap 并发分片（`upload_chunked_concurrent`）
+    /// - 4xx 业务错误不触发重连，直接返回
     ///
     /// `base_url`: 形如 `http://host:port`（不含路径）
     /// `state`:    ResumeState（含已完成分片，支持断点续传）
@@ -131,11 +187,45 @@ impl HttpTransfer {
         } else {
             self.config.concurrent_chunks.max(1)
         };
-        if concurrency <= 1 {
-            self.upload_chunked_serial(file_path, base_url, state, progress_tx).await
-        } else {
-            self.upload_chunked_concurrent(file_path, base_url, state, progress_tx, concurrency).await
+
+        let max_reconnect = self.config.max_reconnect_attempts;
+        let base_delay_ms = self.config.reconnect_base_delay_ms;
+        let mut last_err = AeroSyncError::Network("upload_chunked: no attempts".to_string());
+
+        for attempt in 0..=max_reconnect {
+            let result = if concurrency <= 1 {
+                self.upload_chunked_serial(file_path, base_url, state, progress_tx.clone()).await
+            } else {
+                self.upload_chunked_concurrent(file_path, base_url, state, progress_tx.clone(), concurrency).await
+            };
+
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if !Self::is_network_error(&e) {
+                        // 业务错误（4xx 等）直接返回，不重连
+                        return Err(e);
+                    }
+                    last_err = e;
+                    if attempt >= max_reconnect {
+                        break;
+                    }
+                    // 指数退避：base * 2^attempt，最大 60s
+                    let delay_ms = (base_delay_ms * (1u64 << attempt.min(5))).min(60_000);
+                    tracing::warn!(
+                        "Network error on attempt {}/{}, waiting {}ms before reconnect. pending_chunks={}",
+                        attempt + 1, max_reconnect + 1, delay_ms,
+                        state.pending_chunks().len()
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    // 等待服务器健康（最多60s）
+                    if !Self::wait_until_healthy(&self.client, base_url, Duration::from_secs(60)).await {
+                        tracing::warn!("Server still unhealthy after 60s, retrying anyway");
+                    }
+                }
+            }
         }
+        Err(last_err)
     }
 
     /// 串行分片上传（原有逻辑，用于小文件或 concurrent_chunks=1）。
@@ -185,6 +275,11 @@ impl HttpTransfer {
             ).await?;
 
             state.mark_chunk_done(chunk_index);
+            if let Some(store) = &self.resume_store {
+                if let Err(e) = store.save(state).await {
+                    tracing::warn!("Failed to persist resume state after chunk {}: {}", chunk_index, e);
+                }
+            }
             bytes_done += size;
             send_progress(&progress_tx, bytes_done, &start_time);
         }
@@ -275,6 +370,11 @@ impl HttpTransfer {
         while let Some(res) = result_rx.recv().await {
             let (chunk_index, size) = res?;
             state.mark_chunk_done(chunk_index);
+            if let Some(store) = &self.resume_store {
+                if let Err(e) = store.save(state).await {
+                    tracing::warn!("Failed to persist resume state after chunk {}: {}", chunk_index, e);
+                }
+            }
             bytes_done += size;
             completed += 1;
             send_progress(&progress_tx, bytes_done, &start_time);
@@ -1152,5 +1252,123 @@ mod tests {
         let result = ht.upload_chunked(&file_path, &base, &mut state, tx).await;
         assert!(result.is_ok(), "resumed upload should succeed: {:?}", result);
         assert_eq!(chunk_count.load(std::sync::atomic::Ordering::Relaxed), 4);
+    }
+
+    // ── 16. is_network_error：业务错误返回 false，连接错误返回 true ────────────
+    #[test]
+    fn test_is_network_error_business_errors_return_false() {
+        // 4xx 业务错误不触发重连
+        for code in &["401", "403", "404", "400", "413"] {
+            let e = AeroSyncError::Network(format!("HTTP {} Unauthorized", code));
+            assert!(!HttpTransfer::is_network_error(&e), "Expected false for {}", code);
+        }
+    }
+
+    #[test]
+    fn test_is_network_error_connection_errors_return_true() {
+        // 网络级别错误触发重连
+        let e = AeroSyncError::Network("connection refused".to_string());
+        assert!(HttpTransfer::is_network_error(&e), "connection refused should be network error");
+
+        let e2 = AeroSyncError::Network("timeout waiting for response".to_string());
+        assert!(HttpTransfer::is_network_error(&e2), "timeout should be network error");
+    }
+
+    #[test]
+    fn test_is_network_error_file_io_returns_false() {
+        let e = AeroSyncError::FileIo(std::io::Error::new(std::io::ErrorKind::NotFound, "no file"));
+        assert!(!HttpTransfer::is_network_error(&e), "FileIo should not trigger reconnect");
+    }
+
+    // ── 17. wait_until_healthy：服务器可用时立即返回 true ─────────────────────
+    #[tokio::test]
+    async fn test_wait_until_healthy_returns_true_when_server_ok() {
+        let health_route = warp::get()
+            .and(warp::path("health"))
+            .map(|| warp::reply::with_status("ok", warp::http::StatusCode::OK));
+
+        let (addr, server) = warp::serve(health_route).bind_with_graceful_shutdown(
+            ([127, 0, 0, 1], 0),
+            async { tokio::time::sleep(std::time::Duration::from_secs(5)).await },
+        );
+        tokio::spawn(server);
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{}", addr);
+        let healthy = HttpTransfer::wait_until_healthy(&client, &base, std::time::Duration::from_secs(5)).await;
+        assert!(healthy, "should return true when /health returns 200");
+    }
+
+    // ── 18. upload_chunked 重连：第一次失败后成功重传 ─────────────────────────
+    #[tokio::test]
+    async fn test_upload_chunked_reconnects_on_network_error() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc as StdArc;
+
+        // 服务器：前 N 个 chunk 请求返回 503（触发重连），之后正常
+        let fail_count = StdArc::new(AtomicU32::new(0));
+        let fail_count2 = StdArc::clone(&fail_count);
+
+        let chunk_route = warp::post()
+            .and(warp::path!("upload" / "chunk"))
+            .and(warp::body::bytes())
+            .map(move |_b: bytes::Bytes| {
+                let n = fail_count2.fetch_add(1, Ordering::Relaxed);
+                // 第一次返回 503，后续正常
+                if n == 0 {
+                    warp::reply::with_status(
+                        warp::reply::json(&serde_json::json!({"error": "service unavailable"})),
+                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
+                    )
+                } else {
+                    warp::reply::with_status(
+                        warp::reply::json(&serde_json::json!({"ok": true})),
+                        warp::http::StatusCode::OK,
+                    )
+                }
+            });
+        let complete_route = warp::post()
+            .and(warp::path!("upload" / "complete"))
+            .map(|| warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({"status": "complete"})),
+                warp::http::StatusCode::OK,
+            ));
+        let health_route = warp::get()
+            .and(warp::path("health"))
+            .map(|| warp::reply::with_status("ok", warp::http::StatusCode::OK));
+        let routes = chunk_route.or(complete_route).or(health_route);
+
+        let (addr, server) = warp::serve(routes).bind_with_graceful_shutdown(
+            ([127, 0, 0, 1], 0),
+            async { tokio::time::sleep(std::time::Duration::from_secs(10)).await },
+        );
+        tokio::spawn(server);
+
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("reconnect_test.bin");
+        let data = vec![0xAAu8; 512 * 1024]; // 512 KB → 1 chunk（< 5MB，串行模式）
+        tokio::fs::write(&file_path, &data).await.unwrap();
+
+        let cfg = HttpConfig {
+            chunk_size: 1024 * 1024,
+            max_retries: 0,          // 单 chunk 不重试（让外层重连处理）
+            max_reconnect_attempts: 3,
+            reconnect_base_delay_ms: 10, // 测试中缩短等待
+            ..HttpConfig::default()
+        };
+        let ht = HttpTransfer::new(cfg).unwrap();
+        let mut state = aerosync_core::resume::ResumeState::new(
+            uuid::Uuid::new_v4(),
+            file_path.clone(),
+            format!("http://{}", addr),
+            data.len() as u64,
+            1024 * 1024,
+            None,
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let base = format!("http://{}", addr);
+        let result = ht.upload_chunked(&file_path, &base, &mut state, tx).await;
+        // 503 被识别为网络错误 → 触发重连 → 第二次成功
+        assert!(result.is_ok(), "reconnect should succeed: {:?}", result);
     }
 }
