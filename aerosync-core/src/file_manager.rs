@@ -241,6 +241,7 @@ fn available_space(path: &Path) -> Result<u64> {
         if ret != 0 {
             return Err(AeroSyncError::FileIo(std::io::Error::last_os_error()));
         }
+        #[allow(clippy::unnecessary_cast)]
         Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
     }
     #[cfg(windows)]

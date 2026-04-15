@@ -983,7 +983,9 @@ fn get_disk_space(path: &std::path::Path) -> (u64, u64) {
         unsafe {
             let mut stat: libc::statvfs = MaybeUninit::zeroed().assume_init();
             if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
+                #[allow(clippy::unnecessary_cast)]
                 let free = stat.f_bavail as u64 * stat.f_bsize;
+                #[allow(clippy::unnecessary_cast)]
                 let total = stat.f_blocks as u64 * stat.f_bsize;
                 return (free, total);
             }
