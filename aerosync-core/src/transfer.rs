@@ -202,6 +202,7 @@ impl TransferEngine {
     }
 
     /// 启动引擎，注入协议适配器
+    #[tracing::instrument(skip(self, adapter))]
     pub async fn start(&self, adapter: Arc<dyn ProtocolAdapter>) -> Result<()> {
         self.start_inner(adapter, self.audit_logger.clone()).await
     }
@@ -237,6 +238,7 @@ impl TransferEngine {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self, task), fields(task_id = %task.id, file = ?task.source_path))]
     pub async fn add_transfer(&self, task: TransferTask) -> Result<()> {
         let file_name = task
             .source_path
@@ -266,6 +268,7 @@ impl TransferEngine {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self), fields(task_id = %task_id))]
     pub async fn cancel_transfer(&self, task_id: Uuid) -> Result<()> {
         self.cancel_sender
             .as_ref()

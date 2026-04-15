@@ -1,6 +1,7 @@
 use crate::traits::{TransferProtocol, TransferProgress};
 use crate::ratelimit::RateLimiter;
 use crate::utils::send_progress;
+use crate::circuit_breaker::CircuitBreaker;
 use zeroize::Zeroizing;
 use aerosync_core::{AeroSyncError, Result, TransferTask};
 use aerosync_core::resume::ResumeState;
@@ -20,6 +21,7 @@ use tokio_util::io::ReaderStream;
 pub struct HttpTransfer {
     client: Arc<Client>,
     config: HttpConfig,
+    circuit_breaker: Arc<CircuitBreaker>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,12 +98,12 @@ impl HttpTransfer {
             .build()
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
 
-        Ok(Self { client: Arc::new(client), config })
+        Ok(Self { client: Arc::new(client), config, circuit_breaker: Arc::new(CircuitBreaker::with_defaults()) })
     }
 
     /// 使用外部共享 client 构造，避免每次创建新连接池。
     pub fn new_with_client(client: Arc<Client>, config: HttpConfig) -> Self {
-        Self { client, config }
+        Self { client, config, circuit_breaker: Arc::new(CircuitBreaker::with_defaults()) }
     }
 
     /// 分片上传：将文件切分为 chunk_size 大小的块逐一上传。
@@ -110,6 +112,7 @@ impl HttpTransfer {
     ///
     /// `base_url`: 形如 `http://host:port`（不含路径）
     /// `state`:    ResumeState（含已完成分片，支持断点续传）
+    #[tracing::instrument(skip(self, state, progress_tx), fields(task_id = %state.task_id, total_chunks = state.total_chunks))]
     pub async fn upload_chunked(
         &self,
         file_path: &std::path::Path,
@@ -239,6 +242,7 @@ impl HttpTransfer {
         }
     }
 
+    #[tracing::instrument(skip(self, progress_tx), fields(file = ?file_path))]
     async fn upload_with_progress(
         &self,
         file_path: &std::path::Path,
@@ -246,6 +250,14 @@ impl HttpTransfer {
         sha256: Option<&str>,
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
+        // 熔断器检查：如果电路已开路，快速失败
+        if !self.circuit_breaker.allow_request() {
+            tracing::warn!("Circuit breaker OPEN, rejecting upload to {}", url);
+            return Err(AeroSyncError::Network(
+                format!("Circuit breaker open, refusing upload to {}", url)
+            ));
+        }
+
         let file_size = File::open(file_path).await?.metadata().await?.len();
         let start_time = Instant::now();
 
@@ -292,6 +304,7 @@ impl HttpTransfer {
                         file_size,
                         mb_per_sec
                     );
+                    self.circuit_breaker.record_success();
                     return Ok(());
                 }
                 Ok(resp) => {
@@ -317,9 +330,11 @@ impl HttpTransfer {
             }
         }
 
+        self.circuit_breaker.record_failure();
         Err(last_err.unwrap_or_else(|| AeroSyncError::Network("Upload failed: no attempts made".into())))
     }
 
+    #[tracing::instrument(skip(self, progress_tx), fields(url = url))]
     async fn download_with_progress(
         &self,
         url: &str,

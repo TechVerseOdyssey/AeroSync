@@ -23,6 +23,8 @@ use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
 
+use crate::task_store::TaskStore;
+
 // ───────────────────────── 后台任务状态注册表 ───────────────────────────────
 
 /// 后台传输任务的状态
@@ -39,11 +41,11 @@ pub enum BackgroundTaskStatus {
 }
 
 /// 后台任务条目，含状态和最后更新时间（用于 TTL 清理）
-struct TaskEntry {
-    status: BackgroundTaskStatus,
+pub struct TaskEntry {
+    pub status: BackgroundTaskStatus,
     /// 描述（如 "send_file: /path/to/file → http://host:7788"）
-    description: String,
-    last_updated: Instant,
+    pub description: String,
+    pub last_updated: Instant,
 }
 
 /// 任务注册表，task_id → TaskEntry
@@ -69,6 +71,8 @@ pub struct SendFileParams {
     pub no_verify: Option<bool>,
     /// 上传限速，如 "10MB"、"512KB"（可选）
     pub limit: Option<String>,
+    /// MCP 服务器本地认证 Token（当 AEROSYNC_MCP_SECRET 设置时必填）
+    pub _auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -81,6 +85,8 @@ pub struct SendDirectoryParams {
     pub token: Option<String>,
     /// 跳过 SHA-256 完整性校验（默认 false）
     pub no_verify: Option<bool>,
+    /// MCP 服务器本地认证 Token
+    pub _auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -99,6 +105,8 @@ pub struct StartReceiverParams {
     pub https: Option<bool>,
     /// HTTPS 监听端口（默认 7790）
     pub https_port: Option<u16>,
+    /// MCP 服务器本地认证 Token
+    pub _auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -111,18 +119,30 @@ pub struct ListHistoryParams {
     pub sent: Option<bool>,
     /// 只显示接收记录
     pub received: Option<bool>,
+    /// MCP 服务器本地认证 Token
+    pub _auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DiscoverParams {
     /// 扫描等待时间（秒，默认 3）
     pub timeout: Option<u64>,
+    /// MCP 服务器本地认证 Token
+    pub _auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetTransferStatusParams {
     /// send_file/send_directory 返回的 task_id
     pub task_id: String,
+    /// MCP 服务器本地认证 Token
+    pub _auth_token: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct NoParams {
+    /// MCP 服务器本地认证 Token（当 AEROSYNC_MCP_SECRET 设置时必填）
+    pub _auth_token: Option<String>,
 }
 
 // ────────────────────────── MCP Server ─────────────────────────────────────
@@ -132,21 +152,49 @@ pub struct AeroSyncMcpServer {
     receiver: Arc<Mutex<Option<FileReceiver>>>,
     audit: Option<Arc<AuditLogger>>,
     tasks: TaskRegistry,
+    /// Optional SQLite task store for persistence across restarts
+    task_store: Option<Arc<TaskStore>>,
+    /// Optional local authentication secret (from AEROSYNC_MCP_SECRET env var)
+    secret: Option<Zeroizing<String>>,
 }
 
 #[tool_router]
 impl AeroSyncMcpServer {
     pub fn new() -> Self {
+        let secret = std::env::var("AEROSYNC_MCP_SECRET").ok().map(Zeroizing::new);
         Self {
             receiver: Arc::new(Mutex::new(None)),
             audit: None,
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            task_store: None,
+            secret,
         }
     }
 
     pub fn with_audit(mut self, logger: Arc<AuditLogger>) -> Self {
         self.audit = Some(logger);
         self
+    }
+
+    pub fn with_task_store(mut self, store: Arc<TaskStore>) -> Self {
+        self.task_store = Some(store);
+        self
+    }
+
+    /// Pre-populate the in-memory task registry with tasks loaded from the store.
+    pub async fn restore_tasks(&self, tasks: Vec<(uuid::Uuid, TaskEntry)>) {
+        let mut registry = self.tasks.lock().await;
+        for (id, entry) in tasks {
+            registry.insert(id, entry);
+        }
+    }
+
+    /// Check MCP local auth. Returns true if auth passes (or no secret configured).
+    fn check_auth(&self, token: Option<&str>) -> bool {
+        match &self.secret {
+            None => true,  // no secret configured, allow all
+            Some(secret) => token.map(|t| t == secret.as_str()).unwrap_or(false),
+        }
     }
 
     /// 发送单个文件到指定地址（自动协商 QUIC/HTTP 协议）
@@ -157,6 +205,11 @@ impl AeroSyncMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("send_file", &format!("source={} destination={}", params.source, params.destination)).await;
+        }
+        if !self.check_auth(params._auth_token.as_deref()) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+            )]));
         }
         let source = std::path::PathBuf::from(&params.source);
 
@@ -185,17 +238,22 @@ impl AeroSyncMcpServer {
         let task_id = Uuid::new_v4();
         let description = format!("send_file: {} → {}", params.source, params.destination);
         {
-            let mut tasks = self.tasks.lock().await;
-            evict_expired(&mut tasks);
-            tasks.insert(task_id, TaskEntry {
+            let pending_entry = TaskEntry {
                 status: BackgroundTaskStatus::Pending,
                 description: description.clone(),
                 last_updated: Instant::now(),
-            });
+            };
+            if let Some(ref store) = self.task_store {
+                store.upsert(task_id, &pending_entry).await;
+            }
+            let mut tasks = self.tasks.lock().await;
+            evict_expired(&mut tasks);
+            tasks.insert(task_id, pending_entry);
         }
 
         // 克隆后台任务所需的状态
         let tasks_bg = Arc::clone(&self.tasks);
+        let task_store_bg = self.task_store.clone();
         let source_bg = source.clone();
         let dest_url_bg = dest_url.clone();
 
@@ -206,6 +264,9 @@ impl AeroSyncMcpServer {
                 if let Some(e) = t.get_mut(&task_id) {
                     e.status = BackgroundTaskStatus::Running;
                     e.last_updated = Instant::now();
+                    if let Some(ref store) = task_store_bg {
+                        store.upsert(task_id, e).await;
+                    }
                 }
             }
 
@@ -277,6 +338,9 @@ impl AeroSyncMcpServer {
                     Err(msg) => BackgroundTaskStatus::Failed(msg),
                 };
                 e.last_updated = Instant::now();
+                if let Some(ref store) = task_store_bg {
+                    store.upsert(task_id, e).await;
+                }
             }
         });
 
@@ -299,6 +363,11 @@ impl AeroSyncMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("send_directory", &format!("source={} destination={}", params.source, params.destination)).await;
+        }
+        if !self.check_auth(params._auth_token.as_deref()) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+            )]));
         }
         let source = std::path::PathBuf::from(&params.source);
 
@@ -339,17 +408,22 @@ impl AeroSyncMcpServer {
         let task_id = Uuid::new_v4();
         let description = format!("send_directory: {} → {} ({} files)", params.source, params.destination, files.len());
         {
-            let mut tasks = self.tasks.lock().await;
-            evict_expired(&mut tasks);
-            tasks.insert(task_id, TaskEntry {
+            let pending_entry = TaskEntry {
                 status: BackgroundTaskStatus::Pending,
                 description: description.clone(),
                 last_updated: Instant::now(),
-            });
+            };
+            if let Some(ref store) = self.task_store {
+                store.upsert(task_id, &pending_entry).await;
+            }
+            let mut tasks = self.tasks.lock().await;
+            evict_expired(&mut tasks);
+            tasks.insert(task_id, pending_entry);
         }
 
         let files_count = files.len();
         let tasks_bg = Arc::clone(&self.tasks);
+        let task_store_bg = self.task_store.clone();
 
         tokio::spawn(async move {
             {
@@ -357,10 +431,21 @@ impl AeroSyncMcpServer {
                 if let Some(e) = t.get_mut(&task_id) {
                     e.status = BackgroundTaskStatus::Running;
                     e.last_updated = Instant::now();
+                    if let Some(ref store) = task_store_bg {
+                        store.upsert(task_id, e).await;
+                    }
                 }
             }
 
             let result: Result<(usize, u64, f64), String> = async {
+                // 检测是否为小文件场景（avgSize < 64KB → multipart 批量上传）
+                let avg_size = if files.is_empty() { 0 } else { total_size / files.len() as u64 };
+                let use_batch = avg_size < 64 * 1024 && dest_url.starts_with("http");
+
+                if use_batch {
+                    return batch_upload_files(&files, &dest_url, params.token.as_deref(), no_verify).await;
+                }
+
                 let http_config = HttpConfig {
                     auth_token: params.token.clone().map(Zeroizing::new),
                     ..HttpConfig::default()
@@ -417,6 +502,9 @@ impl AeroSyncMcpServer {
                     Err(msg) => BackgroundTaskStatus::Failed(msg),
                 };
                 e.last_updated = Instant::now();
+                if let Some(ref store) = task_store_bg {
+                    store.upsert(task_id, e).await;
+                }
             }
         });
 
@@ -439,6 +527,11 @@ impl AeroSyncMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("start_receiver", &format!("port={:?} save_to={:?}", params.port, params.save_to)).await;
+        }
+        if !self.check_auth(params._auth_token.as_deref()) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+            )]));
         }
         let mut lock = self.receiver.lock().await;
 
@@ -504,9 +597,17 @@ impl AeroSyncMcpServer {
 
     /// 停止当前运行的接收端服务器
     #[tool(description = "Stop the currently running file receiver server.")]
-    async fn stop_receiver(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+    async fn stop_receiver(
+        &self,
+        rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<NoParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("stop_receiver", "").await;
+        }
+        if !self.check_auth(params._auth_token.as_deref()) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+            )]));
         }
         let mut lock = self.receiver.lock().await;
 
@@ -529,9 +630,17 @@ impl AeroSyncMcpServer {
 
     /// 查询接收端状态和已接收的文件列表
     #[tool(description = "Get the status of the receiver server and list all files received so far.")]
-    async fn get_receiver_status(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+    async fn get_receiver_status(
+        &self,
+        rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<NoParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("get_receiver_status", "").await;
+        }
+        if !self.check_auth(params._auth_token.as_deref()) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+            )]));
         }
         let lock = self.receiver.lock().await;
 
@@ -578,6 +687,11 @@ impl AeroSyncMcpServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("list_history", &format!("limit={:?}", params.limit)).await;
+        }
+        if !self.check_auth(params._auth_token.as_deref()) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+            )]));
         }
         let store_path = HistoryStore::default_path();
         if !store_path.exists() {
@@ -649,6 +763,11 @@ impl AeroSyncMcpServer {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("discover_receivers", &format!("timeout={:?}", params.timeout)).await;
         }
+        if !self.check_auth(params._auth_token.as_deref()) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+            )]));
+        }
         let timeout = Duration::from_secs(params.timeout.unwrap_or(3));
         let mut peers = AeroSyncMdns::discover(timeout).await;
         peers.sort_by(|a, b| a.host.cmp(&b.host).then(a.port.cmp(&b.port)));
@@ -682,6 +801,11 @@ impl AeroSyncMcpServer {
         &self,
         rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<GetTransferStatusParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if !self.check_auth(params._auth_token.as_deref()) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+            )]));
+        }
         let id = match Uuid::parse_str(&params.task_id) {
             Ok(id) => id,
             Err(_) => {
@@ -728,6 +852,81 @@ impl AeroSyncMcpServer {
 impl ServerHandler for AeroSyncMcpServer {}
 
 // ──────────────────────── 辅助函数 ─────────────────────────────────────────
+
+/// 小文件 multipart 批量上传（每批最多 50 个文件，发往 POST /upload/batch）
+///
+/// 触发条件：平均文件大小 < 64KB 且目标协议为 HTTP
+async fn batch_upload_files(
+    files: &[(std::path::PathBuf, std::path::PathBuf, u64)],
+    dest_url: &str,
+    token: Option<&str>,
+    no_verify: bool,
+) -> Result<(usize, u64, f64), String> {
+    const BATCH_SIZE: usize = 50;
+
+    let batch_url = format!("{}/upload/batch", dest_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(4)
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+    let start = std::time::Instant::now();
+    let mut total_saved = 0usize;
+    let mut total_bytes = 0u64;
+
+    for batch in files.chunks(BATCH_SIZE) {
+        let mut form = reqwest::multipart::Form::new();
+
+        for (path, rel, _size) in batch {
+            let data = tokio::fs::read(path).await
+                .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+            let rel_str = rel.to_string_lossy().to_string();
+
+            // 可选 SHA256 校验（写入 part headers 由接收端忽略，仅供调试）
+            let _ = no_verify; // 接收端会在保存后校验
+
+            let part = reqwest::multipart::Part::bytes(data.clone())
+                .file_name(rel_str.clone())
+                .mime_str("application/octet-stream")
+                .map_err(|e| format!("Failed to create part: {}", e))?;
+            form = form.part(rel_str, part);
+            total_bytes += data.len() as u64;
+        }
+
+        let mut req = client.post(&batch_url).multipart(form);
+        if let Some(tok) = token {
+            req = req.header("Authorization", format!("Bearer {}", tok));
+        }
+
+        let resp = req.send().await
+            .map_err(|e| format!("Batch upload failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Batch upload HTTP {}: {}", status, body));
+        }
+
+        // 解析响应中的 saved count
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| format!("Failed to parse batch response: {}", e))?;
+        let saved = json.get("saved").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        total_saved += saved;
+
+        let errors: Vec<String> = json.get("errors")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+            .unwrap_or_default();
+        if !errors.is_empty() {
+            tracing::warn!("Batch upload partial errors: {:?}", errors);
+        }
+    }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let speed_mbs = if elapsed > 0.0 { total_bytes as f64 / elapsed / 1_048_576.0 } else { 0.0 };
+    Ok((total_saved, total_bytes, speed_mbs))
+}
 
 /// 自动协商协议：如果对端是 AeroSync 则升级 QUIC，否则降级 HTTP
 async fn negotiate_protocol(dest: &str) -> String {

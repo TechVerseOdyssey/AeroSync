@@ -85,6 +85,11 @@ pub struct ReceivedFile {
     pub sender_ip: Option<String>,
 }
 
+/// Custom rejection for payload too large (Content-Length exceeds max_file_size)
+#[derive(Debug)]
+struct PayloadTooLarge;
+impl warp::reject::Reject for PayloadTooLarge {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerStatus {
     Stopped,
@@ -546,6 +551,18 @@ fn build_warp_routes(
     let upload = warp::path("upload")
         .and(warp::path::tail())
         .and(warp::post())
+        // Content-Length 预检：超出 max_file_size 直接 413，避免读取请求体
+        .and(warp::header::optional::<u64>("content-length")
+            .and_then(move |content_len: Option<u64>| async move {
+                if let Some(len) = content_len {
+                    if len > max_size {
+                        return Err(warp::reject::custom(PayloadTooLarge));
+                    }
+                }
+                Ok(())
+            })
+            .untuple_one()
+        )
         .and(warp::header::optional::<String>("authorization"))
         .and(warp::header::optional::<String>("x-file-hash"))
         .and(warp::header::optional::<String>("x-aerosync-tag"))
@@ -618,6 +635,27 @@ fn build_warp_routes(
         .and(warp::any().map(move || router_complete.clone()))
         .and_then(handle_chunk_complete);
 
+    // ── POST /upload/batch ────────────────────────────────────────────────────
+    let auth_mw_batch = auth_mw.clone();
+    let receive_dir_batch = receive_dir.clone();
+    let received_files_batch = received_files.clone();
+    let audit_batch = audit_logger.clone();
+    let metrics_batch = Arc::clone(&metrics);
+    let ws_tx_batch = ws_tx.clone();
+    let upload_batch = warp::path!("upload" / "batch")
+        .and(warp::post())
+        .and(warp::header::optional::<String>("authorization"))
+        .and(warp::addr::remote())
+        .and(warp::multipart::form().max_length(512 * 1024 * 1024))  // 512 MB per batch
+        .and(warp::any().map(move || receive_dir_batch.clone()))
+        .and(warp::any().map(move || allow_overwrite))
+        .and(warp::any().map(move || received_files_batch.clone()))
+        .and(warp::any().map(move || auth_mw_batch.clone()))
+        .and(warp::any().map(move || audit_batch.clone()))
+        .and(warp::any().map(move || metrics_batch.clone()))
+        .and(warp::any().map(move || ws_tx_batch.clone()))
+        .and_then(handle_batch_upload);
+
     // ── GET /metrics ──────────────────────────────────────────────────────────
     let metrics_arc = Arc::clone(&metrics);
     let receive_dir_m = receive_dir.clone();
@@ -664,11 +702,25 @@ fn build_warp_routes(
 
     upload_chunk
         .or(upload_complete)
+        .or(upload_batch)
         .or(upload)
         .or(health)
         .or(status_route)
         .or(metrics_route)
         .or(ws_route)
+        .recover(|err: warp::Rejection| async move {
+            use warp::Reply;
+            if err.find::<PayloadTooLarge>().is_some() {
+                Ok::<_, warp::Rejection>(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "error": "Payload Too Large: file exceeds server limit"
+                    })),
+                    warp::http::StatusCode::PAYLOAD_TOO_LARGE,
+                ).into_response())
+            } else {
+                Err(err)
+            }
+        })
         .with(cors)
 }
 
@@ -985,6 +1037,126 @@ struct CompleteQuery {
     filename: String,
     total_chunks: u32,
     sha256: Option<String>,
+}
+
+/// 批量接收小文件：multipart 中每个 part 的 name 作为相对路径文件名
+/// 路由：POST /upload/batch
+#[allow(clippy::too_many_arguments)]
+async fn handle_batch_upload(
+    auth_header: Option<String>,
+    remote_addr: Option<SocketAddr>,
+    mut form: warp::multipart::FormData,
+    receive_dir: PathBuf,
+    allow_overwrite: bool,
+    received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    auth_mw: Option<Arc<AuthMiddleware>>,
+    audit_logger: Option<Arc<AuditLogger>>,
+    metrics: Arc<Metrics>,
+    ws_tx: WsBroadcast,
+) -> std::result::Result<impl warp::Reply, warp::Rejection> {
+    use bytes::Buf;
+    use futures::TryStreamExt;
+    use sha2::{Digest, Sha256};
+    use warp::Reply;
+
+    let client_ip = remote_addr
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // 认证
+    if let Some(ref mw) = auth_mw {
+        let auth_str = auth_header.as_deref();
+        match mw.authenticate_http_request(auth_str, &client_ip) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!("HTTP batch: Unauthorized attempt from {}", client_ip);
+                if let Some(ref al) = audit_logger {
+                    al.log_auth_failed("http", Some(&client_ip), "Unauthorized").await;
+                }
+                let resp = mw.unauthorized_response();
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({"error": resp.message})),
+                    warp::http::StatusCode::UNAUTHORIZED,
+                ).into_response());
+            }
+            Err(_) => return Err(warp::reject::reject()),
+        }
+    }
+
+    let mut saved = 0u32;
+    let mut errors: Vec<String> = Vec::new();
+
+    // 每个 part 的 name 是相对路径文件名
+    while let Some(part) = form.try_next().await.map_err(|_| warp::reject::reject())? {
+        let filename = sanitize_filename(part.name());
+        if filename.is_empty() || filename == "." {
+            continue;
+        }
+
+        let file_path = get_unique_file_path(&receive_dir, &filename, allow_overwrite);
+        if let Some(parent) = file_path.parent() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                errors.push(format!("{}: mkdir failed: {}", filename, e));
+                continue;
+            }
+        }
+
+        // 收集 part 数据
+        let data: bytes::Bytes = match part.stream().try_fold(bytes::BytesMut::new(), |mut acc, chunk| async move {
+            acc.extend_from_slice(chunk.chunk());
+            Ok(acc)
+        }).await {
+            Ok(b) => b.freeze(),
+            Err(e) => {
+                errors.push(format!("{}: read error: {}", filename, e));
+                continue;
+            }
+        };
+
+        let size = data.len() as u64;
+
+        // 写文件
+        let mut hash = Sha256::new();
+        hash.update(&data);
+        let sha256 = hex::encode(hash.finalize());
+
+        match tokio::fs::write(&file_path, &data).await {
+            Ok(_) => {
+                tracing::debug!("Batch: saved {} ({} bytes)", filename, size);
+                metrics.inc_files_received();
+                metrics.add_bytes_received(size);
+                let received_file = ReceivedFile {
+                    id: Uuid::new_v4(),
+                    original_name: filename.clone(),
+                    size,
+                    sha256: Some(sha256.clone()),
+                    received_at: std::time::SystemTime::now(),
+                    sender_ip: Some(client_ip.clone()),
+                    saved_path: file_path.clone(),
+                };
+                received_files.write().await.push(received_file.clone());
+                let _ = ws_tx.send(WsEvent::Completed {
+                    filename: filename.clone(),
+                    size,
+                    sha256: sha256.clone(),
+                });
+                if let Some(ref al) = audit_logger {
+                    al.log_completed(crate::audit::Direction::Receive, "http", &filename, size, Some(&sha256), Some(&client_ip)).await;
+                }
+                saved += 1;
+            }
+            Err(e) => {
+                errors.push(format!("{}: write failed: {}", filename, e));
+                metrics.inc_upload_errors();
+            }
+        }
+    }
+
+    tracing::info!("Batch upload: {} saved, {} errors from {}", saved, errors.len(), client_ip);
+    Ok(warp::reply::json(&serde_json::json!({
+        "saved": saved,
+        "errors": errors,
+    })).into_response())
 }
 
 /// 接收单个分片，写入 `{receive_dir}/.aerosync/tmp/{task_id}/{chunk_index}`

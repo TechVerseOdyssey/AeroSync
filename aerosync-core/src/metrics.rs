@@ -27,6 +27,28 @@ pub struct Metrics {
     active_transfers: AtomicU64,
     /// Number of transfers waiting to be processed
     queue_depth: AtomicU64,
+    // ── send-side counters ─────────────────────────────────────────────────
+    /// Total number of files successfully sent
+    pub files_sent_total: AtomicU64,
+    /// Total bytes successfully sent
+    pub bytes_sent_total: AtomicU64,
+    /// Total number of send-side errors
+    pub send_errors_total: AtomicU64,
+    /// Files sent via HTTP protocol
+    pub files_sent_http: AtomicU64,
+    /// Files sent via QUIC protocol
+    pub files_sent_quic: AtomicU64,
+    // ── file size histogram (5 buckets) ───────────────────────────────────
+    /// < 1 KB
+    pub hist_lt_1kb: AtomicU64,
+    /// 1 KB – 64 KB
+    pub hist_1kb_64kb: AtomicU64,
+    /// 64 KB – 1 MB
+    pub hist_64kb_1mb: AtomicU64,
+    /// 1 MB – 100 MB
+    pub hist_1mb_100mb: AtomicU64,
+    /// > 100 MB
+    pub hist_gt_100mb: AtomicU64,
 }
 
 impl Metrics {
@@ -75,6 +97,39 @@ impl Metrics {
 
     pub fn queue_depth(&self) -> u64 {
         self.queue_depth.load(Ordering::Relaxed)
+    }
+
+    // ── send-side helpers ─────────────────────────────────────────────────────
+
+    pub fn inc_files_sent(&self, protocol: &str) {
+        self.files_sent_total.fetch_add(1, Ordering::Relaxed);
+        match protocol {
+            "quic" => { self.files_sent_quic.fetch_add(1, Ordering::Relaxed); }
+            _ => { self.files_sent_http.fetch_add(1, Ordering::Relaxed); }
+        }
+    }
+
+    pub fn add_bytes_sent(&self, n: u64) {
+        self.bytes_sent_total.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn inc_send_errors(&self) {
+        self.send_errors_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a file size in the appropriate histogram bucket
+    pub fn observe_file_size(&self, bytes: u64) {
+        if bytes < 1_024 {
+            self.hist_lt_1kb.fetch_add(1, Ordering::Relaxed);
+        } else if bytes < 64 * 1_024 {
+            self.hist_1kb_64kb.fetch_add(1, Ordering::Relaxed);
+        } else if bytes < 1_024 * 1_024 {
+            self.hist_64kb_1mb.fetch_add(1, Ordering::Relaxed);
+        } else if bytes < 100 * 1_024 * 1_024 {
+            self.hist_1mb_100mb.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.hist_gt_100mb.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn dec_ws_connections(&self) {
@@ -151,6 +206,46 @@ impl Metrics {
         out.push_str("# HELP aerosync_queue_depth Number of transfers waiting in queue\n");
         out.push_str("# TYPE aerosync_queue_depth gauge\n");
         out.push_str(&format!("aerosync_queue_depth {}\n", qd));
+
+        // files_sent_total (counter)
+        let files_sent = self.files_sent_total.load(Ordering::Relaxed);
+        out.push_str("# HELP aerosync_files_sent_total Total files successfully sent\n");
+        out.push_str("# TYPE aerosync_files_sent_total counter\n");
+        out.push_str(&format!("aerosync_files_sent_total {}\n", files_sent));
+
+        // bytes_sent_total (counter)
+        let bytes_sent = self.bytes_sent_total.load(Ordering::Relaxed);
+        out.push_str("# HELP aerosync_bytes_sent_total Total bytes successfully sent\n");
+        out.push_str("# TYPE aerosync_bytes_sent_total counter\n");
+        out.push_str(&format!("aerosync_bytes_sent_total {}\n", bytes_sent));
+
+        // send_errors_total (counter)
+        let send_errors = self.send_errors_total.load(Ordering::Relaxed);
+        out.push_str("# HELP aerosync_send_errors_total Total send-side errors\n");
+        out.push_str("# TYPE aerosync_send_errors_total counter\n");
+        out.push_str(&format!("aerosync_send_errors_total {}\n", send_errors));
+
+        // per-protocol send counters (counter)
+        let sent_http = self.files_sent_http.load(Ordering::Relaxed);
+        let sent_quic = self.files_sent_quic.load(Ordering::Relaxed);
+        out.push_str("# HELP aerosync_files_sent_by_protocol Total files sent per protocol\n");
+        out.push_str("# TYPE aerosync_files_sent_by_protocol counter\n");
+        out.push_str(&format!("aerosync_files_sent_by_protocol{{protocol=\"http\"}} {}\n", sent_http));
+        out.push_str(&format!("aerosync_files_sent_by_protocol{{protocol=\"quic\"}} {}\n", sent_quic));
+
+        // file size histogram (bucket counts)
+        let h0 = self.hist_lt_1kb.load(Ordering::Relaxed);
+        let h1 = self.hist_1kb_64kb.load(Ordering::Relaxed);
+        let h2 = self.hist_64kb_1mb.load(Ordering::Relaxed);
+        let h3 = self.hist_1mb_100mb.load(Ordering::Relaxed);
+        let h4 = self.hist_gt_100mb.load(Ordering::Relaxed);
+        out.push_str("# HELP aerosync_file_size_bucket File size distribution (count per bucket)\n");
+        out.push_str("# TYPE aerosync_file_size_bucket gauge\n");
+        out.push_str(&format!("aerosync_file_size_bucket{{le=\"1024\"}} {}\n", h0));
+        out.push_str(&format!("aerosync_file_size_bucket{{le=\"65536\"}} {}\n", h1));
+        out.push_str(&format!("aerosync_file_size_bucket{{le=\"1048576\"}} {}\n", h2));
+        out.push_str(&format!("aerosync_file_size_bucket{{le=\"104857600\"}} {}\n", h3));
+        out.push_str(&format!("aerosync_file_size_bucket{{le=\"+Inf\"}} {}\n", h4));
 
         out
     }
