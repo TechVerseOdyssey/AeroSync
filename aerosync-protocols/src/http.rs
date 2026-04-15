@@ -7,6 +7,7 @@ use aerosync_core::{AeroSyncError, Result, TransferTask};
 use aerosync_core::resume::ResumeState;
 use async_trait::async_trait;
 use bytes::Bytes;
+use memmap2::MmapOptions;
 use rand::Rng;
 use reqwest::Client;
 use std::path::PathBuf;
@@ -14,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
 
@@ -39,6 +40,9 @@ pub struct HttpConfig {
     /// 服务端 DER 格式证书文件路径列表（用于证书钉扎）。
     /// 非空时只信任列表中的证书，忽略系统 CA，同时 `accept_invalid_certs` 无效。
     pub pinned_server_certs: Vec<PathBuf>,
+    /// 并发分片上传路数（仅对 >5MB 文件生效），默认 4。
+    /// 设为 1 等同于串行上传。
+    pub concurrent_chunks: usize,
 }
 
 impl Default for HttpConfig {
@@ -51,6 +55,7 @@ impl Default for HttpConfig {
             upload_limit_bps: 0,
             accept_invalid_certs: false,
             pinned_server_certs: vec![],
+            concurrent_chunks: 4,
         }
     }
 }
@@ -106,14 +111,35 @@ impl HttpTransfer {
         Self { client, config, circuit_breaker: Arc::new(CircuitBreaker::with_defaults()) }
     }
 
-    /// 分片上传：将文件切分为 chunk_size 大小的块逐一上传。
-    /// 服务端路径：POST /upload/chunk?task_id=&chunk_index=&total_chunks=&filename=
-    /// 所有分片完成后发送 POST /upload/complete?... 合并。
+    /// 分片上传入口：根据文件大小和配置自动选择串行或并发模式。
+    /// - ≤5 MB：串行单流（`upload_chunked_serial`）
+    /// - >5 MB：mmap 并发分片（`upload_chunked_concurrent`）
     ///
     /// `base_url`: 形如 `http://host:port`（不含路径）
     /// `state`:    ResumeState（含已完成分片，支持断点续传）
     #[tracing::instrument(skip(self, state, progress_tx), fields(task_id = %state.task_id, total_chunks = state.total_chunks))]
     pub async fn upload_chunked(
+        &self,
+        file_path: &std::path::Path,
+        base_url: &str,
+        state: &mut ResumeState,
+        progress_tx: mpsc::UnboundedSender<TransferProgress>,
+    ) -> Result<()> {
+        const SMALL_FILE_THRESHOLD: u64 = 5 * 1024 * 1024; // 5 MB
+        let concurrency = if state.total_size <= SMALL_FILE_THRESHOLD {
+            1
+        } else {
+            self.config.concurrent_chunks.max(1)
+        };
+        if concurrency <= 1 {
+            self.upload_chunked_serial(file_path, base_url, state, progress_tx).await
+        } else {
+            self.upload_chunked_concurrent(file_path, base_url, state, progress_tx, concurrency).await
+        }
+    }
+
+    /// 串行分片上传（原有逻辑，用于小文件或 concurrent_chunks=1）。
+    async fn upload_chunked_serial(
         &self,
         file_path: &std::path::Path,
         base_url: &str,
@@ -131,114 +157,208 @@ impl HttpTransfer {
         let rate_limiter = RateLimiter::new(self.config.upload_limit_bps);
 
         tracing::info!(
-            "Chunked upload: '{}' {} chunks (already done: {:?})",
-            file_name,
-            state.total_chunks,
-            state.completed_chunks
+            "Chunked upload (serial): '{}' {} chunks (already done: {:?})",
+            file_name, state.total_chunks, state.completed_chunks
         );
 
         for chunk_index in state.pending_chunks() {
             let offset = state.chunk_offset(chunk_index);
             let size = state.chunk_size_of(chunk_index);
 
-            // 复用文件句柄，直接 seek 到分片起始位置
             let mut file = File::open(file_path).await?;
             file.seek(std::io::SeekFrom::Start(offset)).await?;
             let mut raw = vec![0u8; size as usize];
             file.read_exact(&mut raw).await?;
-            // Bytes 是引用计数的不可变缓冲区，clone 只复制指针，不复制数据
             let buf = Bytes::from(raw);
 
-            // 限速（消耗令牌）
             rate_limiter.consume(size).await;
 
-            // 带重试的分片上传
             let chunk_url = format!(
-                "{}/upload/chunk?task_id={}&chunk_index={}&total_chunks={}&filename={}",
-                base_url,
-                state.task_id,
-                chunk_index,
-                state.total_chunks,
-                urlencoding::encode(&file_name)
+                "{}/upload/chunk?task_id={}&chunk_index={}&total_chunks={}&filename={}&total_size={}&chunk_size={}",
+                base_url, state.task_id, chunk_index, state.total_chunks,
+                urlencoding::encode(&file_name), state.total_size, state.chunk_size
             );
 
-            let mut last_err = None;
-            for attempt in 0..=self.config.max_retries {
-                // buf.clone() 仅复制引用计数指针，O(1)，无数据拷贝
-                let mut req = self.client.post(&chunk_url).body(buf.clone());
-                if let Some(token) = &self.config.auth_token {
-                    req = req.header("Authorization", format!("Bearer {}", token.as_str()));
-                }
-                match req.send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        last_err = None;
-                        break;
-                    }
-                    Ok(resp) => {
-                        let status = resp.status();
-                        let body = resp.text().await.unwrap_or_default();
-                        last_err = Some(AeroSyncError::Network(format!(
-                            "Chunk {} failed: {} - {}",
-                            chunk_index, status, body
-                        )));
-                        tracing::warn!("Chunk {} attempt {}/{} failed: {}", chunk_index, attempt + 1, self.config.max_retries + 1, status);
-                    }
-                    Err(e) => {
-                        last_err = Some(AeroSyncError::Network(e.to_string()));
-                        tracing::warn!("Chunk {} attempt {}/{} error: {}", chunk_index, attempt + 1, self.config.max_retries + 1, e);
-                    }
-                }
-                if attempt < self.config.max_retries {
-                    // 指数退避 + ±20% jitter：100ms, 200ms, 400ms...上限 30s
-                    let base_ms = 100u64 * (1u64 << attempt.min(8));
-                    let delay_ms = base_ms.min(30_000);
-                    let jitter_range = (delay_ms / 5) as i64;
-                    let jitter = rand::thread_rng().gen_range(-jitter_range..=jitter_range);
-                    let actual_ms = (delay_ms as i64 + jitter).max(50) as u64;
-                    tokio::time::sleep(Duration::from_millis(actual_ms)).await;
-                }
-            }
-            if let Some(e) = last_err {
-                return Err(e);
-            }
+            Self::upload_chunk_with_retry(
+                &self.client, &chunk_url, buf, chunk_index,
+                self.config.max_retries, self.config.auth_token.as_deref().map(|s| s.as_str()),
+            ).await?;
 
-            // 标记完成，更新进度
             state.mark_chunk_done(chunk_index);
             bytes_done += size;
             send_progress(&progress_tx, bytes_done, &start_time);
         }
 
-        // 所有分片完成，发送合并请求
+        self.send_complete_request(base_url, state, &file_name).await
+    }
+
+    /// mmap 并发分片上传（适用于 >5MB 大文件）。
+    ///
+    /// 用 `memmap2` 将文件只读映射到虚拟地址空间，多个 tokio task 并发读取不同分片偏移，
+    /// 通过 `Semaphore` 控制最大并发数，避免打满带宽或连接池。
+    async fn upload_chunked_concurrent(
+        &self,
+        file_path: &std::path::Path,
+        base_url: &str,
+        state: &mut ResumeState,
+        progress_tx: mpsc::UnboundedSender<TransferProgress>,
+        concurrency: usize,
+    ) -> Result<()> {
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        tracing::info!(
+            "Chunked upload (concurrent x{}): '{}' {} chunks",
+            concurrency, file_name, state.total_chunks
+        );
+
+        // mmap 只读映射（需要 std::fs::File）
+        let std_file = std::fs::File::open(file_path)
+            .map_err(AeroSyncError::FileIo)?;
+        // SAFETY: 文件在整个上传过程中不被修改（只读映射）
+        let mmap = Arc::new(unsafe {
+            MmapOptions::new()
+                .map(&std_file)
+                .map_err(AeroSyncError::FileIo)?
+        });
+
+        let pending = state.pending_chunks();
+        let total_pending = pending.len();
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+        let rate_limiter = Arc::new(RateLimiter::new(self.config.upload_limit_bps));
+
+        // 结果 channel：(chunk_index, bytes_uploaded)
+        let (result_tx, mut result_rx) =
+            mpsc::unbounded_channel::<std::result::Result<(u32, u64), AeroSyncError>>();
+
+        let start_time = Instant::now();
+
+        // 为每个待上传分片 spawn 一个 task
+        for chunk_index in pending {
+            let offset = state.chunk_offset(chunk_index);
+            let size = state.chunk_size_of(chunk_index);
+            let mmap = Arc::clone(&mmap);
+            let sem = Arc::clone(&semaphore);
+            let rl = Arc::clone(&rate_limiter);
+            let client = Arc::clone(&self.client);
+            let auth_token = self.config.auth_token.as_deref().map(|s| s.to_string());
+            let max_retries = self.config.max_retries;
+            let tx = result_tx.clone();
+            let chunk_url = format!(
+                "{}/upload/chunk?task_id={}&chunk_index={}&total_chunks={}&filename={}&total_size={}&chunk_size={}",
+                base_url, state.task_id, chunk_index, state.total_chunks,
+                urlencoding::encode(&file_name), state.total_size, state.chunk_size
+            );
+
+            tokio::spawn(async move {
+                let _permit = sem.acquire_owned().await;
+                // mmap slice → Bytes（一次用户态拷贝，但避免了 seek+read syscall）
+                let data = Bytes::copy_from_slice(
+                    &mmap[offset as usize..(offset + size) as usize]
+                );
+                rl.consume(size).await;
+                let result = Self::upload_chunk_with_retry(
+                    &client, &chunk_url, data, chunk_index,
+                    max_retries, auth_token.as_deref(),
+                ).await;
+                let _ = tx.send(result.map(|_| (chunk_index, size)));
+            });
+        }
+        drop(result_tx); // 关闭发送端，result_rx 会在所有 task 完成后耗尽
+
+        // 收集结果，更新进度
+        let mut completed = 0usize;
+        let mut bytes_done = state.bytes_transferred();
+        while let Some(res) = result_rx.recv().await {
+            let (chunk_index, size) = res?;
+            state.mark_chunk_done(chunk_index);
+            bytes_done += size;
+            completed += 1;
+            send_progress(&progress_tx, bytes_done, &start_time);
+            tracing::debug!("Concurrent chunk {}/{} done", completed, total_pending);
+        }
+
+        self.send_complete_request(base_url, state, &file_name).await
+    }
+
+    /// 带指数退避重试的单分片上传（串行/并发共用）。
+    async fn upload_chunk_with_retry(
+        client: &Client,
+        chunk_url: &str,
+        buf: Bytes,
+        chunk_index: u32,
+        max_retries: u32,
+        auth_token: Option<&str>,
+    ) -> Result<()> {
+        let mut last_err = None;
+        for attempt in 0..=max_retries {
+            let mut req = client.post(chunk_url).body(buf.clone());
+            if let Some(token) = auth_token {
+                req = req.header("Authorization", format!("Bearer {}", token));
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => return Ok(()),
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    last_err = Some(AeroSyncError::Network(format!(
+                        "Chunk {} failed: {} - {}", chunk_index, status, body
+                    )));
+                    tracing::warn!("Chunk {} attempt {}/{} failed: {}",
+                        chunk_index, attempt + 1, max_retries + 1, status);
+                }
+                Err(e) => {
+                    last_err = Some(AeroSyncError::Network(e.to_string()));
+                    tracing::warn!("Chunk {} attempt {}/{} error: {}",
+                        chunk_index, attempt + 1, max_retries + 1, e);
+                }
+            }
+            if attempt < max_retries {
+                let base_ms = 100u64 * (1u64 << attempt.min(8));
+                let delay_ms = base_ms.min(30_000);
+                let jitter_range = (delay_ms / 5) as i64;
+                let jitter = rand::thread_rng().gen_range(-jitter_range..=jitter_range);
+                let actual_ms = (delay_ms as i64 + jitter).max(50) as u64;
+                tokio::time::sleep(Duration::from_millis(actual_ms)).await;
+            }
+        }
+        Err(last_err.unwrap_or_else(|| AeroSyncError::Network(
+            format!("Chunk {} failed after all retries", chunk_index)
+        )))
+    }
+
+    /// 发送 /upload/complete 合并请求（串行/并发共用）。
+    async fn send_complete_request(
+        &self,
+        base_url: &str,
+        state: &ResumeState,
+        file_name: &str,
+    ) -> Result<()> {
         let mut complete_url = format!(
-            "{}/upload/complete?task_id={}&filename={}&total_chunks={}",
-            base_url,
-            state.task_id,
-            urlencoding::encode(&file_name),
-            state.total_chunks,
+            "{}/upload/complete?task_id={}&filename={}&total_chunks={}&total_size={}",
+            base_url, state.task_id,
+            urlencoding::encode(file_name),
+            state.total_chunks, state.total_size,
         );
         if let Some(ref sha) = state.sha256 {
             complete_url.push_str(&format!("&sha256={}", sha));
         }
-
         let mut req = self.client.post(&complete_url);
         if let Some(token) = &self.config.auth_token {
             req = req.header("Authorization", format!("Bearer {}", token.as_str()));
         }
-        let resp = req
-            .send()
-            .await
+        let resp = req.send().await
             .map_err(|e| AeroSyncError::Network(format!("Complete request failed: {}", e)))?;
-
         if resp.status().is_success() {
             tracing::info!("Chunked upload complete: {} ({} bytes)", file_name, state.total_size);
             Ok(())
         } else {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            Err(AeroSyncError::Network(format!(
-                "Complete failed: {} - {}",
-                status, body
-            )))
+            Err(AeroSyncError::Network(format!("Complete failed: {} - {}", status, body)))
         }
     }
 
@@ -872,5 +992,165 @@ mod tests {
             Err(e) => panic!("Wrong error type: {:?}", e),
             Ok(_) => panic!("Should have failed"),
         }
+    }
+
+    // Helper: build a mock upload server that counts chunk POSTs
+    fn make_counting_server(
+        chunk_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    ) -> impl warp::Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        use std::sync::atomic::Ordering;
+        let chunk_route = warp::post()
+            .and(warp::path!("upload" / "chunk"))
+            .and(warp::body::bytes())
+            .map(move |_b: bytes::Bytes| {
+                chunk_count.fetch_add(1, Ordering::Relaxed);
+                warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({"ok": true})),
+                    warp::http::StatusCode::OK,
+                )
+            });
+        let complete_route = warp::post()
+            .and(warp::path!("upload" / "complete"))
+            .map(|| warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({"status": "complete"})),
+                warp::http::StatusCode::OK,
+            ));
+        chunk_route.or(complete_route)
+    }
+
+    // ── 13. concurrent_chunks field default ─────────────────────────────────
+    #[test]
+    fn test_http_config_concurrent_chunks_default() {
+        let cfg = HttpConfig::default();
+        assert_eq!(cfg.concurrent_chunks, 4);
+    }
+
+    // ── 14. Small file (<= 5MB) routes to serial upload ──────────────────────
+    #[tokio::test]
+    async fn test_upload_small_file_uses_serial_path() {
+        use std::sync::atomic::AtomicU32;
+        use std::sync::Arc as StdArc;
+
+        let chunk_count = StdArc::new(AtomicU32::new(0));
+        let route = make_counting_server(StdArc::clone(&chunk_count));
+
+        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
+            ([127, 0, 0, 1], 0),
+            async { tokio::time::sleep(std::time::Duration::from_secs(5)).await },
+        );
+        tokio::spawn(server);
+
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("small.bin");
+        // 1 MB — below 5 MB threshold → serial, chunk_size=256KB → 4 chunks
+        let data = vec![0xABu8; 1024 * 1024];
+        tokio::fs::write(&file_path, &data).await.unwrap();
+
+        let cfg = HttpConfig {
+            chunk_size: 256 * 1024,
+            concurrent_chunks: 4,
+            ..HttpConfig::default()
+        };
+        let ht = HttpTransfer::new(cfg).unwrap();
+        let mut state = aerosync_core::resume::ResumeState::new(
+            uuid::Uuid::new_v4(),
+            file_path.clone(),
+            format!("http://{}", addr),
+            data.len() as u64,
+            256 * 1024,
+            None,
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let base = format!("http://{}", addr);
+        let result = ht.upload_chunked(&file_path, &base, &mut state, tx).await;
+        assert!(result.is_ok(), "serial upload should succeed: {:?}", result);
+        assert_eq!(chunk_count.load(std::sync::atomic::Ordering::Relaxed), 4);
+    }
+
+    // ── 15. Large file (> 5MB) routes to concurrent upload ───────────────────
+    #[tokio::test]
+    async fn test_upload_large_file_uses_concurrent_path() {
+        use std::sync::atomic::AtomicU32;
+        use std::sync::Arc as StdArc;
+
+        let chunk_count = StdArc::new(AtomicU32::new(0));
+        let route = make_counting_server(StdArc::clone(&chunk_count));
+
+        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
+            ([127, 0, 0, 1], 0),
+            async { tokio::time::sleep(std::time::Duration::from_secs(10)).await },
+        );
+        tokio::spawn(server);
+
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("large.bin");
+        // 6 MB — above 5 MB threshold → concurrent, chunk_size=1MB → 6 chunks
+        let data = vec![0xCDu8; 6 * 1024 * 1024];
+        tokio::fs::write(&file_path, &data).await.unwrap();
+
+        let cfg = HttpConfig {
+            chunk_size: 1024 * 1024,
+            concurrent_chunks: 3,
+            ..HttpConfig::default()
+        };
+        let ht = HttpTransfer::new(cfg).unwrap();
+        let mut state = aerosync_core::resume::ResumeState::new(
+            uuid::Uuid::new_v4(),
+            file_path.clone(),
+            format!("http://{}", addr),
+            data.len() as u64,
+            1024 * 1024,
+            None,
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let base = format!("http://{}", addr);
+        let result = ht.upload_chunked(&file_path, &base, &mut state, tx).await;
+        assert!(result.is_ok(), "concurrent upload should succeed: {:?}", result);
+        assert_eq!(chunk_count.load(std::sync::atomic::Ordering::Relaxed), 6);
+    }
+
+    // ── 16. Concurrent upload resumes from partial state ─────────────────────
+    #[tokio::test]
+    async fn test_concurrent_upload_resumes_partial() {
+        use std::sync::atomic::AtomicU32;
+        use std::sync::Arc as StdArc;
+
+        let chunk_count = StdArc::new(AtomicU32::new(0));
+        let route = make_counting_server(StdArc::clone(&chunk_count));
+
+        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
+            ([127, 0, 0, 1], 0),
+            async { tokio::time::sleep(std::time::Duration::from_secs(10)).await },
+        );
+        tokio::spawn(server);
+
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("resume.bin");
+        // 8 chunks of 1 MB, first 4 already done → only 4 uploaded
+        let data = vec![0xEFu8; 8 * 1024 * 1024];
+        tokio::fs::write(&file_path, &data).await.unwrap();
+
+        let cfg = HttpConfig {
+            chunk_size: 1024 * 1024,
+            concurrent_chunks: 4,
+            ..HttpConfig::default()
+        };
+        let ht = HttpTransfer::new(cfg).unwrap();
+        let mut state = aerosync_core::resume::ResumeState::new(
+            uuid::Uuid::new_v4(),
+            file_path.clone(),
+            format!("http://{}", addr),
+            data.len() as u64,
+            1024 * 1024,
+            None,
+        );
+        for i in 0u32..4 {
+            state.mark_chunk_done(i);
+        }
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let base = format!("http://{}", addr);
+        let result = ht.upload_chunked(&file_path, &base, &mut state, tx).await;
+        assert!(result.is_ok(), "resumed upload should succeed: {:?}", result);
+        assert_eq!(chunk_count.load(std::sync::atomic::Ordering::Relaxed), 4);
     }
 }

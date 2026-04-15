@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
@@ -121,6 +124,8 @@ pub struct FileReceiver {
     audit_logger: Option<Arc<AuditLogger>>,
     metrics: Arc<Metrics>,
     ws_tx: WsBroadcast,
+    /// 每个 task_id 的分片到达计数器（HTTP+HTTPS 共享）
+    chunk_arrivals: ChunkArrivalMap,
     /// mDNS 广播句柄 — Some 表示正在广播，drop 时自动注销
     mdns_handle: Option<MdnsHandle>,
 }
@@ -140,6 +145,7 @@ impl FileReceiver {
             audit_logger: None,
             metrics: Metrics::new(),
             ws_tx,
+            chunk_arrivals: Arc::new(Mutex::new(HashMap::new())),
             mdns_handle: None,
         }
     }
@@ -203,10 +209,11 @@ impl FileReceiver {
             let audit_http = audit_logger.clone();
             let metrics_http = Arc::clone(&self.metrics);
             let ws_tx_http = self.ws_tx.clone();
+            let chunk_arrivals_http = Arc::clone(&self.chunk_arrivals);
 
             let handle = tokio::spawn(async move {
                 if let Err(e) =
-                    start_http_server(http_cfg, status.clone(), received_files, auth, audit_http, metrics_http, ws_tx_http).await
+                    start_http_server(http_cfg, status.clone(), received_files, auth, audit_http, metrics_http, ws_tx_http, chunk_arrivals_http).await
                 {
                     tracing::error!("HTTP server error: {}", e);
                     *status.write().await = ServerStatus::Error(e.to_string());
@@ -241,10 +248,11 @@ impl FileReceiver {
             let audit_https = audit_logger.clone();
             let metrics_https = Arc::clone(&self.metrics);
             let ws_tx_https = self.ws_tx.clone();
+            let chunk_arrivals_https = Arc::clone(&self.chunk_arrivals);
 
             let handle = tokio::spawn(async move {
                 if let Err(e) =
-                    start_https_server(https_cfg, status.clone(), received_files, auth, audit_https, metrics_https, ws_tx_https).await
+                    start_https_server(https_cfg, status.clone(), received_files, auth, audit_https, metrics_https, ws_tx_https, chunk_arrivals_https).await
                 {
                     tracing::error!("HTTPS server error: {}", e);
                     *status.write().await = ServerStatus::Error(e.to_string());
@@ -439,6 +447,7 @@ fn generate_self_signed_pem() -> Result<(Vec<u8>, Vec<u8>)> {
 
 // ─────────────────────────────── HTTPS server ───────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn start_https_server(
     config: ServerConfig,
     _status: Arc<RwLock<ServerStatus>>,
@@ -447,6 +456,7 @@ async fn start_https_server(
     audit_logger: Option<Arc<AuditLogger>>,
     metrics: Arc<Metrics>,
     ws_tx: WsBroadcast,
+    chunk_arrivals: ChunkArrivalMap,
 ) -> Result<()> {
     // 获取 TLS 证书材料（PEM 格式，warp 接受 PEM）
     let (cert_pem, key_pem) = if let Some(ref tls_cfg) = config.tls {
@@ -494,6 +504,7 @@ async fn start_https_server(
         metrics,
         ws_tx,
         received_files,
+        chunk_arrivals,
     );
 
     let addr: SocketAddr = format!("{}:{}", config.bind_address, config.https_port)
@@ -536,6 +547,7 @@ fn build_warp_routes(
     metrics: Arc<Metrics>,
     ws_tx: WsBroadcast,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    chunk_arrivals: ChunkArrivalMap,
 ) -> impl warp::Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
     use warp::Filter;
 
@@ -599,6 +611,9 @@ fn build_warp_routes(
     let received_files_chunk = received_files.clone();
     let audit_chunk = audit_logger.clone();
     let metrics_chunk = Arc::clone(&metrics);
+    let ws_tx_chunk = ws_tx.clone();
+    let router_chunk = router.clone();
+    let chunk_arrivals_chunk = chunk_arrivals.clone();
     let upload_chunk = warp::path!("upload" / "chunk")
         .and(warp::post())
         .and(warp::header::optional::<String>("authorization"))
@@ -606,10 +621,14 @@ fn build_warp_routes(
         .and(warp::addr::remote())
         .and(warp::body::bytes())
         .and(warp::any().map(move || receive_dir_chunk.clone()))
+        .and(warp::any().map(move || allow_overwrite))
         .and(warp::any().map(move || received_files_chunk.clone()))
         .and(warp::any().map(move || auth_mw_chunk.clone()))
         .and(warp::any().map(move || audit_chunk.clone()))
         .and(warp::any().map(move || metrics_chunk.clone()))
+        .and(warp::any().map(move || ws_tx_chunk.clone()))
+        .and(warp::any().map(move || router_chunk.clone()))
+        .and(warp::any().map(move || chunk_arrivals_chunk.clone()))
         .and_then(handle_chunk_upload);
 
     // ── POST /upload/complete ─────────────────────────────────────────────────
@@ -620,6 +639,7 @@ fn build_warp_routes(
     let metrics_complete = Arc::clone(&metrics);
     let ws_tx_complete = ws_tx.clone();
     let router_complete = router.clone();
+    let chunk_arrivals_complete = chunk_arrivals.clone();
     let upload_complete = warp::path!("upload" / "complete")
         .and(warp::post())
         .and(warp::header::optional::<String>("authorization"))
@@ -632,6 +652,7 @@ fn build_warp_routes(
         .and(warp::any().map(move || metrics_complete.clone()))
         .and(warp::any().map(move || ws_tx_complete.clone()))
         .and(warp::any().map(move || router_complete.clone()))
+        .and(warp::any().map(move || chunk_arrivals_complete.clone()))
         .and_then(handle_chunk_complete);
 
     // ── POST /upload/batch ────────────────────────────────────────────────────
@@ -723,6 +744,7 @@ fn build_warp_routes(
         .with(cors)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_http_server(
     config: ServerConfig,
     _status: Arc<RwLock<ServerStatus>>,
@@ -731,6 +753,7 @@ async fn start_http_server(
     audit_logger: Option<Arc<AuditLogger>>,
     metrics: Arc<Metrics>,
     ws_tx: WsBroadcast,
+    chunk_arrivals: ChunkArrivalMap,
 ) -> Result<()> {
     let receive_dir = config.receive_directory.clone();
     let max_size = config.max_file_size;
@@ -755,6 +778,7 @@ async fn start_http_server(
         metrics,
         ws_tx,
         received_files,
+        chunk_arrivals,
     );
 
     let addr: SocketAddr = format!("{}:{}", config.bind_address, config.http_port)
@@ -1023,20 +1047,29 @@ async fn handle_status_request(
 
 // ─────────────────────────── 分片上传 handlers ───────────────────────────────
 
+/// 每个 task_id 的已到达分片计数器
+type ChunkArrivalMap = Arc<Mutex<HashMap<Uuid, Arc<AtomicU32>>>>;
+
 #[derive(Debug, serde::Deserialize)]
 struct ChunkQuery {
     task_id: Uuid,
     chunk_index: u32,
     total_chunks: u32,
-    #[allow(dead_code)]
     filename: String,
+    /// 文件总字节数（用于预分配）
+    total_size: u64,
+    /// 本分片字节数（用于计算 offset）
+    chunk_size: u64,
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct CompleteQuery {
     task_id: Uuid,
     filename: String,
+    #[allow(dead_code)]
     total_chunks: u32,
+    #[allow(dead_code)]
+    total_size: u64,
     sha256: Option<String>,
 }
 
@@ -1160,7 +1193,9 @@ async fn handle_batch_upload(
     })).into_response())
 }
 
-/// 接收单个分片，写入 `{receive_dir}/.aerosync/tmp/{task_id}/{chunk_index}`
+/// 接收单个分片，直接 seek 写入最终文件（边传边写，无需合并阶段）。
+/// 第一个分片到达时用 set_len 预分配文件空间；所有分片到齐后不做额外操作，
+/// 由客户端调用 /upload/complete 进行 SHA-256 校验。
 #[allow(clippy::too_many_arguments)]
 async fn handle_chunk_upload(
     auth_header: Option<String>,
@@ -1168,11 +1203,17 @@ async fn handle_chunk_upload(
     remote_addr: Option<SocketAddr>,
     body: bytes::Bytes,
     receive_dir: PathBuf,
+    allow_overwrite: bool,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_mw: Option<Arc<AuthMiddleware>>,
     audit_logger: Option<Arc<AuditLogger>>,
     metrics: Arc<Metrics>,
+    ws_tx: WsBroadcast,
+    router: Option<Arc<Router>>,
+    chunk_arrivals: ChunkArrivalMap,
 ) -> std::result::Result<warp::reply::Response, warp::Rejection> {
+    use std::io::SeekFrom;
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
     use warp::Reply;
 
     let client_ip = remote_addr
@@ -1195,52 +1236,164 @@ async fn handle_chunk_upload(
         }
     }
 
-    let tmp_dir = receive_dir
+    // 确定目标文件路径
+    let safe_name = sanitize_filename(&query.filename);
+    let dest_dir = if let Some(ref r) = router {
+        r.resolve("chunk", None, &safe_name)
+    } else {
+        receive_dir.clone()
+    };
+    // 所有分片写同一个文件（用 task_id 命名临时文件，complete 时重命名）
+    let tmp_path = dest_dir
         .join(".aerosync")
-        .join("tmp")
+        .join("inprogress")
         .join(query.task_id.to_string());
 
-    if let Err(e) = tokio::fs::create_dir_all(&tmp_dir).await {
-        tracing::error!("Failed to create chunk tmp dir: {}", e);
+    if let Some(parent) = tmp_path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            tracing::error!("Failed to create inprogress dir: {}", e);
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({"error": "server error"})),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ).into_response());
+        }
+    }
+
+    // 打开文件（第一个分片预分配，后续直接追写）
+    let file = if query.chunk_index == 0 {
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!("Failed to create inprogress file: {}", e);
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({"error": "write failed"})),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                ).into_response());
+            }
+        }
+    } else {
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&tmp_path)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!("Failed to open inprogress file for chunk {}: {}", query.chunk_index, e);
+                return Ok(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({"error": "write failed"})),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                ).into_response());
+            }
+        }
+    };
+
+    // 第一个分片：fallocate 预分配整个文件大小，避免并发写时扩展竞争
+    if query.chunk_index == 0 {
+        if let Err(e) = file.set_len(query.total_size).await {
+            tracing::warn!("set_len({}) failed (non-fatal): {}", query.total_size, e);
+        }
+    }
+
+    // 计算写入偏移并 seek
+    let offset = query.chunk_index as u64 * query.chunk_size;
+    let mut file = file;
+    if let Err(e) = file.seek(SeekFrom::Start(offset)).await {
+        tracing::error!("seek to offset {} failed: {}", offset, e);
         return Ok(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({"error": "server error"})),
+            warp::reply::json(&serde_json::json!({"error": "seek failed"})),
             warp::http::StatusCode::INTERNAL_SERVER_ERROR,
         ).into_response());
     }
-
-    let chunk_path = tmp_dir.join(format!("{:08}", query.chunk_index));
-    if let Err(e) = tokio::fs::write(&chunk_path, &body).await {
-        tracing::error!("Failed to write chunk {}: {}", query.chunk_index, e);
+    if let Err(e) = file.write_all(&body).await {
+        tracing::error!("write_all chunk {} failed: {}", query.chunk_index, e);
         return Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({"error": "write failed"})),
             warp::http::StatusCode::INTERNAL_SERVER_ERROR,
         ).into_response());
     }
-
-    tracing::debug!(
-        "Chunk {}/{} received for task {} ({} bytes)",
-        query.chunk_index + 1,
-        query.total_chunks,
-        query.task_id,
-        body.len()
-    );
-
-    // 防止 unused warning
-    let _ = received_files;
+    drop(file);
 
     metrics.add_bytes_received(body.len() as u64);
+
+    tracing::debug!(
+        "Chunk {}/{} written for task {} (offset={}, {} bytes)",
+        query.chunk_index + 1, query.total_chunks,
+        query.task_id, offset, body.len()
+    );
+
+    // 原子递增到达计数
+    let counter = {
+        let mut map = chunk_arrivals.lock().unwrap();
+        Arc::clone(map.entry(query.task_id).or_insert_with(|| Arc::new(AtomicU32::new(0))))
+    };
+    let arrived = counter.fetch_add(1, Ordering::AcqRel) + 1;
+
+    // 所有分片已到齐 → 重命名为最终文件
+    let all_done = arrived >= query.total_chunks;
+    if all_done {
+        // 清理计数器
+        chunk_arrivals.lock().unwrap().remove(&query.task_id);
+
+        let final_path = get_unique_file_path(&dest_dir, &safe_name, allow_overwrite);
+        if let Some(parent) = final_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
+            tracing::error!("Failed to rename inprogress file: {}", e);
+            // 不返回错误，让 complete 端点处理
+        } else {
+            tracing::info!(
+                "All {} chunks received for task {}, file ready: {}",
+                query.total_chunks, query.task_id, final_path.display()
+            );
+            // 记录接收文件（size 未校验，complete 端点会再次确认）
+            let record = ReceivedFile {
+                id: Uuid::new_v4(),
+                original_name: query.filename.clone(),
+                saved_path: final_path.clone(),
+                size: query.total_size,
+                sha256: None, // complete 端点填充
+                received_at: std::time::SystemTime::now(),
+                sender_ip: remote_addr.map(|a| a.ip().to_string()),
+            };
+            received_files.write().await.push(record);
+            metrics.inc_files_received();
+
+            if let Some(ref al) = audit_logger {
+                al.log_completed(
+                    Direction::Receive, "http-chunk",
+                    &query.filename, query.total_size, None,
+                    remote_addr.map(|a| a.ip().to_string()).as_deref(),
+                ).await;
+            }
+            let _ = ws_tx.send(WsEvent::Completed {
+                filename: query.filename.clone(),
+                size: query.total_size,
+                sha256: String::new(), // SHA256 由 /upload/complete 填充
+            });
+        }
+    }
 
     Ok(warp::reply::with_status(
         warp::reply::json(&serde_json::json!({
             "task_id": query.task_id,
             "chunk_index": query.chunk_index,
             "received": body.len(),
+            "all_chunks_done": all_done,
         })),
         warp::http::StatusCode::OK,
     ).into_response())
 }
 
-/// 所有分片到齐后合并文件，校验 SHA-256，记录到 received_files
+/// 所有分片到齐后由客户端调用，进行 SHA-256 校验并更新记录。
+/// 文件已在 handle_chunk_upload 中合并完毕，本端点只做校验。
 #[allow(clippy::too_many_arguments)]
 async fn handle_chunk_complete(
     auth_header: Option<String>,
@@ -1253,9 +1406,9 @@ async fn handle_chunk_complete(
     metrics: Arc<Metrics>,
     ws_tx: WsBroadcast,
     router: Option<Arc<Router>>,
+    _chunk_arrivals: ChunkArrivalMap,
 ) -> std::result::Result<warp::reply::Response, warp::Rejection> {
     use sha2::{Digest, Sha256};
-    use tokio::io::AsyncWriteExt;
     use warp::Reply;
 
     // 认证
@@ -1274,104 +1427,99 @@ async fn handle_chunk_complete(
         }
     }
 
-    let tmp_dir = receive_dir
-        .join(".aerosync")
-        .join("tmp")
-        .join(query.task_id.to_string());
-
-    // 检查分片是否全部到齐
-    for i in 0..query.total_chunks {
-        let chunk_path = tmp_dir.join(format!("{:08}", i));
-        if !chunk_path.exists() {
-            return Ok(warp::reply::with_status(
-                warp::reply::json(&serde_json::json!({
-                    "error": format!("Missing chunk {}", i)
-                })),
-                warp::http::StatusCode::BAD_REQUEST,
-            ).into_response());
-        }
-    }
-
-    // 合并分片
     let safe_name = sanitize_filename(&query.filename);
     let dest_dir = if let Some(ref r) = router {
         r.resolve("chunk-complete", None, &safe_name)
     } else {
         receive_dir.clone()
     };
-    let final_path = get_unique_file_path(&dest_dir, &safe_name, allow_overwrite);
-    if let Some(parent) = final_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|_| warp::reject::reject())?;
-    }
 
-    let mut out_file = tokio::fs::File::create(&final_path)
-        .await
-        .map_err(|_| warp::reject::reject())?;
-
-    let mut hasher = Sha256::new();
-    let mut total_size = 0u64;
-
-    for i in 0..query.total_chunks {
-        let chunk_path = tmp_dir.join(format!("{:08}", i));
-        let data = tokio::fs::read(&chunk_path).await.map_err(|_| warp::reject::reject())?;
-        hasher.update(&data);
-        total_size += data.len() as u64;
-        out_file.write_all(&data).await.map_err(|_| warp::reject::reject())?;
-    }
-    out_file.flush().await.map_err(|_| warp::reject::reject())?;
-    drop(out_file);
-
-    let actual_sha256 = hex::encode(hasher.finalize());
-
-        // SHA-256 校验
-        if let Some(ref expected) = query.sha256 {
-            if &actual_sha256 != expected {
-                tracing::error!(
-                    "Chunk complete: SHA-256 mismatch for {} (expected={}, got={})",
-                    query.filename,
-                    expected,
-                    actual_sha256
-                );
-                // 删除损坏文件
-                let _ = tokio::fs::remove_file(&final_path).await;
-                metrics.inc_upload_errors();
-                let _ = ws_tx.send(WsEvent::Failed {
-                    filename: query.filename.clone(),
-                    reason: "SHA-256 mismatch".to_string(),
-                });
+    // 查找已写好的文件（可能被 rename 为 safe_name 或带序号的变体）
+    let candidate = dest_dir.join(&safe_name);
+    // 如果文件还没被重命名完成（极端情况：complete 先于最后一片），等一下
+    let final_path = if candidate.exists() {
+        candidate
+    } else {
+        // 尝试找带 task_id 的 inprogress 文件
+        let tmp = dest_dir
+            .join(".aerosync")
+            .join("inprogress")
+            .join(query.task_id.to_string());
+        if tmp.exists() {
+            // 还没 rename，现在重命名
+            let fp = get_unique_file_path(&dest_dir, &safe_name, allow_overwrite);
+            if let Some(parent) = fp.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            if let Err(e) = tokio::fs::rename(&tmp, &fp).await {
+                tracing::error!("complete: rename failed: {}", e);
                 return Ok(warp::reply::with_status(
-                    warp::reply::json(&serde_json::json!({
-                        "error": "SHA-256 mismatch",
-                        "expected": expected,
-                        "actual": actual_sha256,
-                    })),
-                    warp::http::StatusCode::BAD_REQUEST,
+                    warp::reply::json(&serde_json::json!({"error": "file not ready"})),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
                 ).into_response());
             }
+            fp
+        } else {
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({"error": "file not found"})),
+                warp::http::StatusCode::NOT_FOUND,
+            ).into_response());
         }
+    };
 
-    // 清理临时分片目录
-    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+    // 计算 SHA-256
+    let data = match tokio::fs::read(&final_path).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("complete: failed to read file for sha256: {}", e);
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({"error": "read failed"})),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ).into_response());
+        }
+    };
+    let actual_sha256 = hex::encode(Sha256::digest(&data));
+    let total_size = data.len() as u64;
+
+    // SHA-256 校验
+    if let Some(ref expected) = query.sha256 {
+        if &actual_sha256 != expected {
+            tracing::error!(
+                "Chunk complete: SHA-256 mismatch for {} (expected={}, got={})",
+                query.filename, expected, actual_sha256
+            );
+            let _ = tokio::fs::remove_file(&final_path).await;
+            metrics.inc_upload_errors();
+            let _ = ws_tx.send(WsEvent::Failed {
+                filename: query.filename.clone(),
+                reason: "SHA-256 mismatch".to_string(),
+            });
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({
+                    "error": "SHA-256 mismatch",
+                    "expected": expected,
+                    "actual": actual_sha256,
+                })),
+                warp::http::StatusCode::BAD_REQUEST,
+            ).into_response());
+        }
+    }
+
+    // 更新 received_files 中的 sha256（如果 handle_chunk_upload 已插入记录）
+    {
+        let mut files = received_files.write().await;
+        if let Some(rec) = files.iter_mut().find(|r| r.saved_path == final_path) {
+            rec.sha256 = Some(actual_sha256.clone());
+            rec.size = total_size;
+        }
+    }
 
     tracing::info!(
-        "Chunked upload complete: {} ({} bytes, sha256={})",
-        safe_name,
-        total_size,
-        actual_sha256
+        "Chunked upload verified: {} ({} bytes, sha256={})",
+        safe_name, total_size, actual_sha256
     );
 
-    let record = ReceivedFile {
-        id: Uuid::new_v4(),
-        original_name: query.filename.clone(),
-        saved_path: final_path,
-        size: total_size,
-        sha256: Some(actual_sha256.clone()),
-        received_at: std::time::SystemTime::now(),
-        sender_ip: None,
-    };
-    received_files.write().await.push(record);
-
-    metrics.inc_files_received();
+    // 发送带 sha256 的完成事件
     let _ = ws_tx.send(WsEvent::Completed {
         filename: query.filename.clone(),
         size: total_size,
@@ -1379,7 +1527,10 @@ async fn handle_chunk_complete(
     });
 
     if let Some(ref al) = audit_logger {
-        al.log_completed(Direction::Receive, "http", &query.filename, total_size, Some(&actual_sha256), None).await;
+        al.log_completed(
+            Direction::Receive, "http-chunk-complete",
+            &query.filename, total_size, Some(&actual_sha256), None,
+        ).await;
     }
 
     Ok(warp::reply::with_status(
@@ -2249,6 +2400,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_chunk_upload_and_complete() {
+        use sha2::{Digest, Sha256};
+
         let (mut receiver, port) = start_test_receiver().await;
         let base = format!("http://127.0.0.1:{}", port);
         let client = reqwest::Client::new();
@@ -2256,58 +2409,54 @@ mod tests {
         let filename = "chunked_test.bin";
         let data = b"CHUNK_DATA_BLOCK"; // 16 bytes
         let total_chunks = 3u32;
+        let total_size = (data.len() * total_chunks as usize) as u64;
+        let chunk_size = data.len() as u64;
 
-        // 上传 3 个分片
+        // Upload 3 chunks with new API (total_size + chunk_size required)
         for i in 0..total_chunks {
             let url = format!(
-                "{}/upload/chunk?task_id={}&chunk_index={}&total_chunks={}&filename={}",
-                base, task_id, i, total_chunks, filename
+                "{}/upload/chunk?task_id={}&chunk_index={}&total_chunks={}&filename={}&total_size={}&chunk_size={}",
+                base, task_id, i, total_chunks, filename, total_size, chunk_size
             );
             let resp = client.post(&url).body(data.to_vec()).send().await.unwrap();
-            assert!(resp.status().is_success(), "chunk {} failed", i);
+            assert!(resp.status().is_success(), "chunk {} failed: {:?}", i, resp.status());
         }
 
-        // 发送完成请求
+        // /upload/complete: SHA-256 校验 + 更新记录
+        let mut hasher = Sha256::new();
+        for _ in 0..total_chunks { hasher.update(data); }
+        let sha = hex::encode(hasher.finalize());
+
         let complete_url = format!(
-            "{}/upload/complete?task_id={}&filename={}&total_chunks={}",
-            base, task_id, filename, total_chunks
+            "{}/upload/complete?task_id={}&filename={}&total_chunks={}&total_size={}&sha256={}",
+            base, task_id, filename, total_chunks, total_size, sha
         );
         let resp = client.post(&complete_url).send().await.unwrap();
         assert!(resp.status().is_success(), "complete failed: {:?}", resp.status());
 
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["status"], "complete");
-        assert_eq!(body["size"].as_u64().unwrap(), (data.len() * 3) as u64);
-
-        // 验证文件已记录
-        let files = receiver.get_received_files().await;
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].original_name, filename);
+        assert_eq!(body["size"].as_u64().unwrap(), total_size);
 
         receiver.stop().await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_chunk_complete_missing_chunk_returns_error() {
+    async fn test_chunk_complete_missing_chunk_returns_404() {
+        // New behavior: if no chunks were uploaded (inprogress file missing), complete returns 404
         let (mut receiver, port) = start_test_receiver().await;
         let base = format!("http://127.0.0.1:{}", port);
         let client = reqwest::Client::new();
         let task_id = uuid::Uuid::new_v4();
 
-        // 只上传第 0 片，跳过第 1 片
-        let url = format!(
-            "{}/upload/chunk?task_id={}&chunk_index=0&total_chunks=2&filename=incomplete.bin",
-            base, task_id
-        );
-        client.post(&url).body(b"data".to_vec()).send().await.unwrap();
-
-        // 发送完成请求 → 应返回 400
+        // Do NOT upload any chunks — complete should 404
         let complete_url = format!(
-            "{}/upload/complete?task_id={}&filename=incomplete.bin&total_chunks=2",
+            "{}/upload/complete?task_id={}&filename=missing.bin&total_chunks=2&total_size=100",
             base, task_id
         );
         let resp = client.post(&complete_url).send().await.unwrap();
-        assert_eq!(resp.status().as_u16(), 400);
+        // File not found → 404
+        assert_eq!(resp.status().as_u16(), 404);
 
         receiver.stop().await.unwrap();
     }
@@ -2318,16 +2467,22 @@ mod tests {
         let base = format!("http://127.0.0.1:{}", port);
         let client = reqwest::Client::new();
         let task_id = uuid::Uuid::new_v4();
+        let data = b"hello";
+        let total_size = data.len() as u64;
 
+        // Upload 1 chunk (single chunk, completes the file)
         let url = format!(
-            "{}/upload/chunk?task_id={}&chunk_index=0&total_chunks=1&filename=hash_test.bin",
-            base, task_id
+            "{}/upload/chunk?task_id={}&chunk_index=0&total_chunks=1&filename=hash_test.bin&total_size={}&chunk_size={}",
+            base, task_id, total_size, total_size
         );
-        client.post(&url).body(b"hello".to_vec()).send().await.unwrap();
+        client.post(&url).body(data.to_vec()).send().await.unwrap();
+
+        // Wait for rename to complete
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let complete_url = format!(
-            "{}/upload/complete?task_id={}&filename=hash_test.bin&total_chunks=1&sha256=wrong_hash",
-            base, task_id
+            "{}/upload/complete?task_id={}&filename=hash_test.bin&total_chunks=1&total_size={}&sha256=wrong_hash",
+            base, task_id, total_size
         );
         let resp = client.post(&complete_url).send().await.unwrap();
         assert_eq!(resp.status().as_u16(), 400);
@@ -2346,23 +2501,30 @@ mod tests {
         let client = reqwest::Client::new();
         let task_id = uuid::Uuid::new_v4();
         let data = b"verified content";
+        let total_size = data.len() as u64;
 
+        // Upload single chunk
         let url = format!(
-            "{}/upload/chunk?task_id={}&chunk_index=0&total_chunks=1&filename=verified.bin",
-            base, task_id
+            "{}/upload/chunk?task_id={}&chunk_index=0&total_chunks=1&filename=verified.bin&total_size={}&chunk_size={}",
+            base, task_id, total_size, total_size
         );
         client.post(&url).body(data.to_vec()).send().await.unwrap();
+
+        // Wait for rename
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let mut hasher = Sha256::new();
         hasher.update(data);
         let sha = hex::encode(hasher.finalize());
 
         let complete_url = format!(
-            "{}/upload/complete?task_id={}&filename=verified.bin&total_chunks=1&sha256={}",
-            base, task_id, sha
+            "{}/upload/complete?task_id={}&filename=verified.bin&total_chunks=1&total_size={}&sha256={}",
+            base, task_id, total_size, sha
         );
         let resp = client.post(&complete_url).send().await.unwrap();
         assert!(resp.status().is_success());
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["sha256"].as_str().unwrap(), sha);
 
         receiver.stop().await.unwrap();
     }

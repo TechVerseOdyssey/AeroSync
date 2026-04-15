@@ -470,6 +470,7 @@ async fn cmd_send(
         upload_limit_bps,
         accept_invalid_certs: false,
         pinned_server_certs: pin_cert.clone(),
+        concurrent_chunks: 4,
     };
     let quic_config = QuicConfig {
         auth_token: eff_token.clone().map(Zeroizing::new),
