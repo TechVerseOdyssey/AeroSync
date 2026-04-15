@@ -3,6 +3,10 @@ name = "aerosync-mcp"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "aerosync_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "aerosync-mcp"
 path = "src/main.rs"
@@ -25,3 +29,4 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
+rusqlite = { version = "0.31", features = ["bundled"] }

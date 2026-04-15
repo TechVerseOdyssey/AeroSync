@@ -1,9 +1,6 @@
-mod server;
-mod task_store;
-
+use aerosync_mcp::{server, task_store::TaskStore};
 use rmcp::{ServiceExt, transport::stdio};
 use std::sync::Arc;
-use task_store::TaskStore;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

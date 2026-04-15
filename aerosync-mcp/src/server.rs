@@ -197,6 +197,11 @@ impl AeroSyncMcpServer {
         }
     }
 
+    /// Returns the shared task registry — used by integration tests to inspect state.
+    pub fn tasks_registry(&self) -> &TaskRegistry {
+        &self.tasks
+    }
+
     /// 发送单个文件到指定地址（自动协商 QUIC/HTTP 协议）
     #[tool(description = "Send a single file to a remote address. Automatically negotiates QUIC or HTTP protocol. Returns immediately with a task_id; use get_transfer_status to poll progress.")]
     async fn send_file(
