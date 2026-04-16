@@ -96,6 +96,11 @@ enum Commands {
         /// 示例: --pin-cert server.der --pin-cert ca.der
         #[arg(long, value_name = "CERT_DER")]
         pin_cert: Vec<PathBuf>,
+
+        /// 接受自签名 / 无效 TLS 证书（用于连接 --https 自签名接收端）
+        /// [警告] 仅限内网测试环境，生产环境请用 --pin-cert 进行证书钉扎
+        #[arg(long)]
+        accept_invalid_certs: bool,
     },
 
     /// 启动接收端，监听文件传输
@@ -151,6 +156,10 @@ enum Commands {
         /// HTTPS 监听端口（默认 7790）
         #[arg(long, default_value = "7790")]
         https_port: u16,
+
+        /// 禁用 HTTP 明文服务（配合 --https 实现 HTTPS-only 模式）
+        #[arg(long)]
+        no_http: bool,
     },
 
     /// Token 管理
@@ -329,8 +338,9 @@ async fn main() -> anyhow::Result<()> {
             no_preflight,
             limit,
             pin_cert,
+            accept_invalid_certs,
         } => {
-            cmd_send(source, destination, recursive, protocol, token, parallel, no_verify, dry_run, no_resume, no_preflight, limit, pin_cert, &app_config).await?;
+            cmd_send(source, destination, recursive, protocol, token, parallel, no_verify, dry_run, no_resume, no_preflight, limit, pin_cert, accept_invalid_certs, &app_config).await?;
         }
 
         Commands::Receive {
@@ -347,8 +357,9 @@ async fn main() -> anyhow::Result<()> {
             tls_key,
             https,
             https_port,
+            no_http,
         } => {
-            cmd_receive(port, quic_port, save_to, bind, auth_token, one_shot, overwrite, max_size, http_only, tls_cert, tls_key, https, https_port, &app_config, cli.config.clone()).await?;
+            cmd_receive(port, quic_port, save_to, bind, auth_token, one_shot, overwrite, max_size, http_only, no_http, tls_cert, tls_key, https, https_port, &app_config, cli.config.clone()).await?;
         }
 
         Commands::Token { action } => {
@@ -395,6 +406,7 @@ async fn cmd_send(
     no_preflight: bool,
     limit: Option<String>,
     pin_cert: Vec<PathBuf>,
+    accept_invalid_certs: bool,
     app_config: &AeroSyncConfig,
 ) -> anyhow::Result<()> {
     // 收集要发送的文件列表
@@ -468,7 +480,7 @@ async fn cmd_send(
         chunk_size: (app_config.transfer.chunk_size_mb * 1024 * 1024) as usize,
         auth_token: eff_token.clone().map(Zeroizing::new),
         upload_limit_bps,
-        accept_invalid_certs: false,
+        accept_invalid_certs,
         pinned_server_certs: pin_cert.clone(),
         concurrent_chunks: 4,
         max_reconnect_attempts: 5,
@@ -680,14 +692,21 @@ fn collect_files_recursive<'a>(
     })
 }
 
-/// 从目标 URL 提取 HTTP base URL（用于 preflight probe）
+/// 从目标 URL 提取 HTTP/HTTPS base URL（用于 preflight probe）
 /// quic://host:7789/... → http://host:7788
 /// http://host:7788/... → http://host:7788
+/// https://host:7790/... → https://host:7790
 /// host:port → http://host:port
 fn extract_http_base(dest_url: &str, original_dest: &str) -> String {
-    if dest_url.starts_with("http://") || dest_url.starts_with("https://") {
+    if dest_url.starts_with("https://") {
+        // 保留 https:// 前缀，去掉路径
+        let trimmed = dest_url.trim_start_matches("https://");
+        let host_port = trimmed.split('/').next().unwrap_or(trimmed);
+        return format!("https://{}", host_port);
+    }
+    if dest_url.starts_with("http://") {
         // 去掉路径，只保留 scheme + host + port
-        let trimmed = dest_url.trim_start_matches("http://").trim_start_matches("https://");
+        let trimmed = dest_url.trim_start_matches("http://");
         let host_port = trimmed.split('/').next().unwrap_or(trimmed);
         return format!("http://{}", host_port);
     }
@@ -769,6 +788,7 @@ async fn cmd_receive(
     overwrite: bool,
     max_size: u64,
     http_only: bool,
+    no_http: bool,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
     https: bool,
@@ -794,8 +814,8 @@ async fn cmd_receive(
         receive_directory: save_to.clone(),
         max_file_size: max_size,
         allow_overwrite: overwrite,
-        enable_http: true,
-        enable_quic: !http_only,
+        enable_http: !no_http,
+        enable_quic: !http_only && !no_http,
         auth: auth_cfg,
         audit_log: None,
         tls: match (tls_cert, tls_key) {
@@ -811,8 +831,10 @@ async fn cmd_receive(
     };
 
     println!("AeroSync receiver starting...");
-    println!("  HTTP:  {}:{}", bind, port);
-    if !http_only {
+    if !no_http {
+        println!("  HTTP:  {}:{}", bind, port);
+    }
+    if !http_only && !no_http {
         println!("  QUIC:  {}:{}", bind, quic_port);
     }
     if https {

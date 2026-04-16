@@ -262,11 +262,17 @@ impl FileReceiver {
         }
 
         *self.status.write().await = ServerStatus::Running;
-        tracing::info!(
-            "File receiver started on HTTP:{} QUIC:{}",
-            config.http_port,
-            config.quic_port
-        );
+        if config.enable_https {
+            tracing::info!(
+                "File receiver started on HTTP:{} QUIC:{} HTTPS:{}",
+                config.http_port, config.quic_port, config.https_port
+            );
+        } else {
+            tracing::info!(
+                "File receiver started on HTTP:{} QUIC:{}",
+                config.http_port, config.quic_port
+            );
+        }
 
         // mDNS 广播（局域网自动发现）
         let instance_name = hostname_for_mdns();
@@ -2527,5 +2533,122 @@ mod tests {
         assert_eq!(body["sha256"].as_str().unwrap(), sha);
 
         receiver.stop().await.unwrap();
+    }
+
+    // ── HTTPS 集成测试 ────────────────────────────────────────────────────────
+
+    /// 启动一个带自签名证书的 HTTPS 接收端，返回 (receiver, https_port, temp_dir)
+    async fn start_https_test_receiver() -> (FileReceiver, u16, tempfile::TempDir) {
+        let https_port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ServerConfig {
+            bind_address: "127.0.0.1".to_string(),
+            enable_http: false,
+            enable_quic: false,
+            enable_https: true,
+            https_port,
+            receive_directory: dir.path().to_path_buf(),
+            ..ServerConfig::default()
+        };
+        let mut recv = FileReceiver::new(cfg);
+        recv.start().await.unwrap();
+        // warp TLS 握手需要稍多初始化时间
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        (recv, https_port, dir)
+    }
+
+    /// 构建一个接受自签名证书的 reqwest 客户端（仅供测试，rustls-tls 与 warp TLS 兼容）
+    fn insecure_https_client() -> reqwest::Client {
+        reqwest::ClientBuilder::new()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_https_server_starts_and_health_responds() {
+        let (mut receiver, https_port, _dir) = start_https_test_receiver().await;
+
+        let client = insecure_https_client();
+        let url = format!("https://127.0.0.1:{}/health", https_port);
+        let resp = client.get(&url).send().await
+            .expect("HTTPS /health request failed");
+
+        assert!(resp.status().is_success(), "expected 200, got {}", resp.status());
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body.get("status").is_some(), "/health should contain 'status' field");
+
+        receiver.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_https_upload_file() {
+        let (mut receiver, https_port, dir) = start_https_test_receiver().await;
+
+        let client = insecure_https_client();
+        let base = format!("https://127.0.0.1:{}", https_port);
+        let data = b"hello from HTTPS upload test";
+
+        // 单文件上传（multipart）
+        let form = reqwest::multipart::Form::new()
+            .part("file", reqwest::multipart::Part::bytes(data.to_vec())
+                .file_name("https_test.txt"));
+        let resp = client
+            .post(format!("{}/upload", base))
+            .multipart(form)
+            .send()
+            .await
+            .expect("HTTPS upload request failed");
+
+        assert!(resp.status().is_success(), "upload failed: {}", resp.status());
+
+        // 验证文件落盘
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let saved = dir.path().join("https_test.txt");
+        assert!(saved.exists(), "uploaded file should exist on disk");
+        assert_eq!(std::fs::read(&saved).unwrap(), data);
+
+        receiver.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_https_external_cert_loads_correctly() {
+        // 用 generate_self_signed_pem 生成证书写入临时文件，模拟"外部证书"路径
+        let cert_dir = tempfile::tempdir().unwrap();
+        let (cert_pem, key_pem) = super::generate_self_signed_pem().unwrap();
+        let cert_path = cert_dir.path().join("test.crt");
+        let key_path = cert_dir.path().join("test.key");
+        std::fs::write(&cert_path, &cert_pem).unwrap();
+        std::fs::write(&key_path, &key_pem).unwrap();
+
+        let https_port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let recv_dir = tempfile::tempdir().unwrap();
+        let cfg = ServerConfig {
+            bind_address: "127.0.0.1".to_string(),
+            enable_http: false,
+            enable_quic: false,
+            enable_https: true,
+            https_port,
+            tls: Some(TlsConfig { cert_path, key_path }),
+            receive_directory: recv_dir.path().to_path_buf(),
+            ..ServerConfig::default()
+        };
+        let mut recv = FileReceiver::new(cfg);
+        recv.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let client = insecure_https_client();
+        let url = format!("https://127.0.0.1:{}/health", https_port);
+        let resp = client.get(&url).send().await
+            .expect("external cert HTTPS /health request failed");
+        assert!(resp.status().is_success(), "external cert HTTPS should serve /health");
+
+        recv.stop().await.unwrap();
     }
 }
