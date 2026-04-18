@@ -66,18 +66,15 @@ message TransferStart {
   // Lower-case hex SHA-256 of the payload, computed by the sender.
   string sha256 = 4;
 
-  // Chunk size used for the per-chunk uni-streams (stream 4, 8, …).
-  uint32 chunk_size = 5;
-
-  // Field 6 is reserved for the Metadata envelope defined in RFC-003.
-  // It will be added in Week 4 as `Metadata metadata = 6;`. Until then
+  // Field 5 is reserved for the Metadata envelope defined in RFC-003.
+  // It will be added in Week 4 as `Metadata metadata = 5;`. Until then
   // the field number is kept off-limits so a partial v0.2 build cannot
-  // accidentally claim it. (RFC-002 §5 originally drew Metadata at #5
-  // and chunk_size at #6; the v0.2.0 Week-1 plan reverses this so that
-  // chunk_size is always present and Metadata becomes the additive
-  // change in Week 4.)
-  reserved 6;
+  // accidentally claim it. Field number matches RFC-002 §5 canonical.
+  reserved 5;
   reserved "metadata";
+
+  // Chunk size used for the per-chunk uni-streams (stream 4, 8, …).
+  uint32 chunk_size = 6;
 }
 
 // Sender-initiated cancel. Carries the receipt_id so the receiver can
