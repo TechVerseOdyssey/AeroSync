@@ -300,7 +300,16 @@ impl HistoryStore {
     }
 
     /// 读取全部记录
+    ///
+    /// Holds the file mutex for the duration of the read so the
+    /// caller can never observe a half-rewritten JSONL — both
+    /// [`Self::append`] and [`Self::rewrite_locked`] take the same
+    /// mutex when mutating the file. Combined with the
+    /// `tmp + rename` strategy in `rewrite_locked`, this means
+    /// concurrent readers always see either the OLD complete file or
+    /// the NEW complete file, never a truncated window.
     pub async fn read_all(&self) -> Result<Vec<HistoryEntry>> {
+        let _guard = self.file.lock().await;
         let content = tokio::fs::read_to_string(&self.path)
             .await
             .unwrap_or_default();
@@ -414,20 +423,52 @@ impl HistoryStore {
     /// append-handle lock. Used internally by
     /// [`Self::record_receipt_terminal`] and [`Self::write_metadata`].
     async fn rewrite_locked(&self, entries: &[HistoryEntry]) -> Result<()> {
+        // Atomic-rename strategy: write the full new content to a
+        // sibling `.tmp` file, fsync it, then rename it over the real
+        // path. This eliminates the truncate-then-write window in
+        // which a concurrent reader (e.g. `query` from another tokio
+        // task, or another aerosync process sharing the same JSONL)
+        // could observe a 0-byte file. Surfaced as a Windows-only
+        // smoke-test flake before this change because NTFS makes the
+        // truncate+write window much wider than ext4/APFS.
         let mut guard = self.file.lock().await;
-        let mut new = tokio::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.path)
-            .await?;
-        for e in entries {
-            let mut line = serde_json::to_string(e)
-                .map_err(|err| AeroSyncError::System(format!("History serialize: {err}")))?;
-            line.push('\n');
-            new.write_all(line.as_bytes()).await?;
+
+        let tmp_path = self.path.with_extension("jsonl.tmp");
+        {
+            let mut tmp = tokio::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .await?;
+            for e in entries {
+                let mut line = serde_json::to_string(e)
+                    .map_err(|err| AeroSyncError::System(format!("History serialize: {err}")))?;
+                line.push('\n');
+                tmp.write_all(line.as_bytes()).await?;
+            }
+            tmp.flush().await?;
+            // sync_all so a crash between rename and the next open
+            // can't yield a 0-byte file in place of the real history.
+            tmp.sync_all().await?;
         }
-        new.flush().await?;
+
+        // Windows refuses to rename over a path whose existing handle
+        // was opened without FILE_SHARE_DELETE (which Rust's std does
+        // not set). Drop the existing append handle BEFORE the
+        // rename. To preserve the mutex invariant ("the guarded slot
+        // always holds an open File"), we swap in a throwaway handle
+        // on the tmp file just long enough to perform the rename,
+        // then replace it with the freshly-opened append handle.
+        let throwaway = tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(&tmp_path)
+            .await?;
+        let _old_append = std::mem::replace(&mut *guard, throwaway);
+        drop(_old_append);
+
+        tokio::fs::rename(&tmp_path, &self.path).await?;
+
         *guard = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
