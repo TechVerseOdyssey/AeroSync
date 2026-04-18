@@ -119,93 +119,93 @@ fn evict_expired(registry: &mut HashMap<Uuid, TaskEntry>, ttl: Duration) {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendFileParams {
-    /// 源文件的绝对或相对路径
+    /// Absolute or relative path to the source file.
     pub source: String,
-    /// 目标地址：host:port 或 http://host:port/upload 或 s3://bucket/key
+    /// Destination address: `host:port`, `http://host:port/upload`, `quic://...`, `s3://bucket/key` or `ftp://...`.
     pub destination: String,
-    /// 远端接收端的认证 Token（可选；与 mcp_auth_token 不同）
+    /// Optional auth token for the remote receiver (HMAC-SHA256 bearer). Distinct from `mcp_auth_token`.
     pub token: Option<String>,
-    /// 跳过 SHA-256 完整性校验（默认 false）
+    /// Skip the end-to-end SHA-256 integrity check (default: false).
     pub no_verify: Option<bool>,
-    /// 上传限速，如 "10MB"、"512KB"（可选）
+    /// Optional upload bandwidth cap, e.g. "10MB", "512KB".
     pub limit: Option<String>,
-    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    /// Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.
     #[serde(default, alias = "_auth_token")]
     pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendDirectoryParams {
-    /// 源目录的绝对或相对路径
+    /// Absolute or relative path to the source directory.
     pub source: String,
-    /// 目标地址
+    /// Destination address (same formats as `send_file`).
     pub destination: String,
-    /// 远端接收端的认证 Token（可选；与 mcp_auth_token 不同）
+    /// Optional auth token for the remote receiver. Distinct from `mcp_auth_token`.
     pub token: Option<String>,
-    /// 跳过 SHA-256 完整性校验（默认 false）
+    /// Skip the end-to-end SHA-256 integrity check (default: false).
     pub no_verify: Option<bool>,
-    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    /// Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.
     #[serde(default, alias = "_auth_token")]
     pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct StartReceiverParams {
-    /// HTTP 监听端口（默认 7788）
+    /// HTTP listen port (default: 7788).
     pub port: Option<u16>,
-    /// QUIC 监听端口（默认 7789）
+    /// QUIC listen port (default: 7789).
     pub quic_port: Option<u16>,
-    /// 文件保存目录（默认 ./received）
+    /// Directory where received files are saved (default: "./received").
     pub save_to: Option<String>,
-    /// 要求发送方携带此 Token（留空不启用认证；与 mcp_auth_token 不同）
+    /// Require senders to present this token (HMAC bearer). Leave empty to disable auth. Distinct from `mcp_auth_token`.
     pub auth_token: Option<String>,
-    /// 允许覆盖同名文件（默认 false）
+    /// Allow overwriting existing files with the same name (default: false).
     pub overwrite: Option<bool>,
-    /// 启用 HTTPS（自动生成自签名证书，默认 false）
+    /// Enable HTTPS with an auto-generated self-signed certificate (default: false).
     pub https: Option<bool>,
-    /// HTTPS 监听端口（默认 7790）
+    /// HTTPS listen port (default: 7790).
     pub https_port: Option<u16>,
-    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    /// Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.
     #[serde(default, alias = "_auth_token")]
     pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListHistoryParams {
-    /// 最多返回 N 条（默认 20）
+    /// Maximum number of records to return (default: 20).
     pub limit: Option<usize>,
-    /// 只显示成功记录
+    /// Show only successful transfers.
     pub success_only: Option<bool>,
-    /// 只显示发送记录
+    /// Show only outgoing (sent) transfers.
     pub sent: Option<bool>,
-    /// 只显示接收记录
+    /// Show only incoming (received) transfers.
     pub received: Option<bool>,
-    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    /// Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.
     #[serde(default, alias = "_auth_token")]
     pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DiscoverParams {
-    /// 扫描等待时间（秒，默认 3）
+    /// How long to wait for mDNS responses, in seconds (default: 3).
     pub timeout: Option<u64>,
-    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    /// Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.
     #[serde(default, alias = "_auth_token")]
     pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetTransferStatusParams {
-    /// send_file/send_directory 返回的 task_id
+    /// The task_id returned by `send_file` or `send_directory`.
     pub task_id: String,
-    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    /// Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.
     #[serde(default, alias = "_auth_token")]
     pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct NoParams {
-    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    /// Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.
     #[serde(default, alias = "_auth_token")]
     pub mcp_auth_token: Option<String>,
 }
@@ -971,7 +971,13 @@ impl AeroSyncMcpServer {
         let tasks = self.tasks.lock().await;
         match tasks.get(&id) {
             None => Ok(CallToolResult::success(vec![Content::text(
-                json!({"success": false, "error": "Task not found (may have expired after 1 hour)"}).to_string()
+                json!({
+                    "success": false,
+                    "error": format!(
+                        "Task not found (may have expired after {} seconds; tune AEROSYNC_MCP_TASK_TTL_SECS to keep it longer)",
+                        self.config.task_ttl.as_secs()
+                    )
+                }).to_string()
             )])),
             Some(entry) => {
                 let status_json = match &entry.status {
