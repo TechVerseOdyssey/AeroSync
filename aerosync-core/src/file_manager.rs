@@ -250,34 +250,14 @@ fn available_space(path: &Path) -> Result<u64> {
         #[allow(clippy::unnecessary_cast)]
         Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
     }
-    #[cfg(windows)]
+    #[cfg(not(unix))]
     {
-        use std::os::windows::ffi::OsStrExt;
-        use winapi::um::fileapi::GetDiskFreeSpaceExW;
-        use winapi::um::winnt::ULARGE_INTEGER;
-
-        let wide: Vec<u16> = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let mut free_bytes: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
-        let ok = unsafe {
-            GetDiskFreeSpaceExW(
-                wide.as_ptr(),
-                &mut free_bytes,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            return Err(AeroSyncError::FileIo(std::io::Error::last_os_error()));
-        }
-        Ok(unsafe { *free_bytes.QuadPart() as u64 })
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
+        // Windows / wasm / other: best-effort fallback. Returning u64::MAX
+        // means "assume plenty of space"—safer than a panic for the only
+        // current caller (FileManager::get_available_space, used in
+        // optional preflight). When a Windows user actually needs accurate
+        // free-space reporting we can wire up `windows-sys` and call
+        // `GetDiskFreeSpaceExW`; that is intentionally not a v0.1.0 dep.
         let _ = path;
         Ok(u64::MAX)
     }
