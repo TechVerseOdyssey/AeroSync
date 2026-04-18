@@ -1725,7 +1725,10 @@ fn configure_quic_server(tls: Option<&TlsConfig>) -> Result<quinn::ServerConfig>
         .with_single_cert(certs, key)
         .map_err(|e| AeroSyncError::System(format!("TLS config error: {}", e)))?;
 
-    tls_config.alpn_protocols = vec![b"aerosync".to_vec()];
+    // RFC-002 §6.1: ALPN is `aerosync/1`. Sourced from
+    // `aerosync_proto::VERSION` so client and server agree on the
+    // exact string.
+    tls_config.alpn_protocols = vec![aerosync_proto::VERSION.as_bytes().to_vec()];
 
     // quinn 0.11: ServerConfig wraps rustls via the QuicServerConfig bridge
     // instead of taking a raw rustls::ServerConfig.

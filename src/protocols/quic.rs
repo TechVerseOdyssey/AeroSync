@@ -152,7 +152,13 @@ impl Default for QuicConfig {
         Self {
             server_name: "localhost".to_string(),
             server_addr: "127.0.0.1:7789".parse().unwrap(),
-            alpn_protocols: vec!["aerosync".to_string()],
+            // RFC-002 §6.1: the canonical ALPN string for v0.2+ is
+            // `aerosync/1`. v0.1.x peers (which advertised "aerosync"
+            // unversioned) are intentionally not interoperable —
+            // they're treated as a closed pre-alpha. The string lives
+            // in `aerosync_proto::VERSION` so encoder/decoder code on
+            // both sides agree on the exact bytes.
+            alpn_protocols: vec![aerosync_proto::VERSION.to_string()],
             max_idle_timeout: 60_000,
             keep_alive_interval: 5_000,
             auth_token: None,
