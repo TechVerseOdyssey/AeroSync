@@ -3,6 +3,7 @@ pub mod circuit_breaker;
 pub mod ftp;
 pub mod http;
 pub mod quic;
+pub mod quic_receipt;
 pub mod ratelimit;
 pub mod s3;
 pub mod traits;
