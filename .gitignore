@@ -36,3 +36,7 @@ node_modules/
 
 # AeroSync runtime state (resume checkpoints)
 .aerosync/
+
+# Personal TODO / scratch files (never committed)
+TODO.local.md
+*.local.md
