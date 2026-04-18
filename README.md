@@ -1,55 +1,87 @@
 # AeroSync
 
-高性能跨网络文件传输 CLI 工具，专为 Agent 间文件传输场景设计。
+[![CI](https://github.com/TechVerseOdyssey/AeroSync/actions/workflows/rust.yml/badge.svg)](https://github.com/TechVerseOdyssey/AeroSync/actions/workflows/rust.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org)
+[![Crates.io](https://img.shields.io/crates/v/aerosync.svg)](https://crates.io/crates/aerosync)
 
-支持大文件（GB 级）断点续传和小文件批量高并发传输，两端均安装 AeroSync 时自动协商升级 QUIC 协议，否则降级为 HTTP / S3 / FTP 等标准协议。
+> **AI-native file transfer.** A fast Rust CLI **and** an MCP server — let Claude, ChatGPT, Cursor or your own agent move files between machines as easily as `scp`, with automatic QUIC upgrade, resumable chunked uploads and zero infrastructure.
 
-## 特性
+[简体中文](README.zh-CN.md) · [Architecture](#architecture) · [MCP for AI agents](docs/mcp-integration.md)
 
-- **自适应协议**：自动探测对端是否支持 QUIC，支持则升级，否则降级 HTTP
-- **断点续传**：32MB 分片上传，状态持久化到本地 JSON，重启后自动恢复
-- **批量并发**：小文件（<1MB）16 并发，中等文件（<64MB）8 并发，大文件走分片
-- **多协议支持**：HTTP、QUIC、S3（含 MinIO）、FTP
-- **目录传输**：`--recursive` 保留完整子目录结构
-- **完整性校验**：SHA-256 端到端验证
-- **认证**：HMAC-SHA256 Bearer Token
-- **配置文件**：TOML 格式，CLI 参数优先覆盖
+---
 
-## 安装
+## Why AeroSync?
+
+| Tool       | Resume | QUIC auto | Built-in receiver | LAN discovery (mDNS) | MCP server for AI agents |
+| ---------- | :----: | :-------: | :---------------: | :------------------: | :----------------------: |
+| `scp`      |   ✗    |     ✗     |   ssh required    |          ✗           |            ✗             |
+| `rsync`    |   ✓    |     ✗     |   ssh required    |          ✗           |            ✗             |
+| `croc`     |   ✗    |     ✗     |         ✓         |          ✗           |            ✗             |
+| `rclone`   |   ✓    |     ✗     |         ✗         |          ✗           |            ✗             |
+| **AeroSync** | **✓**  |   **✓**   |       **✓**       |        **✓**         |          **✓**           |
+
+Designed for the use case nothing else covers cleanly: **one agent on machine A asks another agent on machine B "send me that 30 GB dataset"**, and it just works — over LAN (QUIC, mDNS-discovered) or WAN (HTTP fallback), resumable, with a single binary on each side.
+
+## Features
+
+- **Auto protocol negotiation** — probes the peer for AeroSync; upgrades to QUIC if both sides support it, falls back to HTTP otherwise.
+- **Resumable transfers** — 32 MB chunks, state persisted to local JSON, recovers automatically after a crash or `Ctrl-C`.
+- **Concurrency tuned to file size** — 16-way for `<1 MB`, 8-way for `<64 MB`, chunked for `>64 MB`.
+- **Multi-protocol** — HTTP, QUIC, S3 (incl. MinIO), FTP — all behind one CLI.
+- **Recursive directory transfer** with full structure preservation (`--recursive`).
+- **End-to-end SHA-256** integrity check.
+- **HMAC-SHA256 bearer token** auth.
+- **TOML config** with CLI overrides.
+- **MCP server** — exposes 8 tools (`send_file`, `send_directory`, `start_receiver`, …) so AI agents can drive transfers natively. See [`docs/mcp-integration.md`](docs/mcp-integration.md).
+
+## Install
+
+### From source (any platform with Rust ≥ 1.82)
 
 ```bash
 git clone https://github.com/TechVerseOdyssey/AeroSync.git
 cd AeroSync
 cargo build --release
-# 二进制位于 target/release/aerosync
+# binaries: target/release/aerosync, target/release/aerosync-mcp
 ```
 
-## 快速开始
+### One-line install (macOS / Linux)
 
-**接收端**（目标机器）：
+```bash
+curl -fsSL https://raw.githubusercontent.com/TechVerseOdyssey/AeroSync/master/install.sh | bash
+```
+
+> Other channels (Homebrew, Cargo, prebuilt GitHub Releases, npm wrapper) are tracked in [`docs/install.md`](docs/install.md).
+
+## Quick start
+
+**Receiver** (target machine):
+
 ```bash
 aerosync receive --port 7788 --save-to ./downloads
 ```
 
-**发送端**（源机器）：
+**Sender** (source machine):
+
 ```bash
-# 单文件（自动协商协议）
+# Single file (auto-negotiates protocol)
 aerosync send ./video.mp4 192.168.1.10:7788
 
-# 发送目录（保留结构）
+# Recursive directory (preserves structure)
 aerosync send ./project/ 192.168.1.10:7788 --recursive
 
-# 强制 HTTP
+# Force HTTP
 aerosync send ./file.zip http://192.168.1.10:7788/upload
 
-# 上传到 S3
+# Upload to S3 / MinIO
 aerosync send ./data.tar.gz s3://my-bucket/backups/data.tar.gz
 
-# 上传到 FTP
+# Upload to FTP
 aerosync send ./report.pdf ftp://ftpserver:21/uploads/report.pdf
 ```
 
-## CLI 参考
+## CLI reference
 
 ### `aerosync send`
 
@@ -57,17 +89,17 @@ aerosync send ./report.pdf ftp://ftpserver:21/uploads/report.pdf
 aerosync send <SOURCE> <DESTINATION> [OPTIONS]
 ```
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `<SOURCE>` | 源文件或目录路径 | — |
-| `<DESTINATION>` | 目标地址，支持 `host:port`、`http://`、`quic://`、`s3://`、`ftp://` | — |
-| `-r, --recursive` | 递归发送目录 | false |
-| `--protocol` | 强制协议：`quic` \| `http` | 自动协商 |
-| `--token` | 认证 Token | — |
-| `--parallel` | 并发流数量 | 4 |
-| `--no-verify` | 跳过 SHA-256 校验 | false |
-| `--dry-run` | 仅显示传输计划 | false |
-| `--no-resume` | 禁用断点续传 | false |
+| Option            | Description                                                                | Default        |
+| ----------------- | -------------------------------------------------------------------------- | -------------- |
+| `<SOURCE>`        | Source file or directory                                                   | —              |
+| `<DESTINATION>`   | `host:port`, `http://`, `quic://`, `s3://` or `ftp://`                     | —              |
+| `-r, --recursive` | Send a directory recursively                                               | false          |
+| `--protocol`      | Force a protocol: `quic` \| `http`                                         | auto-negotiate |
+| `--token`         | Auth token                                                                 | —              |
+| `--parallel`      | Number of concurrent streams                                               | 4              |
+| `--no-verify`     | Skip the SHA-256 check                                                     | false          |
+| `--dry-run`       | Print the transfer plan and exit                                           | false          |
+| `--no-resume`     | Disable resumable transfer                                                 | false          |
 
 ### `aerosync receive`
 
@@ -75,165 +107,163 @@ aerosync send <SOURCE> <DESTINATION> [OPTIONS]
 aerosync receive [OPTIONS]
 ```
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--port` | HTTP 监听端口 | 7788 |
-| `--quic-port` | QUIC 监听端口 | 7789 |
-| `--save-to` | 文件保存目录 | ./received |
-| `--bind` | 绑定地址 | 0.0.0.0 |
-| `--auth-token` | 要求发送方携带此 Token | — |
-| `--one-shot` | 接收一个文件后退出 | false |
-| `--overwrite` | 允许覆盖同名文件 | false |
-| `--max-size` | 最大文件大小（字节） | 100GB |
-| `--http-only` | 仅启用 HTTP，禁用 QUIC | false |
+| Option         | Description                                | Default     |
+| -------------- | ------------------------------------------ | ----------- |
+| `--port`       | HTTP listen port                           | 7788        |
+| `--quic-port`  | QUIC listen port                           | 7789        |
+| `--save-to`    | Directory to save received files           | ./received  |
+| `--bind`       | Bind address                               | 0.0.0.0     |
+| `--auth-token` | Require this token from senders            | —           |
+| `--one-shot`   | Exit after one file is received            | false       |
+| `--overwrite`  | Allow overwriting files with the same name | false       |
+| `--max-size`   | Maximum file size (bytes)                  | 100 GB      |
+| `--http-only`  | HTTP only, disable QUIC                    | false       |
 
 ### `aerosync token`
 
 ```bash
-# 生成 Token（有效期 24 小时）
+# Generate a token (24 h validity)
 aerosync token generate --hours 24
 
-# 使用自定义密钥
+# Use a custom secret
 aerosync token generate --secret my-secret-key
 
-# 验证 Token
+# Verify a token
 aerosync token verify <TOKEN> --secret my-secret-key
 ```
 
 ### `aerosync resume`
 
 ```bash
-# 列出未完成的传输任务
-aerosync resume list
-
-# 清除指定任务的续传状态
-aerosync resume clear <TASK_ID>
-
-# 清除所有续传状态
-aerosync resume clear-all
+aerosync resume list                  # list unfinished transfers
+aerosync resume clear <TASK_ID>       # clear one task's resume state
+aerosync resume clear-all             # clear them all
 ```
 
 ### `aerosync status`
 
 ```bash
-# 查看接收端状态
 aerosync status 192.168.1.10:7788
 ```
 
-## 配置文件
+## Configuration
 
-默认路径：`~/.aerosync/config.toml`（通过 `--config` 指定其他路径）
+Default path: `~/.aerosync/config.toml` (override with `--config`).
 
 ```toml
 [transfer]
-max_concurrent = 4       # 最大并发任务数
-chunk_size_mb = 32       # 分片大小（MB，用于断点续传）
-retry_attempts = 3       # 单分片最大重试次数
-timeout_seconds = 60     # 请求超时（秒）
+max_concurrent  = 4    # max concurrent tasks
+chunk_size_mb   = 32   # chunk size for resumable upload
+retry_attempts  = 3    # max retries per chunk
+timeout_seconds = 60   # per-request timeout
 
 [auth]
-token = ""               # 默认认证 Token
+token = ""             # default auth token
 
 [server]
-http_port = 7788         # HTTP 监听端口
-quic_port = 7789         # QUIC 监听端口
-save_to = "./received"   # 文件保存目录
-bind = "0.0.0.0"         # 绑定地址
+http_port = 7788
+quic_port = 7789
+save_to   = "./received"
+bind      = "0.0.0.0"
 ```
 
-CLI 参数优先级高于配置文件。
+CLI flags always override the config file.
 
-## 协议说明
+## Use with AI agents (MCP)
 
-### QUIC 自动协商
+AeroSync ships an [MCP](https://modelcontextprotocol.io) server (`aerosync-mcp`) that lets any MCP-compatible client — **Claude Desktop, Claude Code, Cursor, ChatGPT (via plugins), Continue.dev** — drive file transfers natively.
 
-当目标为 `host:port` 格式时，AeroSync 会先向 `http://host:port/health` 发送探测请求（超时 2s）。若响应头含 `X-AeroSync: true`，自动升级为 QUIC（端口 = HTTP 端口 + 1）；否则降级为 HTTP。
+```jsonc
+// Claude Desktop config (~/Library/Application Support/Claude/claude_desktop_config.json)
+{
+  "mcpServers": {
+    "aerosync": {
+      "command": "aerosync-mcp",
+      "env": { "AEROSYNC_MCP_SECRET": "change-me" }
+    }
+  }
+}
+```
+
+8 tools are exposed: `send_file`, `send_directory`, `start_receiver`, `stop_receiver`, `get_receiver_status`, `get_transfer_status`, `discover_receivers`, `list_history`. Full schemas, runtime envs and security notes: [`docs/mcp-integration.md`](docs/mcp-integration.md).
+
+## Protocol details
+
+### QUIC auto-negotiation
+
+When the destination is `host:port`, AeroSync probes `http://host:port/health` (2 s timeout). If the response carries the header `X-AeroSync: true`, it upgrades to QUIC on `port + 1`; otherwise it falls back to HTTP.
 
 ```
-host:7788  →  探测  →  有 AeroSync  →  quic://host:7789
-                    →  无 AeroSync  →  http://host:7788/upload
+host:7788  →  probe  →  AeroSync detected   →  quic://host:7789
+                     →  no AeroSync          →  http://host:7788/upload
 ```
 
-### S3 兼容存储
-
-支持 AWS S3 和 MinIO 等 S3 兼容存储：
+### S3-compatible storage
 
 ```bash
-# AWS S3（使用环境变量或配置）
-aerosync send ./file.tar.gz s3://bucket/prefix/file.tar.gz
-
-# MinIO（通过代码配置 endpoint）
-# s3_config.endpoint = Some("http://minio:9000".to_string())
+aerosync send ./file.tar.gz s3://bucket/prefix/file.tar.gz   # AWS S3
+# MinIO: configure s3_config.endpoint = Some("http://minio:9000")
 ```
 
-### FTP
-
-支持标准 FTP（被动模式）：
+### FTP (passive mode)
 
 ```bash
 aerosync send ./file.csv ftp://ftpserver:21/data/file.csv
 ```
 
-## 断点续传
+## Resumable transfers
 
-大文件（默认 >64MB）自动启用分片上传，每片 32MB。状态保存在 `.aerosync/<task_id>.json`。
-
-```bash
-# 发送中断后，重新运行相同命令自动恢复
-aerosync send ./large_file.bin 192.168.1.10:7788
-
-# 查看未完成任务
-aerosync resume list
-
-# 清除续传状态（强制重传）
-aerosync send ./large_file.bin 192.168.1.10:7788 --no-resume
-```
-
-## 架构
-
-```
-aerosync (CLI)
-├── aerosync-core
-│   ├── TransferEngine      并发 Worker（FuturesUnordered + Semaphore）
-│   ├── ProgressMonitor     进度跟踪（MultiProgress）
-│   ├── ResumeStore         断点续传状态持久化
-│   ├── FileReceiver        HTTP/QUIC 接收端
-│   └── AuthManager         HMAC-SHA256 Token 认证
-└── aerosync-protocols
-    ├── AutoAdapter         协议路由（自动协商）
-    ├── HttpTransfer        HTTP 上传/下载（Arc<Client> 复用）
-    ├── QuicTransfer        QUIC 传输（quinn + rustls）
-    ├── S3Transfer          S3 上传/下载（AWS SigV4）
-    └── FtpTransfer         FTP 上传/下载（suppaftp async）
-```
-
-### 并发策略
-
-| 文件大小 | 策略 | 并发数 |
-|---------|------|--------|
-| < 1MB | 小文件高并发 | 16 |
-| 1MB – 64MB | 中等文件并发 | 8 |
-| > 64MB | 分片上传 + 断点续传 | 1（分片内并发） |
-
-## 开发
+Files larger than 64 MB automatically use chunked upload (32 MB per chunk). State is stored under `~/.aerosync/.aerosync/<task_id>.json`.
 
 ```bash
-# 运行全量测试（149 个用例）
-cargo test --workspace
-
-# 仅测试核心层
-cargo test -p aerosync-core
-
-# 仅测试协议层
-cargo test -p aerosync-protocols
-
-# 运行流水线集成测试
-cargo test -p aerosync-protocols --test pipeline
-
-# 构建发布版本
-cargo build --release
+aerosync send ./large_file.bin 192.168.1.10:7788     # interrupt with Ctrl-C, re-run to resume
+aerosync resume list                                  # list unfinished transfers
+aerosync send ./large_file.bin 192.168.1.10:7788 --no-resume   # force a fresh upload
 ```
 
-## 许可证
+## Architecture
 
-MIT
+```
+aerosync (CLI)              aerosync-mcp (MCP server for AI agents)
+       │                              │
+       └──────────────┬───────────────┘
+                      ▼
+              aerosync-core
+              ├── TransferEngine    concurrent workers (FuturesUnordered + Semaphore)
+              ├── ProgressMonitor   progress reporting
+              ├── ResumeStore       chunked-resume persistence
+              ├── FileReceiver      HTTP/QUIC receiver
+              └── AuthManager       HMAC-SHA256 tokens
+                      │
+                      ▼
+            aerosync-protocols
+            ├── AutoAdapter   protocol routing (auto-negotiation)
+            ├── HttpTransfer  HTTP up/down (shared Arc<Client>)
+            ├── QuicTransfer  QUIC (quinn + rustls)
+            ├── S3Transfer    S3 (AWS SigV4)
+            └── FtpTransfer   FTP (suppaftp async)
+```
+
+### Concurrency strategy
+
+| File size      | Strategy                       | Concurrency       |
+| -------------- | ------------------------------ | ----------------- |
+| `< 1 MB`       | high-concurrency batch         | 16                |
+| `1 – 64 MB`    | medium-concurrency batch       | 8                 |
+| `> 64 MB`      | chunked + resumable upload     | 1 (per-chunk pipe)|
+
+## Development
+
+```bash
+cargo test --workspace                    # full test suite
+cargo test -p aerosync-core               # core only
+cargo test -p aerosync-protocols          # protocols only
+cargo test -p aerosync-protocols --test pipeline   # E2E pipeline
+cargo build --release                     # release build
+```
+
+Contributions are very welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
