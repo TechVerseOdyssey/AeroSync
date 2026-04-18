@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest an improvement or a new capability
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the use case. "Wouldn't it be cool if …" is fine but a concrete user story is better.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: A sketch of the API / CLI flag / MCP tool you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Affects
+      multiple: true
+      options:
+        - CLI (aerosync)
+        - MCP server (aerosync-mcp)
+        - Transport / protocols
+        - Receiver
+        - Documentation
+        - Packaging / install

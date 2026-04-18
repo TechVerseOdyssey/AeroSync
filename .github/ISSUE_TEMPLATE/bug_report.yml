@@ -1,0 +1,67 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Before submitting,
+        please check that no similar issue already exists.
+  - type: input
+    id: version
+    attributes:
+      label: AeroSync version
+      description: Output of `aerosync --version` (or commit SHA if built from source).
+      placeholder: "0.1.0 / commit abcd123"
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      multiple: true
+      options:
+        - aerosync (CLI)
+        - aerosync-mcp (MCP server)
+        - aerosync-core
+        - aerosync-protocols
+        - documentation
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS / platform
+      placeholder: "macOS 14.5 (aarch64) / Ubuntu 22.04 (x86_64) / Windows 11 …"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal command sequence that triggers the issue.
+      placeholder: |
+        1. `aerosync receive --port 7788`
+        2. `aerosync send ./big.bin 127.0.0.1:7788`
+        3. `Ctrl-C` halfway through
+        4. Re-run the send and observe …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened?
+      description: Include logs (`RUST_LOG=debug aerosync …`) and stack traces if available.
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Network topology, file sizes, MCP client (Claude/Cursor/…), etc.
