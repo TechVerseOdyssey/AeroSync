@@ -28,7 +28,7 @@ pub use capabilities::{
 pub use discovery::{AeroSyncMdns, AeroSyncPeer, MdnsHandle, MDNS_SERVICE_TYPE};
 pub use error::{AeroSyncError, Result};
 pub use file_manager::{FileInfo, FileManager};
-pub use history::{HistoryEntry, HistoryQuery, HistoryStore};
+pub use history::{HistoryEntry, HistoryQuery, HistoryStore, ReceiptStateLabel};
 pub use metrics::Metrics;
 pub use preflight::{preflight_check, probe_receiver, PreflightError, PreflightResult};
 pub use progress::{ProgressMonitor, TransferProgress, TransferStats};
