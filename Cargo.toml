@@ -78,6 +78,11 @@ rustls = { workspace = true }
 zeroize = { workspace = true }
 memmap2 = { workspace = true }
 
+# Wire protocol types (RFC-002). The proto crate owns the .proto file
+# and the generated bindings; we just consume them.
+aerosync-proto = { workspace = true }
+prost = { workspace = true }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -89,6 +94,7 @@ tokio-tungstenite = "0.20"
 [workspace]
 members = [
     "aerosync-mcp",
+    "aerosync-proto",
 ]
 resolver = "2"
 
@@ -103,8 +109,15 @@ documentation = "https://docs.rs/aerosync"
 rust-version = "1.89"
 
 [workspace.dependencies]
-# Sole inter-crate dep: aerosync-mcp depends on aerosync (lib).
+# Inter-crate deps within this workspace.
 aerosync = { path = ".", version = "0.1.0" }
+aerosync-proto = { path = "aerosync-proto", version = "0.1.0" }
+# Wire-protocol stack (RFC-002). prost / prost-build are pinned at the
+# workspace level so aerosync-proto and any future consumer (e.g. the
+# Python binding crate) reference the same versions.
+prost = "0.13"
+prost-build = "0.13"
+prost-types = "0.13"
 tokio = { version = "1.0", features = ["full"] }
 # quinn 0.11 + rustls 0.23 upgrade (fixes RUSTSEC-2026-0037 Quinn DoS and
 # unblocks rustls-pemfile 2 / rustls-pki-types migration).

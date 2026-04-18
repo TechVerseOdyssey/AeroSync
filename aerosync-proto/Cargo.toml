@@ -1,0 +1,40 @@
+[package]
+name = "aerosync-proto"
+description = "AeroSync wire protocol types (RFC-002 wire/v1) — generated from .proto via prost-build"
+keywords = ["aerosync", "protobuf", "wire", "protocol"]
+categories = ["network-programming", "encoding"]
+readme = "README.md"
+# `publish = false` until v0.2.0 cuts. Once we tag, this flips to true and
+# the crate ships to crates.io alongside `aerosync` and `aerosync-mcp`.
+publish = false
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "aerosync_proto"
+path = "src/lib.rs"
+
+[dependencies]
+prost = { workspace = true }
+# `Bytes` is the chosen mapping for protobuf `bytes` fields (see build.rs
+# `.bytes(["."])`). Pinned to the same major version as the `bytes` crate
+# used elsewhere in the workspace.
+bytes = "1"
+# `prost-types` provides Rust bindings for google.protobuf well-known
+# types (Timestamp, Duration, …). We use it via prost-build's
+# `extern_path` so generated code references `::prost_types::Timestamp`
+# instead of generating a duplicate copy under our own module.
+prost-types = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
+# `protoc-bin-vendored` ships a `protoc` binary so contributors do not
+# have to install one system-wide. The build script points
+# `prost_build` at this binary via the PROTOC env var.
+protoc-bin-vendored = "3"
