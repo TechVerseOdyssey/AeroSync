@@ -14,8 +14,11 @@
 /// startup observability. RFC-002 §11 ResumeStore-side persistence
 /// is explicitly OUT OF SCOPE for v0.2.0 (deferred to v0.2.1) — this
 /// module persists *history*, not resumable state.
+use crate::core::metadata::MetadataJson;
 use crate::{AeroSyncError, Result};
+use aerosync_proto::{Lifecycle, Metadata};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -93,6 +96,13 @@ pub struct HistoryEntry {
     /// Reason string when `receipt_state == Cancelled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_reason: Option<String>,
+    /// RFC-003 metadata envelope captured at send/receive time.
+    /// Stored as the JSON-shaped [`MetadataJson`] adapter so the
+    /// on-disk format is decoupled from the wire protobuf and remains
+    /// human-readable. Old JSONL records (pre-Week-4) round-trip
+    /// safely: the `serde(default)` makes the field implicit `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<MetadataJson>,
 }
 
 impl HistoryEntry {
@@ -134,6 +144,7 @@ impl HistoryEntry {
             acked_at: None,
             nack_reason: None,
             cancel_reason: None,
+            metadata: None,
         }
     }
 
@@ -169,6 +180,7 @@ impl HistoryEntry {
             acked_at: None,
             nack_reason: None,
             cancel_reason: None,
+            metadata: None,
         }
     }
 
@@ -179,9 +191,33 @@ impl HistoryEntry {
         self.receipt_id = Some(id);
         self
     }
+
+    /// Builder-style helper: attach the RFC-003 metadata envelope
+    /// (proto shape) to a freshly built entry. Internally projected
+    /// to [`MetadataJson`] for serde-friendly persistence.
+    pub fn with_metadata_proto(mut self, m: &Metadata) -> Self {
+        self.metadata = Some(MetadataJson::from_proto(m));
+        self
+    }
+
+    /// Builder-style helper: attach a [`MetadataJson`] directly. Used
+    /// by code paths that already hold the JSON shape (e.g. when
+    /// re-emitting a historical record).
+    pub fn with_metadata_json(mut self, m: MetadataJson) -> Self {
+        self.metadata = Some(m);
+        self
+    }
 }
 
 /// 传输历史查询过滤器
+///
+/// RFC-003 Group B extends this with metadata-aware filters
+/// (`metadata_eq`, `trace_id`, `lifecycle`, `since`, `until`). The
+/// query engine performs a **linear scan** over the JSONL file —
+/// `O(N)` on history size. This is acceptable up to the ~10K-record
+/// horizon at which RFC-003 §7 says we should migrate to SQLite. The
+/// SQLite migration is deferred to v0.2.1 by the w4-metadata plan;
+/// see `docs/protocol/metadata-v1.md` for the trade-off discussion.
 #[derive(Debug, Default, Clone)]
 pub struct HistoryQuery {
     /// 过滤方向（"send" / "receive"），None = 全部
@@ -192,7 +228,29 @@ pub struct HistoryQuery {
     pub success_only: bool,
     /// 最多返回 N 条（0 = 不限）
     pub limit: usize,
+    /// All `(k, v)` pairs in this map MUST be present in the entry's
+    /// `metadata.user_metadata` for the entry to match. Empty map ⇒
+    /// no constraint.
+    pub metadata_eq: HashMap<String, String>,
+    /// Match only entries whose `metadata.trace_id` equals this. None
+    /// ⇒ no constraint. An entry with no metadata never matches a
+    /// non-`None` value.
+    pub trace_id: Option<String>,
+    /// Match only entries whose `metadata.lifecycle` equals this.
+    pub lifecycle: Option<Lifecycle>,
+    /// Match only entries with `completed_at >= since` (inclusive).
+    /// Compared against the chrono UTC timestamp; the underlying
+    /// `completed_at` is a Unix-second `u64`.
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Match only entries with `completed_at <= until` (inclusive).
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
 }
+
+/// Alias for [`HistoryQuery`] under the RFC-003 plan name. Both
+/// names reach the same type so callers can pick whichever reads
+/// better in context (`HistoryFilter` for metadata-driven searches,
+/// `HistoryQuery` for the legacy direction/protocol/success filters).
+pub type HistoryFilter = HistoryQuery;
 
 /// JSONL 格式传输历史存储
 pub struct HistoryStore {
@@ -255,6 +313,12 @@ impl HistoryStore {
     }
 
     /// 按条件查询历史记录（结果按 completed_at 降序）
+    ///
+    /// Linear scan over the JSONL file. Filters are applied in the
+    /// order: direction → protocol → success → metadata → time
+    /// window, then sorted by `completed_at` descending and
+    /// truncated to `limit`. See [`HistoryQuery`] for the per-field
+    /// semantics and the SQLite-migration trade-off note.
     pub async fn query(&self, q: &HistoryQuery) -> Result<Vec<HistoryEntry>> {
         let mut all = self.read_all().await?;
 
@@ -267,6 +331,54 @@ impl HistoryStore {
         if q.success_only {
             all.retain(|e| e.success);
         }
+        if !q.metadata_eq.is_empty() {
+            all.retain(|e| match &e.metadata {
+                Some(m) => q
+                    .metadata_eq
+                    .iter()
+                    .all(|(k, v)| m.user_metadata.get(k).map(|x| x == v).unwrap_or(false)),
+                None => false,
+            });
+        }
+        if let Some(ref tid) = q.trace_id {
+            all.retain(|e| {
+                e.metadata
+                    .as_ref()
+                    .and_then(|m| m.trace_id.as_deref())
+                    .map(|x| x == tid)
+                    .unwrap_or(false)
+            });
+        }
+        if let Some(lc) = q.lifecycle {
+            let target_label = match lc {
+                Lifecycle::Unspecified => None,
+                Lifecycle::Transient => Some("transient"),
+                Lifecycle::Durable => Some("durable"),
+                Lifecycle::Ephemeral => Some("ephemeral"),
+            };
+            if let Some(label) = target_label {
+                all.retain(|e| {
+                    e.metadata
+                        .as_ref()
+                        .and_then(|m| m.lifecycle.as_deref())
+                        .map(|x| x == label)
+                        .unwrap_or(false)
+                });
+            } else {
+                // `Lifecycle::Unspecified` is a "match anything with
+                // no lifecycle hint" probe — treat as no-op rather
+                // than silently dropping every record. This mirrors
+                // the proto-level meaning (default value).
+            }
+        }
+        if let Some(since) = q.since {
+            let cutoff = since.timestamp().max(0) as u64;
+            all.retain(|e| e.completed_at >= cutoff);
+        }
+        if let Some(until) = q.until {
+            let cutoff = until.timestamp().max(0) as u64;
+            all.retain(|e| e.completed_at <= cutoff);
+        }
 
         all.sort_by_key(|e| std::cmp::Reverse(e.completed_at));
 
@@ -274,6 +386,54 @@ impl HistoryStore {
             all.truncate(q.limit);
         }
         Ok(all)
+    }
+
+    /// Patch the [`Metadata`] envelope onto an existing record
+    /// identified by either its `HistoryEntry::id` or its
+    /// `receipt_id`. Returns `Ok(true)` when a record was updated,
+    /// `Ok(false)` when no record matched. `O(N)` rewrite, like
+    /// [`Self::record_receipt_terminal`] — same cost-and-cap caveat.
+    pub async fn write_metadata(&self, record_id: Uuid, metadata: &Metadata) -> Result<bool> {
+        let mut all = self.read_all().await?;
+        let json_form = MetadataJson::from_proto(metadata);
+        let mut patched = false;
+        for entry in all.iter_mut() {
+            if entry.id == record_id || entry.receipt_id == Some(record_id) {
+                entry.metadata = Some(json_form.clone());
+                patched = true;
+            }
+        }
+        if !patched {
+            return Ok(false);
+        }
+        self.rewrite_locked(&all).await?;
+        Ok(true)
+    }
+
+    /// Re-write the JSONL file with `entries` while holding the
+    /// append-handle lock. Used internally by
+    /// [`Self::record_receipt_terminal`] and [`Self::write_metadata`].
+    async fn rewrite_locked(&self, entries: &[HistoryEntry]) -> Result<()> {
+        let mut guard = self.file.lock().await;
+        let mut new = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.path)
+            .await?;
+        for e in entries {
+            let mut line = serde_json::to_string(e)
+                .map_err(|err| AeroSyncError::System(format!("History serialize: {err}")))?;
+            line.push('\n');
+            new.write_all(line.as_bytes()).await?;
+        }
+        new.flush().await?;
+        *guard = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .await?;
+        Ok(())
     }
 
     /// 最近 N 条记录
@@ -351,31 +511,8 @@ impl HistoryStore {
 
         // Re-serialise the whole store. Hold the file lock across the
         // truncate+write so concurrent appends can't interleave a
-        // half-written line. We deliberately re-open with truncate
-        // here (rather than mutating through the existing append
-        // handle) so the write path is unambiguous.
-        let mut guard = self.file.lock().await;
-        let new = tokio::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.path)
-            .await?;
-        let mut new = new;
-        for e in &all {
-            let mut line = serde_json::to_string(e)
-                .map_err(|err| AeroSyncError::System(format!("History serialize: {err}")))?;
-            line.push('\n');
-            new.write_all(line.as_bytes()).await?;
-        }
-        new.flush().await?;
-        // Replace the append handle so future appends extend the
-        // newly written file instead of the (now-stale) old fd.
-        *guard = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .await?;
+        // half-written line.
+        self.rewrite_locked(&all).await?;
         Ok(true)
     }
 
@@ -920,6 +1057,253 @@ mod tests {
         let got = store.query_by_receipt(rid).await.unwrap().unwrap();
         assert_eq!(got.receipt_state, Some(ReceiptStateLabel::Nacked));
         assert_eq!(got.nack_reason.as_deref(), Some("bad payload"));
+    }
+
+    // ── RFC-003 Group B: metadata persistence + filtering tests ──────
+
+    use crate::core::metadata::MetadataBuilder;
+
+    fn meta_with(trace: &str, lifecycle: Lifecycle, k: &str, v: &str) -> Metadata {
+        let mut m = MetadataBuilder::new()
+            .trace_id(trace)
+            .lifecycle(lifecycle)
+            .user(k, v)
+            .build()
+            .unwrap();
+        m.id = Uuid::new_v4().to_string();
+        m.from_node = "alice".into();
+        m.to_node = "bob".into();
+        m.protocol = "quic".into();
+        m
+    }
+
+    #[tokio::test]
+    async fn test_old_jsonl_records_load_with_metadata_none() {
+        // Backfill safety: a JSONL line written before Group B (no
+        // `metadata` key) must deserialize cleanly with metadata =
+        // None. We hand-write the line so the test is independent of
+        // the current `success()` constructor's default.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let pre_b = format!(
+            "{{\"id\":\"{}\",\"filename\":\"old.bin\",\"saved_path\":null,\"size\":1,\"sha256\":null,\"remote_ip\":null,\"protocol\":\"http\",\"direction\":\"send\",\"completed_at\":1700000000,\"duration_ms\":1,\"avg_speed_bps\":1000,\"success\":true,\"error\":null}}\n",
+            Uuid::new_v4()
+        );
+        tokio::fs::write(&path, pre_b).await.unwrap();
+        let store = HistoryStore::new(&path).await.unwrap();
+        let all = store.read_all().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(all[0].metadata.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_with_metadata_round_trips_through_jsonl() {
+        let (store, _dir) = tmp_store().await;
+        let m = meta_with("run-1", Lifecycle::Transient, "tenant", "acme");
+        let entry = HistoryEntry::success("a.bin", None, 1, None, None, "quic", "send", 1)
+            .with_receipt_id(Uuid::new_v4())
+            .with_metadata_proto(&m);
+        store.append(entry.clone()).await.unwrap();
+
+        let reopened = HistoryStore::new(&store.path).await.unwrap();
+        let all = reopened.read_all().await.unwrap();
+        assert_eq!(all.len(), 1);
+        let got = all[0].metadata.as_ref().unwrap();
+        assert_eq!(got.trace_id.as_deref(), Some("run-1"));
+        assert_eq!(got.lifecycle.as_deref(), Some("transient"));
+        assert_eq!(got.user_metadata["tenant"], "acme");
+    }
+
+    #[tokio::test]
+    async fn test_query_filter_by_trace_id() {
+        let (store, _dir) = tmp_store().await;
+        for i in 0..3 {
+            let m = meta_with(
+                if i == 1 { "target" } else { "other" },
+                Lifecycle::Durable,
+                "k",
+                &format!("v{i}"),
+            );
+            let entry =
+                HistoryEntry::success(format!("f{i}.bin"), None, 1, None, None, "quic", "send", 1)
+                    .with_metadata_proto(&m);
+            store.append(entry).await.unwrap();
+        }
+
+        let q = HistoryFilter {
+            trace_id: Some("target".into()),
+            ..Default::default()
+        };
+        let res = store.query(&q).await.unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].filename, "f1.bin");
+    }
+
+    #[tokio::test]
+    async fn test_query_filter_by_lifecycle() {
+        let (store, _dir) = tmp_store().await;
+        for (i, lc) in [
+            Lifecycle::Transient,
+            Lifecycle::Durable,
+            Lifecycle::Ephemeral,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let m = meta_with("trace", lc, "k", "v");
+            let entry =
+                HistoryEntry::success(format!("f{i}.bin"), None, 1, None, None, "quic", "send", 1)
+                    .with_metadata_proto(&m);
+            store.append(entry).await.unwrap();
+        }
+        let res = store
+            .query(&HistoryFilter {
+                lifecycle: Some(Lifecycle::Durable),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].filename, "f1.bin");
+    }
+
+    #[tokio::test]
+    async fn test_query_filter_by_metadata_eq_requires_all_pairs() {
+        let (store, _dir) = tmp_store().await;
+        let mk = |i: usize, k1: &str, v1: &str, k2: &str, v2: &str| {
+            let m = MetadataBuilder::new()
+                .user(k1, v1)
+                .user(k2, v2)
+                .build()
+                .unwrap();
+            HistoryEntry::success(format!("f{i}.bin"), None, 1, None, None, "quic", "send", 1)
+                .with_metadata_proto(&m)
+        };
+        store.append(mk(0, "a", "1", "b", "2")).await.unwrap();
+        store.append(mk(1, "a", "1", "b", "3")).await.unwrap();
+        store.append(mk(2, "a", "9", "b", "2")).await.unwrap();
+
+        let mut want = HashMap::new();
+        want.insert("a".into(), "1".into());
+        want.insert("b".into(), "2".into());
+        let res = store
+            .query(&HistoryFilter {
+                metadata_eq: want,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].filename, "f0.bin");
+    }
+
+    #[tokio::test]
+    async fn test_query_filter_since_until_window() {
+        let (store, _dir) = tmp_store().await;
+        // Hand-craft entries with explicit completed_at so the test
+        // is deterministic regardless of wall-clock at write time.
+        for ts in [1_700_000_000u64, 1_700_001_000, 1_700_002_000] {
+            let mut e =
+                HistoryEntry::success(format!("t{ts}"), None, 1, None, None, "h", "send", 1);
+            e.completed_at = ts;
+            store.append(e).await.unwrap();
+        }
+        let since = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_500, 0).unwrap();
+        let until = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_001_500, 0).unwrap();
+        let res = store
+            .query(&HistoryFilter {
+                since: Some(since),
+                until: Some(until),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].filename, "t1700001000");
+    }
+
+    #[tokio::test]
+    async fn test_query_filter_no_metadata_does_not_match_trace_id() {
+        let (store, _dir) = tmp_store().await;
+        store
+            .append(HistoryEntry::success(
+                "plain.bin",
+                None,
+                1,
+                None,
+                None,
+                "h",
+                "send",
+                1,
+            ))
+            .await
+            .unwrap();
+        let res = store
+            .query(&HistoryFilter {
+                trace_id: Some("anything".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(res.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_write_metadata_patches_existing_record() {
+        let (store, _dir) = tmp_store().await;
+        let rid = Uuid::new_v4();
+        let entry = HistoryEntry::success("x.bin", None, 1, None, None, "quic", "send", 1)
+            .with_receipt_id(rid);
+        store.append(entry).await.unwrap();
+
+        let m = meta_with("late-trace", Lifecycle::Ephemeral, "k", "v");
+        let patched = store.write_metadata(rid, &m).await.unwrap();
+        assert!(patched);
+
+        let got = store.query_by_receipt(rid).await.unwrap().unwrap();
+        let meta = got.metadata.as_ref().unwrap();
+        assert_eq!(meta.trace_id.as_deref(), Some("late-trace"));
+        assert_eq!(meta.lifecycle.as_deref(), Some("ephemeral"));
+    }
+
+    #[tokio::test]
+    async fn test_write_metadata_returns_false_for_unknown_id() {
+        let (store, _dir) = tmp_store().await;
+        let m = meta_with("t", Lifecycle::Durable, "k", "v");
+        let patched = store.write_metadata(Uuid::new_v4(), &m).await.unwrap();
+        assert!(!patched);
+    }
+
+    #[tokio::test]
+    async fn test_write_metadata_then_query_by_metadata_eq() {
+        // End-to-end: a transfer is written without metadata first
+        // (e.g. legacy adapter), Group B's `write_metadata` adds it
+        // after the fact, and a metadata-aware query then surfaces
+        // the patched record.
+        let (store, _dir) = tmp_store().await;
+        let rid = Uuid::new_v4();
+        let entry = HistoryEntry::success("late.bin", None, 1, None, None, "quic", "send", 1)
+            .with_receipt_id(rid);
+        store.append(entry).await.unwrap();
+
+        let m = MetadataBuilder::new()
+            .trace_id("after")
+            .user("tenant", "acme")
+            .build()
+            .unwrap();
+        store.write_metadata(rid, &m).await.unwrap();
+
+        let mut want = HashMap::new();
+        want.insert("tenant".into(), "acme".into());
+        let res = store
+            .query(&HistoryFilter {
+                metadata_eq: want,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].filename, "late.bin");
     }
 
     #[tokio::test]

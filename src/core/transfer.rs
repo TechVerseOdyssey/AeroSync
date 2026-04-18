@@ -449,7 +449,7 @@ impl TransferEngine {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            let entry = HistoryEntry::success(
+            let mut entry = HistoryEntry::success(
                 filename,
                 None,
                 task.file_size,
@@ -464,6 +464,13 @@ impl TransferEngine {
                 0,
             )
             .with_receipt_id(receipt_id);
+            // Attach the sealed metadata envelope so `aerosync history`
+            // and the MCP `query_history` tool can filter by trace id /
+            // user_metadata even after the in-engine `sealed_metadata`
+            // map has been GC'd at terminal.
+            if let Some(sealed) = self.sealed_metadata.read().await.get(&receipt_id) {
+                entry = entry.with_metadata_proto(sealed);
+            }
             store.append_silent(entry).await;
             store.spawn_watch_bridge(Arc::clone(&receipt));
         }

@@ -31,7 +31,7 @@ pub use capabilities::{
 pub use discovery::{AeroSyncMdns, AeroSyncPeer, MdnsHandle, MDNS_SERVICE_TYPE};
 pub use error::{AeroSyncError, Result};
 pub use file_manager::{FileInfo, FileManager};
-pub use history::{HistoryEntry, HistoryQuery, HistoryStore, ReceiptStateLabel};
+pub use history::{HistoryEntry, HistoryFilter, HistoryQuery, HistoryStore, ReceiptStateLabel};
 pub use incoming_file::IncomingFile;
 pub use metadata::{
     empty_metadata, label_to_lifecycle, lifecycle_to_label, validate_sealed as validate_metadata,
