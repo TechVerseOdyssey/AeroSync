@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (v0.2.0 — Metadata Envelope, RFC-003)
+- **Metadata Envelope (RFC-003)**: every transfer can now carry a
+  structured `Metadata` message with system fields (`id`, `from_node`,
+  `to_node`, `created_at`, `content_type`, `size_bytes`, `sha256`,
+  `file_name`, `protocol`), well-known fields (`trace_id`,
+  `conversation_id`, `parent_file_ids`, `expires_at`, `lifecycle`,
+  `correlation_id`) and free-form `user_metadata` (`map<string,string>`).
+  See [`docs/protocol/metadata-v1.md`](docs/protocol/metadata-v1.md).
+- `aerosync::core::metadata::MetadataBuilder` — programmatic builder
+  with eager validation: 64 KiB envelope cap, 256 user entries, 128-byte
+  keys, 16 KiB values, 64 parent ids, 1024-byte file names, UTF-8
+  enforcement, oversized-input typed errors (`MetadataError`).
+- `aerosync::core::sniff::sniff_content_type` — automatic content-type
+  detection via `infer` (magic bytes) with `mime_guess` (extension)
+  fallback; default `application/octet-stream`.
+- `TransferEngine::send_with_metadata` — accepts a caller-built
+  envelope; system fields (`id`, `from_node`, `created_at`, `sha256`,
+  `size_bytes`, `content_type`, `file_name`, `protocol`) are sealed in
+  by the engine and cannot be spoofed via `user_metadata`.
+- `IncomingFile::metadata()` — receivers can read the envelope on the
+  ack channel.
+- `HistoryStore` extension — every JSONL record now persists a
+  `MetadataJson` mirror of the proto (additive, backward-compatible
+  with pre-v0.2.0 records, no `null` written when absent).
+- `HistoryStore::query(&HistoryFilter)` — linear-scan filtering by
+  `metadata_eq`, `trace_id`, `lifecycle`, `since`, `until` on top of
+  existing direction/protocol/success filters. Indexed lookup is
+  deferred to v0.2.1 (SQLite migration).
+- CLI `aerosync send` flags: `--meta key=value` (repeatable),
+  `--trace-id`, `--conversation-id`, `--parent`, `--lifecycle`,
+  `--correlation-id`, `--content-type`.
+- CLI `aerosync history` flags: `--meta key=value` (repeatable),
+  `--trace-id`, `--lifecycle`, `--since`, `--until`. Output now
+  includes `trace_id` and a compact `user_metadata` summary.
+- MCP tools `send_file` / `send_directory`: optional `metadata`,
+  `trace_id`, `conversation_id`, `parent_file_ids`, `lifecycle`,
+  `correlation_id`, `content_type` parameters.
+- MCP tool `list_history`: optional `metadata_filter`, `trace_id`,
+  `lifecycle`, `since`, `until` parameters; response now includes the
+  full `MetadataJson` per record and a top-level `trace_id` shortcut.
+- Reference doc `docs/protocol/metadata-v1.md` and 5 new
+  metadata-focused integration tests in `tests/metadata_e2e.rs`
+  (roundtrip, persistence, lineage, oversize rejection, system-field
+  anti-spoofing).
+
+### Notes & known limitations (v0.2.0)
+- The `Metadata` message is **not yet wired into the QUIC
+  `TransferStart` frame** end-to-end; the envelope is sealed in the
+  sender engine and surfaced via `Acked.metadata` and the JSONL
+  history. Full `TransferStart` integration ships with the upcoming
+  `quic_receipt` task.
+- `HistoryStore::query` is an `O(N)` scan over the JSONL file. It is
+  fine for thousands of records but will be replaced by the SQLite
+  backend in v0.2.1.
+- `expires_at` is a **hint only** — no enforcement in v0.2.
+- The Python SDK does not yet expose a `metadata=` keyword argument
+  (deferred to `w5-py-phase1a`); raw `metadata_json` is exposed in the
+  meantime.
+
 ### Changed (v0.2.0 prep — TLS stack modernization)
 - Upgraded QUIC transport to `quinn 0.11` (from 0.10), which required
   reworking `ClientConfig::new` to wrap rustls via
