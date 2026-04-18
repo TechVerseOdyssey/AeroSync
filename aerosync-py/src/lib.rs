@@ -98,18 +98,39 @@ fn make_receiver(
     Ok(PyReceiver::new(inner, name, address))
 }
 
-/// Async iterator factory: `aerosync.discover(timeout=5.0)`.
+/// `await aerosync.discover(timeout=5.0)` — returns a list of [`PyPeer`].
 ///
-/// Group A stub returns an empty list; the real mDNS-backed
-/// async-iterator wiring lands in Group C (RFC-001 task #7).
+/// RFC-001 §5.1 types this as `AsyncIterator[Peer]` for forward
+/// compatibility with a streaming rendezvous backend in v0.3+. The
+/// current engine surface (`AeroSyncMdns::discover` in
+/// `src/core/discovery.rs`) only collects results in batches: it
+/// runs the mDNS scan + localhost probe for the full timeout
+/// window then returns a `Vec`. Exposing that as an async iterator
+/// here would synthesize an iterator over an already-materialized
+/// list — strictly worse ergonomics than just returning the list
+/// since `async for` over it would never yield mid-stream.
+///
+/// We therefore ship the v0.2 binding as `Awaitable[list[Peer]]`.
+/// Users who want iteration write `for peer in await discover(): ...`.
+/// Migrating to a true `AsyncIterator` is a non-breaking change
+/// once the rendezvous client lands (v0.3, RFC-001 §10).
+///
+/// `timeout` (seconds, default 5.0) bounds the mDNS listen window.
+/// Values <= 0 or non-finite are rejected with `ValueError`.
 #[pyfunction]
 #[pyo3(signature = (timeout=5.0))]
 fn discover(py: Python<'_>, timeout: f64) -> PyResult<Bound<'_, PyAny>> {
+    use pyo3::exceptions::PyValueError;
+    if !timeout.is_finite() || timeout <= 0.0 {
+        return Err(PyValueError::new_err(
+            "timeout must be a finite positive number of seconds",
+        ));
+    }
+    let dur = std::time::Duration::from_secs_f64(timeout);
     runtime::future_into_py(py, async move {
-        // Group A stub — Group C replaces this with a real
-        // AeroSyncMdns::discover call wrapped in an async iterator.
-        let _ = timeout;
-        Ok(Vec::<PyPeer>::new())
+        let peers = aerosync::core::AeroSyncMdns::discover(dur).await;
+        let py_peers: Vec<PyPeer> = peers.into_iter().map(PyPeer::from).collect();
+        Ok(py_peers)
     })
 }
 
