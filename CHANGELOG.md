@@ -66,6 +66,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (deferred to `w5-py-phase1a`); raw `metadata_json` is exposed in the
   meantime.
 
+### Added (v0.2.0 — Python SDK, RFC-001)
+- **Python SDK package `aerosync`** (PyO3 + `pyo3-async-runtimes`): a
+  fully async public surface (`client()`, `receiver()`, `discover()`)
+  built on the existing Rust core. RFC-001 §5.
+- `aerosync.Config` dataclass + `Config.from_dict` / `from_toml` /
+  `from_default`. Loads from `~/.aerosync/config.toml` by default;
+  applies `auth_token` (zeroized), `state_dir`, `log_level`,
+  `chunk_size_default`, `timeout_default` to the underlying engine.
+  `tomli` is pulled in only on Python <3.11. RFC-001 §5.7 / #11.
+- Strict typing: `mypy --strict` green, hand-maintained `_native.pyi`
+  stubs, PEP 561 `py.typed` marker, `ruff check` green. New
+  `.github/workflows/python.yml` CI job runs all three on every PR.
+  RFC-001 §13 #17.
+- pytest expansion: 90 passing + 2 skipped (parked against v0.2.1
+  with explicit reason strings). Covers Config, history, metadata
+  validation, receiver lifecycle, discover, and the existing
+  client / receipt / send-source surface. RFC-001 §13 #18.
+- **Wheel matrix CI** (`.github/workflows/python-release.yml`):
+  abi3-py39 wheels for macOS x86_64, macOS aarch64, Linux glibc
+  x86_64 + aarch64 (`manylinux_2_17`), Linux musl x86_64
+  (`musllinux_1_1`), and Windows x86_64. sdist also built. All wheels
+  are smoke-tested with `python -c "import aerosync; aerosync.version()"`
+  on the build host before upload. RFC-001 §13 #19.
+- **PyPI Trusted Publisher** (OIDC) workflow + checklist: see
+  [`docs/python/RELEASE-CHECKLIST.md`](docs/python/RELEASE-CHECKLIST.md)
+  for the one-time setup (PyPI / TestPyPI publisher config, GitHub
+  Environments) and per-release dance (TestPyPI dry run → tag → PyPI
+  publish via `pypa/gh-action-pypi-publish`). No API tokens stored
+  anywhere. RFC-001 §13 #20.
+
+### Notes & known limitations (Python SDK v0.2.0)
+- `Config.rendezvous_url` is accepted but currently a no-op
+  (rendezvous transport lands in v0.2.1).
+- mypy's `python_version` is set to `"3.10"` even though the wheels
+  target `>=3.9`; `dataclass(slots=True)` is not modelled by mypy on
+  3.9. This is a static-analysis-only quirk (the runtime is fine on
+  3.9 via `__slots__`); proper 3.9 mypy support is filed against
+  v0.2.1.
+- Receiver `address` echoes the user-supplied "host:port" string;
+  the OS-assigned port is not yet surfaced back to Python.
+- Empty-iter timeout on `async for f in receiver` requires an
+  engine-side idle knob (also v0.2.1).
+- Windows-on-ARM and musllinux-aarch64 wheels are deferred from the
+  v0.2.0 matrix; see comments inline in `python-release.yml`.
+
 ### Changed (v0.2.0 prep — TLS stack modernization)
 - Upgraded QUIC transport to `quinn 0.11` (from 0.10), which required
   reworking `ClientConfig::new` to wrap rustls via
