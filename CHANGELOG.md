@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tag-triggered builds for macOS (x86_64 + aarch64), Linux (x86_64 +
   aarch64 musl) and Windows (x86_64), uploaded to GitHub Releases.
 - `cargo-deny` and `cargo-audit` jobs in CI, plus an MSRV check
-  (Rust 1.82).
+  (Rust 1.89).
 - `install.sh` one-line installer and a Homebrew formula template under
   `docs/install/`.
 - README comparison table vs `scp` / `rsync` / `croc` / `rclone` and a

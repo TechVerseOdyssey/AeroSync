@@ -33,7 +33,7 @@ brew tap TechVerseOdyssey/aerosync
 brew install aerosync
 ```
 
-## 3. Cargo (any platform with Rust ≥ 1.82)
+## 3. Cargo (any platform with Rust ≥ 1.89)
 
 ```bash
 cargo install --locked aerosync          # CLI only

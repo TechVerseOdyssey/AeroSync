@@ -12,7 +12,7 @@ cargo build --workspace --all-targets
 cargo test  --workspace --all-targets
 ```
 
-The MSRV is **Rust 1.82**. CI verifies this on every PR.
+The MSRV is **Rust 1.89**. CI verifies this on every PR.
 
 ## Project layout
 

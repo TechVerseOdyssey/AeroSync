@@ -62,7 +62,7 @@ license = "MIT"
 repository = "https://github.com/TechVerseOdyssey/AeroSync"
 homepage = "https://github.com/TechVerseOdyssey/AeroSync"
 documentation = "https://docs.rs/aerosync"
-rust-version = "1.82"
+rust-version = "1.89"
 
 [workspace.dependencies]
 tokio = { version = "1.0", features = ["full"] }

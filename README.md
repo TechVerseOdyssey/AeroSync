@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/TechVerseOdyssey/AeroSync/actions/workflows/rust.yml/badge.svg)](https://github.com/TechVerseOdyssey/AeroSync/actions/workflows/rust.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org)
+[![MSRV](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org)
 [![Crates.io](https://img.shields.io/crates/v/aerosync.svg)](https://crates.io/crates/aerosync)
 
 > **AI-native file transfer.** A fast Rust CLI **and** an MCP server — let Claude, ChatGPT, Cursor or your own agent move files between machines as easily as `scp`, with automatic QUIC upgrade, resumable chunked uploads and zero infrastructure.
@@ -37,7 +37,7 @@ Designed for the use case nothing else covers cleanly: **one agent on machine A 
 
 ## Install
 
-### From source (any platform with Rust ≥ 1.82)
+### From source (any platform with Rust ≥ 1.89)
 
 ```bash
 git clone https://github.com/TechVerseOdyssey/AeroSync.git

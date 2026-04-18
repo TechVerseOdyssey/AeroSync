@@ -53,11 +53,11 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   msrv:
-    name: MSRV (1.82)
+    name: MSRV (1.89)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82
+      - uses: dtolnay/rust-toolchain@1.89
       - uses: Swatinem/rust-cache@v2
         with:
           key: ci-msrv
