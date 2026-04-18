@@ -4,6 +4,7 @@
 //! 5. TaskStore round-trip — persist → reload → states survive simulated restart
 
 use aerosync_mcp::{
+    recovery::recover_pending_transfers,
     server::{AeroSyncMcpServer, BackgroundTaskStatus, McpConfig, SendFileParams, TaskEntry},
     task_store::TaskStore,
 };
@@ -444,6 +445,169 @@ async fn test_send_file_keeps_resume_path_after_failure() {
         resume_path.is_some(),
         "失败状态下 resume_json_path 必须保留，便于下次启动续传"
     );
+}
+
+// ── P3b recovery.rs 单测：进程重启后的断点续传恢复 ──────────────────────────
+
+/// 空 TaskStore 调用 recover 必须返回 0，且不 panic。
+#[tokio::test]
+async fn test_recover_empty_store_returns_zero() {
+    let dir = tempdir().unwrap();
+    let aerosync_dir = dir.path().to_path_buf();
+    let db_path = aerosync_dir.join("tasks.db");
+    let store = Arc::new(TaskStore::open(&db_path).unwrap());
+
+    let server = AeroSyncMcpServer::new()
+        .with_task_store(Arc::clone(&store))
+        .with_aerosync_dir(aerosync_dir.clone());
+
+    let count = recover_pending_transfers(&server, store, &aerosync_dir).await;
+    assert_eq!(count, 0);
+}
+
+/// 已经全部完成的 ResumeState（所有分片 done）：recover 必须直接标记 Completed
+/// 并删除 JSON 文件，避免重复传输。
+#[tokio::test]
+async fn test_recover_marks_already_complete_state_as_completed() {
+    use aerosync_core::resume::{ResumeState, ResumeStore};
+
+    let dir = tempdir().unwrap();
+    let aerosync_dir = dir.path().to_path_buf();
+    let db_path = aerosync_dir.join("tasks.db");
+    let store = Arc::new(TaskStore::open(&db_path).unwrap());
+
+    // 构造一个"已完成"的 ResumeState（单分片 + 已 mark_chunk_done(0)）
+    let task_id = Uuid::new_v4();
+    let chunk_size = 32 * 1024 * 1024_u64;
+    let mut state = ResumeState::new(
+        task_id,
+        aerosync_dir.join("dummy.bin"),
+        "http://h/upload".to_string(),
+        chunk_size,
+        chunk_size,
+        None,
+    );
+    state.mark_chunk_done(0);
+    assert!(state.is_complete());
+
+    // 用 ResumeStore 落盘到 {aerosync_dir}/.aerosync/{task_id}.json
+    let resume_store = ResumeStore::new(&aerosync_dir);
+    resume_store.save(&state).await.unwrap();
+    let resume_json = aerosync_dir.join(".aerosync").join(format!("{}.json", task_id));
+    assert!(resume_json.exists(), "fixture: ResumeStore 应已写入 JSON");
+
+    // TaskStore 注册一个 Pending 任务并指向该 JSON
+    store
+        .upsert_with_resume(
+            task_id,
+            &TaskEntry {
+                status: BackgroundTaskStatus::Pending,
+                description: "recover-complete fixture".to_string(),
+                last_updated: Instant::now(),
+            },
+            Some(&resume_json),
+        )
+        .await;
+
+    let server = AeroSyncMcpServer::new()
+        .with_task_store(Arc::clone(&store))
+        .with_aerosync_dir(aerosync_dir.clone());
+
+    let count = recover_pending_transfers(&server, Arc::clone(&store), &aerosync_dir).await;
+    assert_eq!(count, 1, "已完成的任务也算一次 recovered（直接归档）");
+
+    // registry 中状态必须是 Completed
+    let guard = server.tasks_registry().lock().await;
+    match &guard.get(&task_id).expect("task should be in registry").status {
+        BackgroundTaskStatus::Completed { bytes, .. } => {
+            assert_eq!(*bytes, chunk_size, "Completed.bytes 应等于 total_size");
+        }
+        other => panic!("expected Completed, got {:?}", other),
+    }
+    drop(guard);
+
+    // JSON 文件必须已被删除（防止重复扫描）
+    assert!(!resume_json.exists(), "已完成任务的 ResumeState JSON 必须被清理");
+}
+
+/// 损坏的 ResumeState JSON（无法解析）：recover 必须将任务标为 Failed
+/// 并附带 "parse error" 错误信息，且不计入 recovered 数量（无 spawn）。
+#[tokio::test]
+async fn test_recover_handles_malformed_resume_json() {
+    let dir = tempdir().unwrap();
+    let aerosync_dir = dir.path().to_path_buf();
+    let db_path = aerosync_dir.join("tasks.db");
+    let store = Arc::new(TaskStore::open(&db_path).unwrap());
+
+    // 写入一个非法 JSON 到预期的 resume 路径
+    let resume_subdir = aerosync_dir.join(".aerosync");
+    tokio::fs::create_dir_all(&resume_subdir).await.unwrap();
+    let task_id = Uuid::new_v4();
+    let resume_json = resume_subdir.join(format!("{}.json", task_id));
+    tokio::fs::write(&resume_json, b"this is not valid json {").await.unwrap();
+
+    store
+        .upsert_with_resume(
+            task_id,
+            &TaskEntry {
+                status: BackgroundTaskStatus::Pending,
+                description: "malformed-json fixture".to_string(),
+                last_updated: Instant::now(),
+            },
+            Some(&resume_json),
+        )
+        .await;
+
+    let server = AeroSyncMcpServer::new()
+        .with_task_store(Arc::clone(&store))
+        .with_aerosync_dir(aerosync_dir.clone());
+
+    let count = recover_pending_transfers(&server, Arc::clone(&store), &aerosync_dir).await;
+    assert_eq!(count, 0, "解析失败的任务不应计入 recovered（未 spawn）");
+
+    let guard = server.tasks_registry().lock().await;
+    match &guard.get(&task_id).expect("task should still be tracked").status {
+        BackgroundTaskStatus::Failed(msg) => {
+            assert!(
+                msg.contains("recovery failed") && msg.contains("parse error"),
+                "失败信息应明确指出 parse error，实际：{}",
+                msg
+            );
+        }
+        other => panic!("expected Failed, got {:?}", other),
+    }
+}
+
+/// JSON 文件已被外部清理：load_resumable 已经过滤；recover 应得到 0。
+/// 这一行为锁定了 TaskStore 与 recovery 之间的契约。
+#[tokio::test]
+async fn test_recover_skips_tasks_with_missing_resume_json() {
+    let dir = tempdir().unwrap();
+    let aerosync_dir = dir.path().to_path_buf();
+    let db_path = aerosync_dir.join("tasks.db");
+    let store = Arc::new(TaskStore::open(&db_path).unwrap());
+
+    let task_id = Uuid::new_v4();
+    let ghost_path = aerosync_dir.join(".aerosync").join(format!("{}.json", task_id));
+    // 故意不创建文件
+    store
+        .upsert_with_resume(
+            task_id,
+            &TaskEntry {
+                status: BackgroundTaskStatus::Pending,
+                description: "ghost fixture".to_string(),
+                last_updated: Instant::now(),
+            },
+            Some(&ghost_path),
+        )
+        .await;
+
+    let server = AeroSyncMcpServer::new()
+        .with_task_store(Arc::clone(&store))
+        .with_aerosync_dir(aerosync_dir.clone());
+
+    let count = recover_pending_transfers(&server, Arc::clone(&store), &aerosync_dir).await;
+    assert_eq!(count, 0, "JSON 文件不存在的任务必须被跳过");
 }
 
 // ── P3a 配置统一：超时/TTL 默认值与环境变量覆盖 ──────────────────────────────
