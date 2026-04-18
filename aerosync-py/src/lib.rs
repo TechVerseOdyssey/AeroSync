@@ -36,6 +36,7 @@ use pyo3::prelude::*;
 
 pub mod client;
 pub mod errors;
+pub mod exceptions;
 pub mod receipt;
 pub mod receiver;
 pub mod records;
@@ -154,6 +155,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPeer>()?;
     m.add_class::<PyProgress>()?;
     m.add_class::<PyHistoryEntry>()?;
+
+    exceptions::register(m)?;
 
     Ok(())
 }
