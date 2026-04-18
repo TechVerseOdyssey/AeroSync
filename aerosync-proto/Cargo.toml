@@ -4,9 +4,10 @@ description = "AeroSync wire protocol types (RFC-002 wire/v1) — generated from
 keywords = ["aerosync", "protobuf", "wire", "protocol"]
 categories = ["network-programming", "encoding"]
 readme = "README.md"
-# `publish = false` until v0.2.0 cuts. Once we tag, this flips to true and
-# the crate ships to crates.io alongside `aerosync` and `aerosync-mcp`.
-publish = false
+# Published to crates.io alongside `aerosync` and `aerosync-mcp` from
+# v0.2.0 onward. `aerosync-mcp` and (downstream) `aerosync` consume the
+# wire types from this crate, so it MUST publish first in the release
+# order — see `docs/RELEASE-v0.2.0.md`.
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

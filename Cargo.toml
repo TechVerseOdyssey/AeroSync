@@ -4,6 +4,22 @@ description = "Fast, agent-friendly file transfer with auto protocol negotiation
 keywords = ["file-transfer", "mcp", "quic", "cli", "agent"]
 categories = ["command-line-utilities", "network-programming"]
 readme = "README.md"
+# Drop repo-level files that would otherwise leak into the published
+# tarball. The defaults pull everything that's not gitignored, which
+# for a workspace-root crate sweeps up `.cursor/` IDE state, `.github/`
+# CI config, internal review/handoff docs, and one-off shell scripts.
+# Users `cargo install aerosync` should only see crate sources + the
+# user-facing README/CHANGELOG/LICENSE.
+exclude = [
+    ".cursor/**",
+    ".github/**",
+    "CRITICAL_REQUIREMENTS.md",
+    "PRODUCT_REVIEW.md",
+    "TODO.local.md",
+    "demo_fix_verification.sh",
+    "docs/rfcs/**",
+    "terminals/**",
+]
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
