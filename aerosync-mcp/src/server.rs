@@ -60,20 +60,32 @@ fn evict_expired(registry: &mut HashMap<Uuid, TaskEntry>) {
 
 // ─────────────────────── 工具参数结构体 ────────────────────────────────────
 
+// ── MCP 本地认证字段约定 ──────────────────────────────────────────────────────
+//
+// 所有工具入参都暴露 `mcp_auth_token` 字段。仅当服务器侧设置了
+// `AEROSYNC_MCP_SECRET` 环境变量时才校验；未设置时该字段被忽略。
+//
+// 注意：与 `start_receiver`/`send_file` 的 `auth_token` 含义不同——
+// 后者是**远端接收端**的认证 Token（HMAC-SHA256），通过网络传输；
+// 前者保护**本地** MCP 通道，避免恶意客户端在 stdio 上对 MCP 服务调用文件操作。
+//
+// 历史命名 `_auth_token` 通过 `serde(alias)` 兼容旧调用方，避免破坏。
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendFileParams {
     /// 源文件的绝对或相对路径
     pub source: String,
     /// 目标地址：host:port 或 http://host:port/upload 或 s3://bucket/key
     pub destination: String,
-    /// 认证 Token（可选）
+    /// 远端接收端的认证 Token（可选；与 mcp_auth_token 不同）
     pub token: Option<String>,
     /// 跳过 SHA-256 完整性校验（默认 false）
     pub no_verify: Option<bool>,
     /// 上传限速，如 "10MB"、"512KB"（可选）
     pub limit: Option<String>,
-    /// MCP 服务器本地认证 Token（当 AEROSYNC_MCP_SECRET 设置时必填）
-    pub _auth_token: Option<String>,
+    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    #[serde(default, alias = "_auth_token")]
+    pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -82,12 +94,13 @@ pub struct SendDirectoryParams {
     pub source: String,
     /// 目标地址
     pub destination: String,
-    /// 认证 Token（可选）
+    /// 远端接收端的认证 Token（可选；与 mcp_auth_token 不同）
     pub token: Option<String>,
     /// 跳过 SHA-256 完整性校验（默认 false）
     pub no_verify: Option<bool>,
-    /// MCP 服务器本地认证 Token
-    pub _auth_token: Option<String>,
+    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    #[serde(default, alias = "_auth_token")]
+    pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -98,7 +111,7 @@ pub struct StartReceiverParams {
     pub quic_port: Option<u16>,
     /// 文件保存目录（默认 ./received）
     pub save_to: Option<String>,
-    /// 要求发送方携带此 Token（留空不启用认证）
+    /// 要求发送方携带此 Token（留空不启用认证；与 mcp_auth_token 不同）
     pub auth_token: Option<String>,
     /// 允许覆盖同名文件（默认 false）
     pub overwrite: Option<bool>,
@@ -106,8 +119,9 @@ pub struct StartReceiverParams {
     pub https: Option<bool>,
     /// HTTPS 监听端口（默认 7790）
     pub https_port: Option<u16>,
-    /// MCP 服务器本地认证 Token
-    pub _auth_token: Option<String>,
+    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    #[serde(default, alias = "_auth_token")]
+    pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -120,30 +134,34 @@ pub struct ListHistoryParams {
     pub sent: Option<bool>,
     /// 只显示接收记录
     pub received: Option<bool>,
-    /// MCP 服务器本地认证 Token
-    pub _auth_token: Option<String>,
+    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    #[serde(default, alias = "_auth_token")]
+    pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DiscoverParams {
     /// 扫描等待时间（秒，默认 3）
     pub timeout: Option<u64>,
-    /// MCP 服务器本地认证 Token
-    pub _auth_token: Option<String>,
+    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    #[serde(default, alias = "_auth_token")]
+    pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetTransferStatusParams {
     /// send_file/send_directory 返回的 task_id
     pub task_id: String,
-    /// MCP 服务器本地认证 Token
-    pub _auth_token: Option<String>,
+    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    #[serde(default, alias = "_auth_token")]
+    pub mcp_auth_token: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct NoParams {
-    /// MCP 服务器本地认证 Token（当 AEROSYNC_MCP_SECRET 设置时必填）
-    pub _auth_token: Option<String>,
+    /// MCP 本地认证 Token（仅当 AEROSYNC_MCP_SECRET 设置时必填）
+    #[serde(default, alias = "_auth_token")]
+    pub mcp_auth_token: Option<String>,
 }
 
 // ────────────────────────── MCP Server ─────────────────────────────────────
@@ -241,9 +259,9 @@ impl AeroSyncMcpServer {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("send_file", &format!("source={} destination={}", params.source, params.destination)).await;
         }
-        if !self.check_auth(params._auth_token.as_deref()) {
+        if !self.check_auth(params.mcp_auth_token.as_deref()) {
             return Ok(CallToolResult::success(vec![Content::text(
-                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+                json!({"success": false, "error": "Unauthorized: invalid or missing mcp_auth_token"}).to_string()
             )]));
         }
         let source = std::path::PathBuf::from(&params.source);
@@ -420,9 +438,9 @@ impl AeroSyncMcpServer {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("send_directory", &format!("source={} destination={}", params.source, params.destination)).await;
         }
-        if !self.check_auth(params._auth_token.as_deref()) {
+        if !self.check_auth(params.mcp_auth_token.as_deref()) {
             return Ok(CallToolResult::success(vec![Content::text(
-                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+                json!({"success": false, "error": "Unauthorized: invalid or missing mcp_auth_token"}).to_string()
             )]));
         }
         let source = std::path::PathBuf::from(&params.source);
@@ -593,9 +611,9 @@ impl AeroSyncMcpServer {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("start_receiver", &format!("port={:?} save_to={:?}", params.port, params.save_to)).await;
         }
-        if !self.check_auth(params._auth_token.as_deref()) {
+        if !self.check_auth(params.mcp_auth_token.as_deref()) {
             return Ok(CallToolResult::success(vec![Content::text(
-                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+                json!({"success": false, "error": "Unauthorized: invalid or missing mcp_auth_token"}).to_string()
             )]));
         }
         let mut lock = self.receiver.lock().await;
@@ -669,9 +687,9 @@ impl AeroSyncMcpServer {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("stop_receiver", "").await;
         }
-        if !self.check_auth(params._auth_token.as_deref()) {
+        if !self.check_auth(params.mcp_auth_token.as_deref()) {
             return Ok(CallToolResult::success(vec![Content::text(
-                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+                json!({"success": false, "error": "Unauthorized: invalid or missing mcp_auth_token"}).to_string()
             )]));
         }
         let mut lock = self.receiver.lock().await;
@@ -702,9 +720,9 @@ impl AeroSyncMcpServer {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("get_receiver_status", "").await;
         }
-        if !self.check_auth(params._auth_token.as_deref()) {
+        if !self.check_auth(params.mcp_auth_token.as_deref()) {
             return Ok(CallToolResult::success(vec![Content::text(
-                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+                json!({"success": false, "error": "Unauthorized: invalid or missing mcp_auth_token"}).to_string()
             )]));
         }
         let lock = self.receiver.lock().await;
@@ -753,9 +771,9 @@ impl AeroSyncMcpServer {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("list_history", &format!("limit={:?}", params.limit)).await;
         }
-        if !self.check_auth(params._auth_token.as_deref()) {
+        if !self.check_auth(params.mcp_auth_token.as_deref()) {
             return Ok(CallToolResult::success(vec![Content::text(
-                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+                json!({"success": false, "error": "Unauthorized: invalid or missing mcp_auth_token"}).to_string()
             )]));
         }
         let store_path = HistoryStore::default_path();
@@ -828,9 +846,9 @@ impl AeroSyncMcpServer {
         if let Some(audit) = &self.audit {
             audit.log_tool_call("discover_receivers", &format!("timeout={:?}", params.timeout)).await;
         }
-        if !self.check_auth(params._auth_token.as_deref()) {
+        if !self.check_auth(params.mcp_auth_token.as_deref()) {
             return Ok(CallToolResult::success(vec![Content::text(
-                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+                json!({"success": false, "error": "Unauthorized: invalid or missing mcp_auth_token"}).to_string()
             )]));
         }
         let timeout = Duration::from_secs(params.timeout.unwrap_or(3));
@@ -866,9 +884,9 @@ impl AeroSyncMcpServer {
         &self,
         rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<GetTransferStatusParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if !self.check_auth(params._auth_token.as_deref()) {
+        if !self.check_auth(params.mcp_auth_token.as_deref()) {
             return Ok(CallToolResult::success(vec![Content::text(
-                json!({"success": false, "error": "Unauthorized: invalid or missing _auth_token"}).to_string()
+                json!({"success": false, "error": "Unauthorized: invalid or missing mcp_auth_token"}).to_string()
             )]));
         }
         let id = match Uuid::parse_str(&params.task_id) {

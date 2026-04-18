@@ -194,6 +194,41 @@ RUST_LOG=debug aerosync-mcp
 
 ## 安全注意事项
 
+### 两种 Token 的区别（务必区分）
+
+AeroSync MCP 涉及**两种语义完全不同的 Token**，不要混淆：
+
+| 字段名 | 作用层 | 谁来校验 | 何时必须 |
+|--------|--------|----------|----------|
+| `token` / `auth_token` | **远端接收端** | 接收端服务器（HMAC-SHA256） | 当对端启用认证时 |
+| `mcp_auth_token` | **本地 MCP 通道** | MCP Server 自身 | 当本机设置 `AEROSYNC_MCP_SECRET` 时 |
+
+- `token`（在 `send_file` / `send_directory` 中）和 `auth_token`（在 `start_receiver` 中）走网络发到对端
+- `mcp_auth_token` **不出本机**，仅用于阻止恶意进程通过 stdio 调用 MCP Server
+
+### 启用 MCP 本地认证
+
+在启动 MCP Server 前设置环境变量：
+
+```bash
+export AEROSYNC_MCP_SECRET="$(openssl rand -hex 32)"
+aerosync-mcp
+```
+
+之后每个工具调用必须带 `mcp_auth_token`：
+
+```json
+{
+  "source": "/tmp/x.zip",
+  "destination": "host:7788",
+  "mcp_auth_token": "<上面生成的密钥>"
+}
+```
+
+> **向后兼容**：旧客户端使用的字段名 `_auth_token` 通过 `serde(alias)` 仍可识别，但新代码请使用 `mcp_auth_token`。
+
+### 其他
+
 - `auth_token` 参数使用 HMAC-SHA256 认证，建议生产环境始终启用
 - MCP Server 本身运行在本地（stdio），不暴露网络端口
 - 接收端（`start_receiver`）会监听 `0.0.0.0`，生产部署时建议配置防火墙或使用 `auth_token`

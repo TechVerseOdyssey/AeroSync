@@ -349,7 +349,7 @@ async fn test_send_file_records_resume_path_in_sqlite() {
         token: None,
         no_verify: Some(true),
         limit: None,
-        _auth_token: None,
+        mcp_auth_token: None,
     };
 
     let _ = server
@@ -412,7 +412,7 @@ async fn test_send_file_keeps_resume_path_after_failure() {
         token: None,
         no_verify: Some(true),
         limit: None,
-        _auth_token: None,
+        mcp_auth_token: None,
     };
     let _ = server
         .send_file(rmcp::handler::server::wrapper::Parameters(params))
@@ -444,6 +444,34 @@ async fn test_send_file_keeps_resume_path_after_failure() {
         resume_path.is_some(),
         "失败状态下 resume_json_path 必须保留，便于下次启动续传"
     );
+}
+
+// ── 7. P2 改名向后兼容：_auth_token alias 必须仍然可解析 ──────────────────────
+
+/// 旧客户端使用 `_auth_token` 字段（P2 之前的命名），通过 serde alias
+/// 应仍能解析为 `mcp_auth_token`。
+#[test]
+fn test_legacy_auth_token_alias_still_deserializes() {
+    use aerosync_mcp::server::SendFileParams;
+
+    let json_old = r#"{
+        "source": "/tmp/x",
+        "destination": "http://h/upload",
+        "_auth_token": "secret-from-old-client"
+    }"#;
+    let params: SendFileParams = serde_json::from_str(json_old)
+        .expect("legacy _auth_token field should still deserialize via serde alias");
+    assert_eq!(params.mcp_auth_token.as_deref(), Some("secret-from-old-client"));
+    assert_eq!(params.source, "/tmp/x");
+
+    // 新命名同样工作
+    let json_new = r#"{
+        "source": "/tmp/x",
+        "destination": "http://h/upload",
+        "mcp_auth_token": "secret-from-new-client"
+    }"#;
+    let params: SendFileParams = serde_json::from_str(json_new).unwrap();
+    assert_eq!(params.mcp_auth_token.as_deref(), Some("secret-from-new-client"));
 }
 
 /// Multiple tasks with different statuses — all persisted and loaded correctly.
