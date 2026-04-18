@@ -7,6 +7,7 @@ pub mod error_advice;
 pub mod file_manager;
 pub mod history;
 pub mod incoming_file;
+pub mod metadata;
 pub mod metrics;
 pub mod preflight;
 pub mod progress;
@@ -16,6 +17,7 @@ pub mod receipts_http;
 pub mod resume;
 pub mod routing;
 pub mod server;
+pub mod sniff;
 pub mod transfer;
 
 pub use audit::{
@@ -31,6 +33,12 @@ pub use error::{AeroSyncError, Result};
 pub use file_manager::{FileInfo, FileManager};
 pub use history::{HistoryEntry, HistoryQuery, HistoryStore, ReceiptStateLabel};
 pub use incoming_file::IncomingFile;
+pub use metadata::{
+    empty_metadata, label_to_lifecycle, lifecycle_to_label, validate_sealed as validate_metadata,
+    MetadataBuilder, MetadataError, MetadataJson, MAX_FILE_NAME_BYTES, MAX_METADATA_BYTES,
+    MAX_PARENT_FILE_IDS, MAX_USER_METADATA_ENTRIES, MAX_USER_METADATA_KEY_BYTES,
+    MAX_USER_METADATA_VALUE_BYTES, SYSTEM_FIELD_NAMES,
+};
 pub use metrics::Metrics;
 pub use preflight::{preflight_check, probe_receiver, PreflightError, PreflightResult};
 pub use progress::{ProgressMonitor, TransferProgress, TransferStats};
@@ -47,4 +55,5 @@ pub use receipts_http::{
 pub use resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
 pub use routing::{Router, RouterConfig, RoutingRule};
 pub use server::{FileReceiver, ReceivedFile, ServerConfig, ServerStatus, TlsConfig};
+pub use sniff::{sniff_content_type, DEFAULT_CONTENT_TYPE, SNIFF_PEEK_BYTES};
 pub use transfer::{TransferConfig, TransferEngine, TransferTask};

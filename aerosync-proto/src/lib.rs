@@ -75,24 +75,76 @@ mod tests {
     }
 
     #[test]
-    fn transfer_start_roundtrip_with_field_six_reserved() {
-        // Per Week-1 spec, field number 6 inside TransferStart is
-        // reserved for the RFC-003 Metadata envelope (added Week 4).
-        // chunk_size therefore lives at field 5. If the proto file is
-        // ever reordered, this round-trip still passes, but the
-        // generated struct's field layout will change shape and break
-        // downstream code — which is the alarm we want.
+    fn transfer_start_roundtrip_without_metadata() {
+        // A TransferStart with no metadata envelope is still a valid
+        // RFC-002 frame. Legacy senders, smoke tests, and the
+        // pre-Week-4 test suite all rely on this. After Week 4 the
+        // engine always populates metadata, but the wire still
+        // accepts a bare frame.
         let ts = TransferStart {
             receipt_id: "r-1".into(),
             file_name: "f.bin".into(),
             size_bytes: 42,
             sha256: "ab".repeat(32),
+            metadata: None,
             chunk_size: 65_536,
         };
         let bytes = ts.encode_to_vec();
         let back = TransferStart::decode(bytes.as_slice()).expect("decode");
         assert_eq!(back.chunk_size, 65_536);
         assert_eq!(back.size_bytes, 42);
+        assert!(back.metadata.is_none());
+    }
+
+    #[test]
+    fn transfer_start_roundtrip_with_metadata() {
+        // Round-trip a populated Metadata envelope through
+        // TransferStart. Exercises the wire integration end-to-end at
+        // the protobuf layer.
+        let meta = Metadata {
+            id: "r-1".into(),
+            from_node: "alice".into(),
+            to_node: "bob".into(),
+            created_at: Some(prost_types::Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 0,
+            }),
+            content_type: "application/octet-stream".into(),
+            size_bytes: 42,
+            sha256: "ab".repeat(32),
+            file_name: "f.bin".into(),
+            protocol: "quic".into(),
+            trace_id: Some("run-7".into()),
+            conversation_id: None,
+            parent_file_ids: vec!["blob-a".into()],
+            expires_at: None,
+            lifecycle: Some(Lifecycle::Transient as i32),
+            correlation_id: None,
+            user_metadata: std::collections::HashMap::from([(
+                "tenant".to_string(),
+                "acme".to_string(),
+            )]),
+        };
+        let ts = TransferStart {
+            receipt_id: "r-1".into(),
+            file_name: "f.bin".into(),
+            size_bytes: 42,
+            sha256: "ab".repeat(32),
+            metadata: Some(meta.clone()),
+            chunk_size: 65_536,
+        };
+        let bytes = ts.encode_to_vec();
+        let back = TransferStart::decode(bytes.as_slice()).expect("decode");
+        assert_eq!(back.metadata.as_ref(), Some(&meta));
+        assert_eq!(back.metadata.unwrap().user_metadata["tenant"], "acme");
+    }
+
+    #[test]
+    fn lifecycle_enum_default_is_unspecified() {
+        assert_eq!(Lifecycle::default(), Lifecycle::Unspecified);
+        assert_eq!(Lifecycle::Transient as i32, 1);
+        assert_eq!(Lifecycle::Durable as i32, 2);
+        assert_eq!(Lifecycle::Ephemeral as i32, 3);
     }
 
     #[test]

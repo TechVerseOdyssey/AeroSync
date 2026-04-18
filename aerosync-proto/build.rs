@@ -43,6 +43,19 @@ fn main() {
     // don't ship two copies of the same struct.
     config.extern_path(".google.protobuf.Timestamp", "::prost_types::Timestamp");
 
+    // ControlFrame.body is a oneof whose largest variant
+    // (TransferStart, post-RFC-003) now embeds the Metadata envelope.
+    // The size delta vs other variants (Heartbeat, Cancel) trips
+    // clippy::large_enum_variant. Boxing inside generated code is not
+    // free for prost users (forces double-deref on every access) and
+    // ControlFrame is only ever moved between async tasks, where the
+    // size cost is dominated by the payload itself. Annotate the
+    // generated oneof to silence the lint cleanly.
+    config.type_attribute(
+        ".aerosync.wire.v1.ControlFrame.body",
+        "#[allow(clippy::large_enum_variant)]",
+    );
+
     config
         .compile_protos(&[proto_file], &[proto_root, well_known_include])
         .expect("failed to compile aerosync.wire.v1 protobuf schema");

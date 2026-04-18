@@ -66,15 +66,75 @@ message TransferStart {
   // Lower-case hex SHA-256 of the payload, computed by the sender.
   string sha256 = 4;
 
-  // Field 5 is reserved for the Metadata envelope defined in RFC-003.
-  // It will be added in Week 4 as `Metadata metadata = 5;`. Until then
-  // the field number is kept off-limits so a partial v0.2 build cannot
-  // accidentally claim it. Field number matches RFC-002 §5 canonical.
-  reserved 5;
-  reserved "metadata";
+  // Metadata envelope defined in RFC-003. Optional on the wire — a
+  // bare `TransferStart` with no Metadata is still a well-formed
+  // RFC-002 frame (legacy senders, smoke tests). Receivers that want
+  // metadata MUST defensively check `has_metadata()` / `Option::None`.
+  Metadata metadata = 5;
 
   // Chunk size used for the per-chunk uni-streams (stream 4, 8, …).
   uint32 chunk_size = 6;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Metadata envelope (RFC-003)
+// ─────────────────────────────────────────────────────────────────────
+
+// Structured envelope that travels alongside every transfer. Fields
+// 1-19 are SYSTEM fields populated by the AeroSync engine — sender
+// applications cannot override them. Fields 20-99 are well-known
+// optional fields owned by the SDK. Field 99 (`user_metadata`) holds
+// free-form application key/value strings, bounded by the size limits
+// in RFC-003 §6.
+message Metadata {
+  // ── System fields (set by AeroSync; senders cannot override) ──
+  // UUID v7, identical to the parent receipt id.
+  string id = 1;
+  // Stable identifier of the sending node.
+  string from_node = 2;
+  // Receiver name (mDNS / rendezvous label).
+  string to_node = 3;
+  // Wall-clock time the metadata envelope was minted on the sender.
+  google.protobuf.Timestamp created_at = 4;
+  // Sniffed MIME type per RFC-6838.
+  string content_type = 5;
+  // Total payload size (mirrors `TransferStart.size_bytes`).
+  uint64 size_bytes = 6;
+  // Lower-case hex SHA-256 (mirrors `TransferStart.sha256`).
+  string sha256 = 7;
+  // Display basename (mirrors `TransferStart.file_name`).
+  string file_name = 8;
+  // Wire protocol used for the transfer. One of "quic" | "http" |
+  // "s3" | "ftp" in v0.2.
+  string protocol = 9;
+
+  // ── Well-known optional fields ──
+  optional string trace_id = 20;
+  optional string conversation_id = 21;
+  // Lineage: ids of upstream files this transfer derives from.
+  repeated string parent_file_ids = 22;
+  // Hint only in v0.2 — receivers MUST NOT auto-delete on this.
+  optional google.protobuf.Timestamp expires_at = 23;
+  optional Lifecycle lifecycle = 24;
+  optional string correlation_id = 25;
+
+  // ── User free-form fields ──
+  // Hard cap (RFC-003 §6): 64 KiB serialized total; max 256 entries;
+  // key ≤ 128 bytes; value ≤ 16 KiB. UTF-8 only.
+  map<string, string> user_metadata = 99;
+}
+
+// Lifecycle hint applied to a single transfer. Receivers may treat
+// these as routing hints; AeroSync itself does NOT enforce deletion
+// in v0.2 (see RFC-003 §10 Q1).
+enum Lifecycle {
+  LIFECYCLE_UNSPECIFIED = 0;
+  // Can be deleted after ack.
+  LIFECYCLE_TRANSIENT = 1;
+  // Should be archived.
+  LIFECYCLE_DURABLE = 2;
+  // Delete on transfer regardless of ack.
+  LIFECYCLE_EPHEMERAL = 3;
 }
 
 // Sender-initiated cancel. Carries the receipt_id so the receiver can

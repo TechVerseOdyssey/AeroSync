@@ -1,16 +1,22 @@
 use crate::core::audit::{AuditLogger, Direction};
 use crate::core::history::HistoryEntry;
 use crate::core::history::HistoryStore;
+use crate::core::metadata::{
+    datetime_to_proto_ts, empty_metadata, validate_sealed as validate_metadata,
+};
 use crate::core::progress::TransferStatus;
 use crate::core::receipt::{Event, Receipt, Sender};
 use crate::core::receipt_registry::ReceiptRegistry;
 use crate::core::resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
+use crate::core::sniff::{sniff_content_type, SNIFF_PEEK_BYTES};
 use crate::core::{AeroSyncError, ProgressMonitor, Result, TransferProgress};
+use aerosync_proto::Metadata;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -202,6 +208,19 @@ pub struct TransferEngine {
     /// by `send` can drive the right receipt when the worker reports
     /// completion.
     task_to_receipt: Arc<RwLock<std::collections::HashMap<Uuid, Uuid>>>,
+    /// Optional sender-side node identifier stamped into
+    /// [`Metadata::from_node`] during
+    /// [`Self::send_with_metadata`]. Defaults to the OS hostname (or
+    /// the empty string if unavailable). RFC-005 will replace this
+    /// with a signed identity; for v0.2 it is purely informational.
+    node_id: Arc<RwLock<String>>,
+    /// Sealed [`Metadata`] keyed by receipt id. Populated by
+    /// [`Self::send_with_metadata`] right before the transfer is
+    /// queued so the QUIC adapter can read it back when assembling
+    /// `TransferStart`. The wire-side plumbing through the adapter
+    /// lands as part of `quic_receipt`; until then this map is the
+    /// canonical source of truth on the sender.
+    sealed_metadata: Arc<RwLock<std::collections::HashMap<Uuid, Metadata>>>,
 }
 
 impl TransferEngine {
@@ -221,6 +240,8 @@ impl TransferEngine {
             receipt_registry: Arc::new(ReceiptRegistry::new()),
             history_store: None,
             task_to_receipt: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            node_id: Arc::new(RwLock::new(default_node_id())),
+            sealed_metadata: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -230,6 +251,30 @@ impl TransferEngine {
     pub fn with_history_store(mut self, store: Arc<HistoryStore>) -> Self {
         self.history_store = Some(store);
         self
+    }
+
+    /// Builder: override the sender-side node id stamped into
+    /// [`Metadata::from_node`]. Defaults to the OS hostname.
+    pub fn with_node_id(self, id: impl Into<String>) -> Self {
+        // Synchronous best-effort write into the RwLock. The engine is
+        // single-threaded at this point in its construction.
+        if let Ok(mut guard) = self.node_id.try_write() {
+            *guard = id.into();
+        }
+        self
+    }
+
+    /// Read the currently-configured sender node id.
+    pub async fn node_id(&self) -> String {
+        self.node_id.read().await.clone()
+    }
+
+    /// Look up the sealed metadata that was stamped by
+    /// [`Self::send_with_metadata`] for `receipt_id`. Returns `None`
+    /// when no `send` has been issued for that receipt or when it was
+    /// pruned after a terminal transition.
+    pub async fn metadata_for(&self, receipt_id: Uuid) -> Option<Metadata> {
+        self.sealed_metadata.read().await.get(&receipt_id).cloned()
     }
 
     /// Borrow the engine's sender-side [`ReceiptRegistry`]. MCP tools
@@ -353,7 +398,43 @@ impl TransferEngine {
     /// installed so terminals land in JSONL.
     #[tracing::instrument(skip(self, task), fields(task_id = %task.id))]
     pub async fn send(&self, task: TransferTask) -> Result<Arc<Receipt<Sender>>> {
+        // Backwards-compatible path: equivalent to
+        // `send_with_metadata(task, empty_metadata())`. The engine
+        // still stamps system fields; the absence of well-known and
+        // user fields is what makes this the "no metadata" call.
+        self.send_with_metadata(task, empty_metadata()).await
+    }
+
+    /// RFC-003 §8.2 sender API: queue a transfer carrying a
+    /// [`Metadata`] envelope built via
+    /// [`crate::core::metadata::MetadataBuilder`]. The engine fills
+    /// in the **system** half of the envelope (id, from_node, to_node,
+    /// created_at, content_type, size_bytes, sha256, file_name,
+    /// protocol) just before sealing it; the caller's well-known and
+    /// `user_metadata` entries are preserved verbatim.
+    ///
+    /// Validation: the sealed envelope is re-checked against
+    /// RFC-003 §6 size limits via [`validate_metadata`] and an
+    /// `AeroSyncError::InvalidConfig` is returned if it overshoots.
+    ///
+    /// On success the sealed envelope is stored in
+    /// [`Self::metadata_for`] keyed by the returned receipt's id, so
+    /// the QUIC adapter (and history-store bridge) can read it back.
+    #[tracing::instrument(skip(self, task, metadata), fields(task_id = %task.id))]
+    pub async fn send_with_metadata(
+        &self,
+        task: TransferTask,
+        metadata: Metadata,
+    ) -> Result<Arc<Receipt<Sender>>> {
         let receipt_id = Uuid::new_v4();
+        let sealed = self.seal_system_fields(&task, metadata, receipt_id).await?;
+        validate_metadata(&sealed)
+            .map_err(|e| AeroSyncError::InvalidConfig(format!("metadata validation: {e}")))?;
+        self.sealed_metadata
+            .write()
+            .await
+            .insert(receipt_id, sealed);
+
         let receipt: Arc<Receipt<Sender>> = Arc::new(Receipt::<Sender>::new(receipt_id));
         self.receipt_registry.insert(Arc::clone(&receipt));
 
@@ -402,6 +483,7 @@ impl TransferEngine {
         let monitor = Arc::clone(&self.progress_monitor);
         let registry = Arc::clone(&self.receipt_registry);
         let task_to_receipt = Arc::clone(&self.task_to_receipt);
+        let sealed_metadata = Arc::clone(&self.sealed_metadata);
         let bridge_receipt = Arc::clone(&receipt);
         tokio::spawn(async move {
             // Hard upper bound so a stuck monitor can't leak the task.
@@ -451,6 +533,13 @@ impl TransferEngine {
             // is the GC hook for that.
             let _ = registry; // explicit borrow so we keep the Arc alive
             task_to_receipt.write().await.remove(&task_id);
+            // Sealed metadata is no longer needed once the receipt
+            // reaches a terminal state — the QUIC adapter only reads
+            // it for live transfers. Drop it here to keep memory
+            // bounded for long-running senders. Callers that want a
+            // post-terminal copy should fetch it via `metadata_for`
+            // before the bridge reaches this point.
+            sealed_metadata.write().await.remove(&receipt_id);
         });
 
         // Queue the actual transfer. We do this AFTER spawning the
@@ -463,6 +552,98 @@ impl TransferEngine {
     pub async fn get_progress_monitor(&self) -> Arc<RwLock<ProgressMonitor>> {
         Arc::clone(&self.progress_monitor)
     }
+
+    /// Stamp RFC-003 §4 system fields onto a caller-supplied
+    /// [`Metadata`] just before queueing. Caller-supplied values for
+    /// system fields (id, sha256, …) are **always overridden** —
+    /// only well-known and `user_metadata` entries survive untouched.
+    /// `content_type` is preserved when the caller provided one
+    /// (typed `MetadataBuilder::content_type` path), otherwise it is
+    /// sniffed from the first [`SNIFF_PEEK_BYTES`] of the file.
+    async fn seal_system_fields(
+        &self,
+        task: &TransferTask,
+        mut metadata: Metadata,
+        receipt_id: Uuid,
+    ) -> Result<Metadata> {
+        let file_name = task
+            .source_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let protocol = match &task.destination {
+            d if d.starts_with("quic://") => "quic",
+            d if d.starts_with("s3://") => "s3",
+            d if d.starts_with("ftp://") || d.starts_with("ftps://") => "ftp",
+            _ => "http",
+        }
+        .to_string();
+
+        let to_node = parse_to_node(&task.destination);
+
+        // Sniff the content type when the caller did not supply one.
+        // We tolerate IO errors here (the file may not yet exist for
+        // synthetic tests) and fall through to `application/octet-stream`.
+        if metadata.content_type.is_empty() {
+            metadata.content_type = sniff_for_path(&task.source_path).await;
+        }
+
+        metadata.id = receipt_id.to_string();
+        metadata.from_node = self.node_id.read().await.clone();
+        metadata.to_node = to_node;
+        metadata.created_at = Some(datetime_to_proto_ts(chrono::Utc::now()));
+        metadata.size_bytes = task.file_size;
+        metadata.sha256 = task.sha256.clone().unwrap_or_default();
+        metadata.file_name = file_name;
+        metadata.protocol = protocol;
+
+        Ok(metadata)
+    }
+}
+
+/// OS-hostname best-effort default for `from_node`. RFC-005 will
+/// replace this with a signed identity. Empty string when the OS
+/// hostname is not retrievable (e.g. sandboxed CI).
+fn default_node_id() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_default()
+}
+
+/// Extract a "to node" label from a `TransferTask::destination`.
+///
+/// - `quic://host:port/...` and `http(s)://host:port/...` → `host`
+/// - `s3://bucket/key`                                   → `bucket`
+/// - `ftp://host/...`                                    → `host`
+/// - bare strings (mDNS rendezvous names like `archiver`) → returned verbatim
+fn parse_to_node(destination: &str) -> String {
+    if let Some((scheme, rest)) = destination.split_once("://") {
+        let host_and_path = rest.split('/').next().unwrap_or(rest);
+        // Strip optional `:port` so the node label stays clean.
+        let host = host_and_path.split(':').next().unwrap_or(host_and_path);
+        if !host.is_empty() {
+            return host.to_string();
+        }
+        return scheme.to_string();
+    }
+    destination.to_string()
+}
+
+/// Read up to [`SNIFF_PEEK_BYTES`] bytes from `path` and run the
+/// content-type sniffer. Best-effort: any IO error falls through to
+/// the extension-only path inside [`sniff_content_type`].
+async fn sniff_for_path(path: &std::path::Path) -> String {
+    let mut buf = Vec::with_capacity(SNIFF_PEEK_BYTES);
+    if let Ok(mut f) = tokio::fs::File::open(path).await {
+        let mut chunk = vec![0u8; SNIFF_PEEK_BYTES];
+        if let Ok(n) = f.read(&mut chunk).await {
+            chunk.truncate(n);
+            buf = chunk;
+        }
+    }
+    sniff_content_type(path, &buf)
 }
 
 // ────────────────────────── 并发 worker ──────────────────────────────────────
@@ -1375,5 +1556,205 @@ mod tests {
         sleep(Duration::from_millis(200)).await;
         let m = engine.get_progress_monitor().await;
         assert_eq!(m.read().await.get_stats().completed_files, 1);
+    }
+
+    // ── RFC-003 Group A: send_with_metadata + system-field stamping ──
+
+    use crate::core::metadata::MetadataBuilder;
+    use aerosync_proto::Lifecycle;
+
+    #[tokio::test]
+    async fn test_send_with_metadata_seals_system_fields() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hello.txt");
+        tokio::fs::write(&path, b"hello world\n").await.unwrap();
+
+        let engine = TransferEngine::new(TransferConfig::default()).with_node_id("alice");
+        let (adapter, _, _) = SuccessAdapter::new();
+        engine.start(adapter).await.unwrap();
+
+        let mut task =
+            TransferTask::new_upload(path.clone(), "http://archiver/upload".to_string(), 12);
+        task.sha256 = Some("ab".repeat(32));
+
+        let user_envelope = MetadataBuilder::new()
+            .trace_id("run-7")
+            .lifecycle(Lifecycle::Durable)
+            .user("tenant", "acme")
+            .build()
+            .unwrap();
+
+        let receipt = engine
+            .send_with_metadata(task, user_envelope)
+            .await
+            .expect("send_with_metadata");
+        let sealed = engine
+            .metadata_for(receipt.id())
+            .await
+            .expect("sealed metadata present");
+
+        assert_eq!(sealed.id, receipt.id().to_string());
+        assert_eq!(sealed.from_node, "alice");
+        assert_eq!(sealed.to_node, "archiver");
+        assert_eq!(sealed.protocol, "http");
+        assert_eq!(sealed.size_bytes, 12);
+        assert_eq!(sealed.sha256, "ab".repeat(32));
+        assert_eq!(sealed.file_name, "hello.txt");
+        // Sniffed from the file extension (no magic bytes match for
+        // ASCII text).
+        assert_eq!(sealed.content_type, "text/plain");
+        assert!(sealed.created_at.is_some());
+
+        // Caller-supplied well-known + user fields survive intact.
+        assert_eq!(sealed.trace_id.as_deref(), Some("run-7"));
+        assert_eq!(sealed.lifecycle, Some(Lifecycle::Durable as i32));
+        assert_eq!(sealed.user_metadata["tenant"], "acme");
+    }
+
+    #[tokio::test]
+    async fn test_send_uses_empty_metadata_but_still_seals_system_fields() {
+        let engine = TransferEngine::new(TransferConfig::default()).with_node_id("alice");
+        let (adapter, _, _) = SuccessAdapter::new();
+        engine.start(adapter).await.unwrap();
+        let task = TransferTask::new_upload(
+            PathBuf::from("/no-such.bin"),
+            "quic://bob/upload".to_string(),
+            0,
+        );
+        let receipt = engine.send(task).await.unwrap();
+        let sealed = engine.metadata_for(receipt.id()).await.unwrap();
+        assert_eq!(sealed.from_node, "alice");
+        assert_eq!(sealed.to_node, "bob");
+        assert_eq!(sealed.protocol, "quic");
+        assert_eq!(sealed.file_name, "no-such.bin");
+        // No user-supplied content_type, no readable bytes → fallback.
+        assert_eq!(sealed.content_type, "application/octet-stream");
+        assert!(sealed.trace_id.is_none());
+        assert!(sealed.user_metadata.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_send_with_metadata_content_type_override_wins() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("data.bin");
+        // PNG magic bytes — sniffer would normally return image/png.
+        tokio::fs::write(
+            &path,
+            [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0],
+        )
+        .await
+        .unwrap();
+
+        let engine = TransferEngine::new(TransferConfig::default());
+        let (adapter, _, _) = SuccessAdapter::new();
+        engine.start(adapter).await.unwrap();
+
+        let envelope = MetadataBuilder::new()
+            .content_type("application/x-custom")
+            .build()
+            .unwrap();
+        let task = TransferTask::new_upload(path, "http://h/upload".to_string(), 12);
+        let receipt = engine.send_with_metadata(task, envelope).await.unwrap();
+        let sealed = engine.metadata_for(receipt.id()).await.unwrap();
+        assert_eq!(sealed.content_type, "application/x-custom");
+    }
+
+    #[tokio::test]
+    async fn test_send_with_metadata_overrides_user_supplied_system_fields() {
+        // RFC-003 §4.1: system fields cannot be spoofed. Even if the
+        // caller pre-populates `id`/`sha256`/etc on the envelope they
+        // hand to the engine, the engine MUST overwrite them.
+        let engine = TransferEngine::new(TransferConfig::default()).with_node_id("alice");
+        let (adapter, _, _) = SuccessAdapter::new();
+        engine.start(adapter).await.unwrap();
+        let mut spoofed = empty_metadata();
+        spoofed.id = "fake-id".into();
+        spoofed.sha256 = "fake-hash".into();
+        spoofed.from_node = "mallory".into();
+        spoofed.protocol = "ftp".into();
+
+        let mut task =
+            TransferTask::new_upload(PathBuf::from("/x.bin"), "http://h/upload".to_string(), 7);
+        task.sha256 = Some("ab".repeat(32));
+        let receipt = engine.send_with_metadata(task, spoofed).await.unwrap();
+        let sealed = engine.metadata_for(receipt.id()).await.unwrap();
+        assert_eq!(sealed.id, receipt.id().to_string());
+        assert_eq!(sealed.sha256, "ab".repeat(32));
+        assert_eq!(sealed.from_node, "alice");
+        assert_eq!(sealed.protocol, "http");
+    }
+
+    #[tokio::test]
+    async fn test_send_rejects_oversize_metadata() {
+        // Engineer an envelope that *barely* fits builder validation
+        // (because the builder runs the cap on the application-shaped
+        // metadata) but pushes past 64 KiB once system fields are
+        // stamped in. Easiest path: bypass MetadataBuilder, hand a
+        // raw Metadata that already exceeds the cap.
+        let mut huge = empty_metadata();
+        for i in 0..6 {
+            huge.user_metadata
+                .insert(format!("k{i}"), "x".repeat(16 * 1024));
+        }
+        let engine = TransferEngine::new(TransferConfig::default());
+        let (adapter, _, _) = SuccessAdapter::new();
+        engine.start(adapter).await.unwrap();
+        let task =
+            TransferTask::new_upload(PathBuf::from("/x.bin"), "http://h/upload".to_string(), 0);
+        let err = engine.send_with_metadata(task, huge).await.unwrap_err();
+        assert!(
+            matches!(err, AeroSyncError::InvalidConfig(_)),
+            "expected InvalidConfig, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_to_node_strips_scheme_and_port() {
+        assert_eq!(parse_to_node("http://archiver:8080/u"), "archiver");
+        assert_eq!(parse_to_node("https://h.example.com/x"), "h.example.com");
+        assert_eq!(parse_to_node("quic://bob/upload"), "bob");
+        assert_eq!(parse_to_node("s3://my-bucket/k"), "my-bucket");
+        assert_eq!(parse_to_node("ftp://ftp.example.com"), "ftp.example.com");
+        assert_eq!(parse_to_node("archiver"), "archiver");
+        assert_eq!(parse_to_node(""), "");
+    }
+
+    #[tokio::test]
+    async fn test_with_node_id_overrides_default_hostname() {
+        let engine = TransferEngine::new(TransferConfig::default()).with_node_id("custom-node");
+        assert_eq!(engine.node_id().await, "custom-node");
+    }
+
+    #[tokio::test]
+    async fn test_metadata_pruned_after_terminal() {
+        // After the receipt reaches a terminal state the watch-bridge
+        // GCs `sealed_metadata`; this keeps long-lived senders from
+        // leaking a copy of every envelope they ever sent.
+        let engine = TransferEngine::new(TransferConfig::default());
+        let (adapter, _, _) = SuccessAdapter::new();
+        engine.start(adapter).await.unwrap();
+        let task =
+            TransferTask::new_upload(PathBuf::from("/x.bin"), "http://h/upload".to_string(), 0);
+        let receipt = engine
+            .send_with_metadata(task, empty_metadata())
+            .await
+            .unwrap();
+        // Drive to terminal so the bridge runs its cleanup.
+        wait_for_receipt(
+            &receipt,
+            2_000,
+            |s| matches!(s, State::Processing),
+            "Processing",
+        )
+        .await;
+        receipt.apply_event(Event::Ack).unwrap();
+        // Allow the bridge a few ticks to GC.
+        for _ in 0..40 {
+            if engine.metadata_for(receipt.id()).await.is_none() {
+                return;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        panic!("sealed_metadata still present after receipt terminal");
     }
 }

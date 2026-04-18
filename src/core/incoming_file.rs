@@ -35,9 +35,11 @@
 
 use std::sync::Arc;
 
+use aerosync_proto::Metadata;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::core::metadata::empty_metadata;
 use crate::core::receipt::{Event, Receipt, Receiver};
 use crate::core::receipt_registry::ReceiptRegistry;
 use crate::core::server::ReceivedFile;
@@ -56,6 +58,13 @@ pub struct IncomingFile {
     /// the registry once terminal — keeps long-running receivers
     /// from leaking. `None` when no receipt is attached.
     registry: Option<Arc<ReceiptRegistry<Receiver>>>,
+    /// RFC-003 metadata envelope for this transfer. Defaults to an
+    /// empty [`Metadata`] for legacy senders that pre-date Week 4 or
+    /// for code paths where the wire-side parse has not happened
+    /// yet. Populated by the QUIC adapter via
+    /// [`Self::with_metadata`] before the file is handed to the
+    /// application stream.
+    metadata: Metadata,
 }
 
 impl std::fmt::Debug for IncomingFile {
@@ -80,6 +89,7 @@ impl IncomingFile {
             received,
             receipt: Some(receipt),
             registry: Some(registry),
+            metadata: empty_metadata(),
         }
     }
 
@@ -91,7 +101,23 @@ impl IncomingFile {
             received,
             receipt: None,
             registry: None,
+            metadata: empty_metadata(),
         }
+    }
+
+    /// Builder: attach the RFC-003 [`Metadata`] envelope decoded from
+    /// the sender's `TransferStart`. The QUIC adapter calls this
+    /// once, before the file is yielded on the receiver stream.
+    pub fn with_metadata(mut self, metadata: Metadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Borrow the RFC-003 metadata envelope. Returns the empty
+    /// default for legacy senders that did not include a Metadata
+    /// frame.
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
     }
 
     /// Receipt id when the transfer carried a [`Receipt`], else
@@ -384,5 +410,30 @@ mod tests {
         let id = received.id;
         let f = IncomingFile::new_without_receipt(received);
         assert_eq!(f.into_inner().id, id);
+    }
+
+    #[test]
+    fn test_metadata_default_is_empty() {
+        let f = IncomingFile::new_without_receipt(dummy_received());
+        let meta = f.metadata();
+        assert!(meta.id.is_empty());
+        assert!(meta.user_metadata.is_empty());
+        assert!(meta.trace_id.is_none());
+    }
+
+    #[test]
+    fn test_with_metadata_attaches_envelope() {
+        use crate::core::metadata::MetadataBuilder;
+        use aerosync_proto::Lifecycle;
+        let envelope = MetadataBuilder::new()
+            .trace_id("run-99")
+            .lifecycle(Lifecycle::Transient)
+            .user("tenant", "acme")
+            .build()
+            .unwrap();
+        let f = IncomingFile::new_without_receipt(dummy_received()).with_metadata(envelope);
+        assert_eq!(f.metadata().trace_id.as_deref(), Some("run-99"));
+        assert_eq!(f.metadata().user_metadata["tenant"], "acme");
+        assert_eq!(f.metadata().lifecycle, Some(Lifecycle::Transient as i32));
     }
 }
