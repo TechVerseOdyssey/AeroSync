@@ -228,9 +228,12 @@ mod tests {
         // 无效的 Token 格式
         assert!(!manager.verify_token("invalid-token").unwrap());
 
-        // 篡改的 Token
+        // 篡改的 Token：将签名段替换为全 0，确保一定与真实签名不同
+        // （旧实现用 token.replace("a", "b") 在 uuid/签名都不含 'a' 时
+        // 不会改动 token，约 4.5% 概率出现 flaky）
         let token = manager.generate_token().unwrap();
-        let tampered = token.replace("a", "b");
+        let parts: Vec<&str> = token.split('.').collect();
+        let tampered = format!("{}.{}.{}.0000000000000000", parts[0], parts[1], parts[2]);
         assert!(!manager.verify_token(&tampered).unwrap());
     }
 
