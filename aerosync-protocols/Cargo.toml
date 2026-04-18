@@ -1,7 +1,17 @@
 [package]
 name = "aerosync-protocols"
-version = "0.1.0"
-edition = "2021"
+description = "Pluggable transport adapters for AeroSync: HTTP/QUIC/FTP with automatic protocol negotiation."
+keywords = ["aerosync", "quic", "http", "ftp", "transport"]
+categories = ["network-programming"]
+readme = "../README.md"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 aerosync-core = { path = "../aerosync-core" }

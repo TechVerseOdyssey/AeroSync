@@ -1,7 +1,17 @@
 [package]
 name = "aerosync-mcp"
-version = "0.1.0"
-edition = "2021"
+description = "Model Context Protocol (MCP) server exposing AeroSync as 8 tools (send_file, send_directory, start_receiver, ...) for AI agents like Claude / ChatGPT / Cursor."
+keywords = ["mcp", "aerosync", "ai-agent", "claude", "llm"]
+categories = ["command-line-utilities", "network-programming"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
 
 [lib]
 name = "aerosync_mcp"

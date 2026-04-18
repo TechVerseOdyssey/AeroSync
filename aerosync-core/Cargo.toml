@@ -1,7 +1,17 @@
 [package]
 name = "aerosync-core"
-version = "0.1.0"
-edition = "2021"
+description = "Core engine for AeroSync: transfer scheduling, chunked resume, mDNS discovery and file management."
+keywords = ["aerosync", "file-transfer", "mdns", "resume"]
+categories = ["network-programming", "filesystem"]
+readme = "../README.md"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 tokio = { workspace = true }

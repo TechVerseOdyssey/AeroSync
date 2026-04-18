@@ -1,7 +1,17 @@
 [package]
 name = "aerosync"
-version = "0.1.0"
-edition = "2021"
+description = "Fast, agent-friendly file transfer CLI with auto protocol negotiation (HTTP/QUIC), resumable chunked uploads and an MCP server for AI agents."
+keywords = ["file-transfer", "mcp", "quic", "cli", "agent"]
+categories = ["command-line-utilities", "network-programming"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "aerosync"
@@ -43,6 +53,16 @@ members = [
     "aerosync-mcp"
 ]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["TechVerseOdyssey <tiancheng-liu@qq.com>"]
+license = "MIT"
+repository = "https://github.com/TechVerseOdyssey/AeroSync"
+homepage = "https://github.com/TechVerseOdyssey/AeroSync"
+documentation = "https://docs.rs/aerosync"
+rust-version = "1.82"
 
 [workspace.dependencies]
 tokio = { version = "1.0", features = ["full"] }
