@@ -1,0 +1,41 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "aerosync"
+version = "0.2.0"
+requires-python = ">=3.9"
+description = "AeroSync — file bus for AI agents (Python SDK)"
+license = { text = "MIT" }
+readme = "README.md"
+keywords = ["file-transfer", "mcp", "ai-agent", "quic"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Rust",
+  "Topic :: Communications :: File Sharing",
+  "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Homepage = "https://github.com/TechVerseOdyssey/AeroSync"
+Repository = "https://github.com/TechVerseOdyssey/AeroSync"
+Documentation = "https://github.com/TechVerseOdyssey/AeroSync/blob/master/docs/rfcs/RFC-001-python-sdk.md"
+
+[tool.maturin]
+# Enable our crate's `extension-module` feature, which forwards to
+# `pyo3/extension-module` so the resulting cdylib does NOT link
+# libpython (Python provides it at import time).
+features = ["extension-module"]
+python-source = "python"
+module-name = "aerosync._native"
+strip = true
+
+[project.optional-dependencies]
+test = ["pytest>=7", "pytest-asyncio>=0.23"]

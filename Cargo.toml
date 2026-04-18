@@ -114,6 +114,7 @@ aerosync-mcp = { path = "aerosync-mcp" }
 members = [
     "aerosync-mcp",
     "aerosync-proto",
+    "aerosync-py",
 ]
 resolver = "2"
 

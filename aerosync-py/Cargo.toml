@@ -1,0 +1,84 @@
+[package]
+name = "aerosync-py"
+description = "Python bindings for AeroSync — produced as the `aerosync` wheel on PyPI. Not published to crates.io."
+version = "0.2.0"
+edition = "2021"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+# The cdylib's library name MUST match the leaf module name expected by
+# Python (`aerosync._native`). maturin renames the produced .so/.dylib
+# during the wheel build using `module-name` from pyproject.toml; the
+# Rust-side `[lib].name` is what `extern "C"` symbol names key off.
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+# Feature plumbing — pyo3 forces a binary choice at link time between
+# linking against libpython (default — needed so `cargo test` produces
+# a runnable test binary) and explicitly *not* linking it
+# (`extension-module`, set by maturin via [tool.maturin].features when
+# building the wheel cdylib that Python itself loads at import).
+#
+#   cargo test  -p aerosync-py     → links libpython, tests run
+#   cargo build -p aerosync-py     → links libpython, cdylib usable from
+#                                    a Python that exposes the same lib
+#   maturin build / develop        → enables pyo3/extension-module,
+#                                    produces a wheel-shippable cdylib
+#                                    with no libpython linkage
+#
+# The two are mutually exclusive at link time, but maturin always
+# overrides default features so this is safe.
+[features]
+# `auto-initialize` lets `cargo test` boot a Python interpreter on
+# first use so unit tests can construct PyErr / Bound values without
+# hand-rolling `Python::initialize`. It is a no-op when the cdylib is
+# loaded by Python (since the interpreter is already initialized) but
+# requires libpython at link time, so it is mutually exclusive with
+# `extension-module` — maturin disables auto-initialize by setting
+# `extension-module` via [tool.maturin].features below.
+default = ["pyo3/auto-initialize"]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+# pyo3 0.28 + pyo3-async-runtimes 0.28 are the current matched pair on
+# crates.io. RFC-001 §6 originally referenced ≥ 0.21; we landed on 0.28
+# because (a) 0.22 has incompatible Bound/PyAny refactors that 0.28
+# already absorbs, and (b) pyo3-async-runtimes is the renamed successor
+# of pyo3-asyncio and 0.28 is its first release tracking pyo3 0.28.
+# abi3-py39 collapses the wheel matrix from 30 → 6 (one wheel per OS).
+pyo3 = { version = "0.28", features = ["abi3-py39"] }
+pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
+
+# Inter-crate deps — re-uses the workspace-pinned versions so the
+# Python binding is always in lock-step with the host engine.
+aerosync = { workspace = true }
+aerosync-proto = { workspace = true }
+
+# Workspace common deps
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+
+# OnceCell powers the lazy shared-runtime singleton in `runtime.rs`.
+# We accept once_cell rather than std::sync::OnceLock so the same code
+# compiles cleanly on rust-version = 1.89 and below.
+once_cell = "1"
+
+[build-dependencies]
+# Re-uses pyo3's own Python probe so we can ask it for the libdir
+# during the build. Same major.minor as the runtime pyo3 dep so the
+# probe results are identical.
+pyo3-build-config = "0.28"
+
+[dev-dependencies]
+tempfile = "3"

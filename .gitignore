@@ -42,3 +42,14 @@ node_modules/
 # Personal TODO / scratch files (never committed)
 TODO.local.md
 *.local.md
+
+# Python (aerosync-py wheel build artifacts and bytecode caches)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+# `maturin develop` drops the compiled extension here; recreated on
+# every build so it must never be committed.
+aerosync-py/python/aerosync/_native*.so
+aerosync-py/python/aerosync/_native*.dylib
+aerosync-py/python/aerosync/_native*.pyd
