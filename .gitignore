@@ -1,7 +1,9 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS committed — AeroSync ships binaries (CLI + MCP server),
+# so reproducible dependency resolution matters. Per Cargo guidelines:
+# binaries → commit lockfile; pure libraries → don't.
 
 # IDE
 .vscode/

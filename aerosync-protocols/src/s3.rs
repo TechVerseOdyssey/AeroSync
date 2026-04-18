@@ -763,7 +763,7 @@ fn unix_to_datetime(ts: u64) -> (u32, u32, u32, u32, u32, u32) {
 }
 
 fn is_leap(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// HMAC-SHA256: key × data → 32-byte digest

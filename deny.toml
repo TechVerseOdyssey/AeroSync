@@ -5,7 +5,21 @@ all-features = true
 [advisories]
 version = 2
 yanked = "warn"
-ignore = []
+ignore = [
+  # ── rustls-webpki 0.102.8 (pulled in via warp 0.3.7 → tokio-rustls 0.25 → rustls 0.22) ──
+  # Both advisories below describe parsing bugs in the (unused-by-us)
+  # name-constraint code path. The advisory text itself notes:
+  #   "this bug is reachable only after signature verification and
+  #    requires misissuance to exploit."
+  # AeroSync's HTTPS receiver uses an auto-generated self-signed cert
+  # (no CA chain to misissue from), and the QUIC path uses pinned certs
+  # configured by the user — neither code path exercises X.509
+  # name-constraint validation. There is no upstream path to upgrade
+  # without dropping warp 0.3 (tracked in TODO.local.md as a v0.2.0
+  # follow-up: migrate aerosync-core/src/server.rs to axum).
+  { id = "RUSTSEC-2026-0098", reason = "name-constraint parsing in webpki; not on a code path AeroSync uses; blocked on warp 0.3 upgrade" },
+  { id = "RUSTSEC-2026-0099", reason = "name-constraint parsing in webpki; not on a code path AeroSync uses; blocked on warp 0.3 upgrade" },
+]
 
 [licenses]
 version = 2

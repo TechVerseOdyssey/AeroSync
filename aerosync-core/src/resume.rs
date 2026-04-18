@@ -123,7 +123,7 @@ impl ResumeState {
     /// 计算指定分片的实际大小
     pub fn chunk_size_of(&self, index: u32) -> u64 {
         let last = self.total_chunks.saturating_sub(1);
-        if index == last && self.total_size % self.chunk_size != 0 {
+        if index == last && !self.total_size.is_multiple_of(self.chunk_size) {
             self.total_size % self.chunk_size
         } else {
             self.chunk_size

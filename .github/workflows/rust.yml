@@ -72,6 +72,11 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Keep in sync with deny.toml [advisories.ignore].
+          # See deny.toml for the rationale (warp 0.3 → old rustls/webpki chain;
+          # name-constraint code path not exercised by AeroSync; v0.2 will
+          # migrate to axum and drop these ignores).
+          ignore: RUSTSEC-2026-0098,RUSTSEC-2026-0099
 
   deny:
     name: cargo-deny
