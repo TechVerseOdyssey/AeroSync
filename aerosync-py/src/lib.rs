@@ -35,6 +35,7 @@
 use pyo3::prelude::*;
 
 pub mod client;
+pub mod config;
 pub mod errors;
 pub mod exceptions;
 pub mod receipt;
@@ -61,11 +62,21 @@ fn version() -> &'static str {
 /// init). Per RFC-001 §5.1 the user writes
 /// `async with aerosync.client() as c:` — no `await` before the call.
 ///
-/// Group A signature is config-less; the `config=` parameter lands in
-/// w6 task #11.
+/// `config` accepts an `aerosync.Config` dataclass (or any object
+/// exposing the same attribute shape; we extract via `getattr`).
+/// Passing `None` is identical to `Config()`: every field at its
+/// documented default. RFC-001 §5.7 / task #11.
 #[pyfunction(name = "client")]
-fn make_client() -> PyClient {
-    PyClient::new_default()
+#[pyo3(signature = (config=None))]
+fn make_client(config: Option<Bound<'_, PyAny>>) -> PyResult<PyClient> {
+    let resolved = match config {
+        Some(c) if !c.is_none() => config::ResolvedConfig::from_pyobject(&c)?,
+        _ => config::ResolvedConfig::empty(),
+    };
+    let chunk_size = resolved.chunk_size_default;
+    let timeout = resolved.timeout_default;
+    let tc = resolved.build_transfer_config();
+    Ok(PyClient::from_transfer_config(tc, chunk_size, timeout))
 }
 
 /// Sync factory: `aerosync.receiver(name=..., listen=..., save_dir=...)`
@@ -75,14 +86,21 @@ fn make_client() -> PyClient {
 /// surface is stable from this commit forward; Group C wires up
 /// `__aenter__` / `__aexit__` and the async iterator.
 #[pyfunction(name = "receiver")]
-#[pyo3(signature = (name=None, listen=None, save_dir=None))]
+#[pyo3(signature = (name=None, listen=None, save_dir=None, config=None))]
 fn make_receiver(
     name: Option<String>,
     listen: Option<String>,
     save_dir: Option<std::path::PathBuf>,
+    config: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyReceiver> {
     use aerosync::core::FileReceiver;
-    let mut cfg = receiver::server_config_for(save_dir);
+    let resolved = match config {
+        Some(c) if !c.is_none() => config::ResolvedConfig::from_pyobject(&c)?,
+        _ => config::ResolvedConfig::empty(),
+    };
+    // `save_dir=` on the factory is the explicit override; if absent
+    // we fall back to whatever `Config.state_dir` derives.
+    let mut cfg = resolved.build_server_config(save_dir);
     if let Some(addr) = listen.as_deref() {
         // RFC-001 §5.1 documents `listen` as "host:port"; we
         // split here because ServerConfig keeps host and port

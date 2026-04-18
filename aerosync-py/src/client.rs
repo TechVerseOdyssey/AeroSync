@@ -24,17 +24,44 @@ use uuid::Uuid;
 
 /// Outbound `Client`. Constructed via the `aerosync.client()` async
 /// factory which returns an async context manager.
+///
+/// `chunk_size_default` and `timeout_default` cache the values pulled
+/// from the user-supplied [`crate::config::PyConfigView`] so subsequent
+/// `send()` calls without explicit `chunk_size=` / `timeout=` kwargs
+/// can fall back to them. RFC-001 §5.7 lists these as the only two
+/// per-call defaults that travel via `Config`.
 #[pyclass(module = "aerosync._native", name = "Client")]
 pub struct PyClient {
     pub(crate) engine: Arc<TransferEngine>,
+    pub(crate) chunk_size_default: Option<usize>,
+    pub(crate) timeout_default: Option<f64>,
 }
 
 impl PyClient {
     /// Build a fresh client with the engine's `TransferConfig::default()`.
-    /// w6 task #11 will swap this for the user-supplied `Config`.
+    /// Used by the `aerosync.client()` factory when no `config=` is
+    /// supplied. The `from_config` constructor (in `lib.rs::make_client`)
+    /// is the configurable equivalent.
     pub fn new_default() -> Self {
         Self {
             engine: Arc::new(TransferEngine::new(TransferConfig::default())),
+            chunk_size_default: None,
+            timeout_default: None,
+        }
+    }
+
+    /// Build a `PyClient` from a fully-resolved [`TransferConfig`] +
+    /// the two per-call defaults pulled from the Python `Config`
+    /// dataclass.
+    pub fn from_transfer_config(
+        cfg: TransferConfig,
+        chunk_size_default: Option<usize>,
+        timeout_default: Option<f64>,
+    ) -> Self {
+        Self {
+            engine: Arc::new(TransferEngine::new(cfg)),
+            chunk_size_default,
+            timeout_default,
         }
     }
 }
@@ -379,6 +406,10 @@ impl PyClient {
         on_progress: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let engine = Arc::clone(&self.engine);
+        // Apply per-Client defaults pulled from `Config` only when the
+        // caller did not pass an explicit kwarg. RFC-001 §5.7 contract.
+        let chunk_size = chunk_size.or(self.chunk_size_default);
+        let timeout = timeout.or(self.timeout_default);
         let meta = match metadata {
             Some(m) if !m.is_empty() => Some(build_metadata(m)?),
             _ => None,

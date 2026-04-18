@@ -79,6 +79,17 @@ once_cell = "1"
 # runtime, not just in tests, so it lives in regular dependencies.
 tempfile = "3"
 
+# Config.auth_token round-trips through TransferConfig::auth_token,
+# which is `Option<Zeroizing<String>>`. We re-export the same major
+# version the workspace uses so the wrapper type matches at link time.
+zeroize = { workspace = true }
+
+# `Config.log_level` initializes a tracing-subscriber on first use.
+# `EnvFilter` is what lets us accept the `info|debug|trace|...` strings
+# without a custom parser. Held behind a `OnceCell` so repeat calls
+# (e.g. one client + one receiver in the same process) are idempotent.
+tracing-subscriber = { workspace = true }
+
 [build-dependencies]
 # Re-uses pyo3's own Python probe so we can ask it for the libdir
 # during the build. Same major.minor as the runtime pyo3 dep so the

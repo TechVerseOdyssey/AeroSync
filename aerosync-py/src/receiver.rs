@@ -29,7 +29,9 @@ use crate::errors::engine_err_to_py;
 use crate::receipt::state_label;
 use crate::runtime::future_into_py;
 use aerosync::core::receipt::{Event, Receipt, Receiver as RxSide};
-use aerosync::core::server::{FileReceiver, ServerConfig, WsEvent};
+#[cfg(test)]
+use aerosync::core::server::ServerConfig;
+use aerosync::core::server::{FileReceiver, WsEvent};
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -328,6 +330,10 @@ pub fn _test_make_incoming_file(
 }
 
 /// Build a default `ServerConfig` rooted at `save_dir`.
+///
+/// Test-only since #11 (Config plumbing) routes the production
+/// receiver factory through [`crate::config::ResolvedConfig`].
+#[cfg(test)]
 pub(crate) fn server_config_for(save_dir: Option<PathBuf>) -> ServerConfig {
     let mut cfg = ServerConfig::default();
     if let Some(dir) = save_dir {

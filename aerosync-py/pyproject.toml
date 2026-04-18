@@ -23,6 +23,14 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
 ]
 
+# Runtime deps. We deliberately stay tiny here — every line shipped to
+# `pip install aerosync` is a future support burden. `tomli` is the
+# only entry: stdlib `tomllib` arrived in Python 3.11, so users on
+# 3.9 / 3.10 get the (pure-Python, ~30 KB) back-port.
+dependencies = [
+  "tomli>=1.1.0; python_version < '3.11'",
+]
+
 [project.urls]
 Homepage = "https://github.com/TechVerseOdyssey/AeroSync"
 Repository = "https://github.com/TechVerseOdyssey/AeroSync"

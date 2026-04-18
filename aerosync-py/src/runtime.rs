@@ -35,6 +35,13 @@ use tokio::runtime::{Builder, Runtime};
 /// The process-wide tokio runtime. Initialized on first call.
 static SHARED: OnceCell<Arc<Runtime>> = OnceCell::new();
 
+/// Tracks whether [`install_log_level`] has already wired a subscriber.
+/// Only the *first* `Config(log_level=...)` consumed by the SDK wins;
+/// subsequent calls (e.g. when the same process builds both a client
+/// and a receiver) are silently ignored, and any pre-existing
+/// subscriber installed by the host application is left alone.
+static LOG_INSTALLED: OnceCell<()> = OnceCell::new();
+
 /// Worker-thread heuristic: at least 2 (so a slow blocking task can
 /// never starve the I/O reactor) and at most `num_cpus / 2` so we
 /// leave plenty of headroom for the user's own asyncio loop.
@@ -75,6 +82,30 @@ pub fn shared_tokio() -> Arc<Runtime> {
             arc
         })
         .clone()
+}
+
+/// Install a `tracing-subscriber` filtered to `level` (e.g. `"info"`,
+/// `"debug"`, …). Idempotent: subsequent calls are no-ops, so a host
+/// application that already wired a subscriber sees no override and
+/// SDK code that builds a client + a receiver only initializes once.
+///
+/// `level == "off"` is honored as "do nothing" (we still mark the
+/// subscriber as installed so a later `info`/`debug` does not stomp
+/// the user's "off" choice).
+///
+/// Errors from `try_init` (the most common cause: a subscriber is
+/// already present) are deliberately swallowed — the contract is
+/// "best-effort, never panic, never overwrite", not "guarantee the
+/// subscriber is exactly what we asked for".
+pub fn install_log_level(level: &str) {
+    LOG_INSTALLED.get_or_init(|| {
+        if level.eq_ignore_ascii_case("off") {
+            return;
+        }
+        let filter = tracing_subscriber::EnvFilter::try_new(level)
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    });
 }
 
 /// Bridge a Rust async fn into a Python awaitable, scheduled on the

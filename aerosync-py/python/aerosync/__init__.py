@@ -32,9 +32,11 @@ from aerosync._native import (
     receiver,
     version,
 )
+from aerosync._config import Config
 from aerosync._types import HistoryEntry, Lifecycle, Outcome, Peer, Progress
 
 __all__ = [
+    "Config",
     # Exception hierarchy (RFC-001 §5.8). All subclass `AeroSyncError`
     # so user code can write `except aerosync.AeroSyncError` to catch
     # everything the SDK raises. Each instance also carries `.code`
