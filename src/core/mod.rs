@@ -11,6 +11,7 @@ pub mod preflight;
 pub mod progress;
 pub mod receipt;
 pub mod receipt_registry;
+pub mod receipts_http;
 pub mod resume;
 pub mod routing;
 pub mod server;
@@ -37,6 +38,10 @@ pub use receipt::{
     StateError as ReceiptStateError,
 };
 pub use receipt_registry::ReceiptRegistry;
+pub use receipts_http::{
+    router as receipts_http_router, AckBody, CancelBody, IdempotencyCache, NackBody,
+    ReceiptHttpState, StateEventBody, StateView, IDEMPOTENCY_TTL,
+};
 pub use resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
 pub use routing::{Router, RouterConfig, RoutingRule};
 pub use server::{FileReceiver, ReceivedFile, ServerConfig, ServerStatus, TlsConfig};

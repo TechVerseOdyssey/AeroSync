@@ -2,6 +2,7 @@ use crate::core::audit::{AuditLogger, Direction};
 use crate::core::auth::{AuthConfig, AuthManager, AuthMiddleware};
 use crate::core::discovery::{AeroSyncMdns, MdnsHandle};
 use crate::core::metrics::Metrics;
+use crate::core::receipts_http::{router as receipts_http_router, ReceiptHttpState};
 use crate::core::routing::{Router as AeroRouter, RouterConfig};
 use crate::{AeroSyncError, Result};
 use axum::body::Bytes;
@@ -147,6 +148,10 @@ pub struct FileReceiver {
     chunk_arrivals: ChunkArrivalMap,
     /// mDNS 广播句柄 — Some 表示正在广播，drop 时自动注销
     mdns_handle: Option<MdnsHandle>,
+    /// RFC-002 §6.4 receipt control surface — shared across HTTP and
+    /// HTTPS so SSE subscribers and ack/nack/cancel POSTs hit the same
+    /// registry regardless of which scheme they connected over.
+    receipts: ReceiptHttpState,
 }
 
 impl FileReceiver {
@@ -166,6 +171,7 @@ impl FileReceiver {
             ws_tx,
             chunk_arrivals: Arc::new(Mutex::new(HashMap::new())),
             mdns_handle: None,
+            receipts: ReceiptHttpState::new(),
         }
     }
 
@@ -177,6 +183,14 @@ impl FileReceiver {
     /// Expose shared metrics handle
     pub fn metrics(&self) -> Arc<Metrics> {
         Arc::clone(&self.metrics)
+    }
+
+    /// Expose the shared RFC-002 receipt registries + idempotency cache
+    /// so callers (e.g. `quic_receipt::run_*_loop` and Week 3
+    /// `TransferEngine`) can register receipts whose state will then
+    /// be observable via the HTTP control surface.
+    pub fn receipts(&self) -> ReceiptHttpState {
+        self.receipts.clone()
     }
 
     pub async fn start(&mut self) -> Result<()> {
@@ -226,6 +240,7 @@ impl FileReceiver {
             let metrics_http = Arc::clone(&self.metrics);
             let ws_tx_http = self.ws_tx.clone();
             let chunk_arrivals_http = Arc::clone(&self.chunk_arrivals);
+            let receipts_http = self.receipts.clone();
 
             let handle = tokio::spawn(async move {
                 if let Err(e) = start_http_server(
@@ -237,6 +252,7 @@ impl FileReceiver {
                     metrics_http,
                     ws_tx_http,
                     chunk_arrivals_http,
+                    receipts_http,
                 )
                 .await
                 {
@@ -275,6 +291,7 @@ impl FileReceiver {
             let metrics_https = Arc::clone(&self.metrics);
             let ws_tx_https = self.ws_tx.clone();
             let chunk_arrivals_https = Arc::clone(&self.chunk_arrivals);
+            let receipts_https = self.receipts.clone();
 
             let handle = tokio::spawn(async move {
                 if let Err(e) = start_https_server(
@@ -286,6 +303,7 @@ impl FileReceiver {
                     metrics_https,
                     ws_tx_https,
                     chunk_arrivals_https,
+                    receipts_https,
                 )
                 .await
                 {
@@ -516,6 +534,10 @@ struct AppState {
     ws_tx: WsBroadcast,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     chunk_arrivals: ChunkArrivalMap,
+    /// RFC-002 §6.4 receipt HTTP control surface (SSE + ack/nack/cancel).
+    /// Empty registries on a fresh server; populated by
+    /// `quic_receipt::run_*_loop` and (Week 3) by `TransferEngine`.
+    receipts: ReceiptHttpState,
 }
 
 impl AppState {
@@ -528,6 +550,7 @@ impl AppState {
         metrics: Arc<Metrics>,
         ws_tx: WsBroadcast,
         chunk_arrivals: ChunkArrivalMap,
+        receipts: ReceiptHttpState,
     ) -> Self {
         let receive_dir = config.receive_directory.clone();
         let router: Option<Arc<AeroRouter>> = config
@@ -548,6 +571,7 @@ impl AppState {
             ws_tx,
             received_files,
             chunk_arrivals,
+            receipts,
         }
     }
 }
@@ -595,6 +619,12 @@ fn build_axum_router(state: AppState) -> axum::Router {
         .route("/upload", post(handle_file_upload))
         .route("/upload/*path", post(handle_file_upload));
 
+    // RFC-002 §6.4: receipt control surface lives under /v1/receipts/...
+    // Mounted as a sibling sub-router so it carries its own typed state
+    // (`ReceiptHttpState`) without polluting `AppState` extractors used by
+    // every other handler.
+    let receipts_router = receipts_http_router(state.receipts.clone());
+
     axum::Router::new()
         .merge(batch_router)
         .route("/upload/chunk", post(handle_chunk_upload))
@@ -604,8 +634,9 @@ fn build_axum_router(state: AppState) -> axum::Router {
         .route("/status", get(handle_status_request))
         .route("/metrics", get(handle_metrics))
         .route("/ws", get(handle_ws_upgrade))
-        .layer(cors)
         .with_state(state)
+        .merge(receipts_router)
+        .layer(cors)
 }
 
 // ─────────────────────────────── HTTPS server ───────────────────────────────
@@ -620,6 +651,7 @@ async fn start_https_server(
     metrics: Arc<Metrics>,
     ws_tx: WsBroadcast,
     chunk_arrivals: ChunkArrivalMap,
+    receipts: ReceiptHttpState,
 ) -> Result<()> {
     use axum_server::tls_rustls::RustlsConfig;
 
@@ -662,6 +694,7 @@ async fn start_https_server(
         metrics,
         ws_tx,
         chunk_arrivals,
+        receipts,
     );
     let router = build_axum_router(state);
 
@@ -699,6 +732,7 @@ async fn start_http_server(
     metrics: Arc<Metrics>,
     ws_tx: WsBroadcast,
     chunk_arrivals: ChunkArrivalMap,
+    receipts: ReceiptHttpState,
 ) -> Result<()> {
     let state = AppState::new(
         &config,
@@ -708,6 +742,7 @@ async fn start_http_server(
         metrics,
         ws_tx,
         chunk_arrivals,
+        receipts,
     );
     let router = build_axum_router(state);
 
