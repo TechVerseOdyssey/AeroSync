@@ -273,12 +273,7 @@ async fn test_ws_all_event_types_serialized() {
         },
     ];
 
-    let expected_event_types = [
-        "transfer_started",
-        "progress",
-        "completed",
-        "failed",
-    ];
+    let expected_event_types = ["transfer_started", "progress", "completed", "failed"];
 
     for event in events {
         ws_tx.send(event).unwrap();
@@ -330,5 +325,8 @@ async fn test_ws_disabled_rejects_connection() {
     let result = connect_async(&url).await;
 
     // 连接应失败（服务端返回 404，不做 WS 升级）
-    assert!(result.is_err(), "expected connection refused when ws disabled");
+    assert!(
+        result.is_err(),
+        "expected connection refused when ws disabled"
+    );
 }

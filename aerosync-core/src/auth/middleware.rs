@@ -2,9 +2,9 @@
 //!
 //! 为 HTTP 和 QUIC 协议提供认证中间件。
 
-use std::sync::Arc;
-use crate::error::Result;
 use super::AuthManager;
+use crate::error::Result;
+use std::sync::Arc;
 
 /// 认证中间件
 ///
@@ -71,9 +71,8 @@ impl AuthMiddleware {
         client_ip: &str,
     ) -> Result<bool> {
         // 从 QUIC 连接数据中提取 Token
-        let token = connection_data
-            .and_then(|data| String::from_utf8(data.to_vec()).ok());
-        
+        let token = connection_data.and_then(|data| String::from_utf8(data.to_vec()).ok());
+
         self.auth_manager.authenticate(token.as_deref(), client_ip)
     }
 
@@ -82,9 +81,7 @@ impl AuthMiddleware {
         UnauthorizedResponse {
             status_code: 401,
             message: "Unauthorized: Invalid or missing authentication token".to_string(),
-            headers: vec![
-                ("WWW-Authenticate".to_string(), "Bearer".to_string()),
-            ],
+            headers: vec![("WWW-Authenticate".to_string(), "Bearer".to_string())],
         }
     }
 }
@@ -106,17 +103,17 @@ mod tests {
         let config = AuthConfig::new()
             .enable_auth()
             .with_secret_key("test-secret-key-12345".to_string());
-        
+
         let auth_manager = AuthManager::new(config).unwrap();
         let middleware = AuthMiddleware::new(Arc::new(auth_manager.clone()));
-        
+
         (middleware, auth_manager)
     }
 
     #[test]
     fn test_extract_bearer_token() {
         let (middleware, _) = create_test_middleware();
-        
+
         let token = middleware.extract_token_from_header(Some("Bearer abc123"));
         assert_eq!(token, Some("abc123".to_string()));
     }
@@ -124,7 +121,7 @@ mod tests {
     #[test]
     fn test_extract_direct_token() {
         let (middleware, _) = create_test_middleware();
-        
+
         let token = middleware.extract_token_from_header(Some("xyz789"));
         assert_eq!(token, Some("xyz789".to_string()));
     }
@@ -132,11 +129,11 @@ mod tests {
     #[test]
     fn test_authenticate_with_valid_token() {
         let (middleware, auth_manager) = create_test_middleware();
-        
+
         // 生成有效 Token
         let token = auth_manager.generate_token().unwrap();
         let auth_header = format!("Bearer {}", token);
-        
+
         // 应该认证通过
         let result = middleware.authenticate_http_request(Some(&auth_header), "127.0.0.1");
         assert!(result.is_ok());
@@ -146,13 +143,11 @@ mod tests {
     #[test]
     fn test_authenticate_with_invalid_token() {
         let (middleware, _) = create_test_middleware();
-        
+
         // 使用无效 Token
-        let result = middleware.authenticate_http_request(
-            Some("Bearer invalid-token"),
-            "127.0.0.1"
-        );
-        
+        let result =
+            middleware.authenticate_http_request(Some("Bearer invalid-token"), "127.0.0.1");
+
         assert!(result.is_ok());
         assert!(!result.unwrap());
     }
@@ -160,10 +155,10 @@ mod tests {
     #[test]
     fn test_authenticate_without_token() {
         let (middleware, _) = create_test_middleware();
-        
+
         // 没有提供 Token
         let result = middleware.authenticate_http_request(None, "127.0.0.1");
-        
+
         assert!(result.is_ok());
         assert!(!result.unwrap());
     }
@@ -171,10 +166,9 @@ mod tests {
     #[test]
     fn test_unauthorized_response() {
         let (middleware, _) = create_test_middleware();
-        
+
         let response = middleware.unauthorized_response();
         assert_eq!(response.status_code, 401);
         assert!(response.message.contains("Unauthorized"));
     }
 }
-

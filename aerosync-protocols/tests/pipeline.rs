@@ -32,19 +32,14 @@ async fn start_test_server() -> (std::net::SocketAddr, Arc<Mutex<Vec<String>>>) 
                     let name = part.filename().unwrap_or("unknown").to_string();
                     recv.lock().await.push(name);
                 }
-                Ok::<_, Infallible>(warp::reply::with_status(
-                    "ok",
-                    warp::http::StatusCode::OK,
-                ))
+                Ok::<_, Infallible>(warp::reply::with_status("ok", warp::http::StatusCode::OK))
             }
         });
 
-    let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
-        ([127, 0, 0, 1], 0),
-        async {
+    let (addr, server) =
+        warp::serve(route).bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
             tokio::time::sleep(Duration::from_secs(30)).await;
-        },
-    );
+        });
     tokio::spawn(server);
 
     (addr, received)
@@ -170,7 +165,9 @@ async fn test_pipeline_mixed_file_sizes() {
     // 创建大文件（256KB）
     for i in 0..LARGE_COUNT {
         let path = dir.path().join(format!("large_{:02}.bin", i));
-        tokio::fs::write(&path, vec![0xABu8; 256 * 1024]).await.unwrap();
+        tokio::fs::write(&path, vec![0xABu8; 256 * 1024])
+            .await
+            .unwrap();
     }
     // 创建小文件（1KB）
     for i in 0..SMALL_COUNT {
@@ -185,7 +182,10 @@ async fn test_pipeline_mixed_file_sizes() {
         enable_resume: false,
         ..TransferConfig::default()
     };
-    let adapter = Arc::new(AutoAdapter::new(HttpConfig::default(), QuicConfig::default()));
+    let adapter = Arc::new(AutoAdapter::new(
+        HttpConfig::default(),
+        QuicConfig::default(),
+    ));
     let engine = TransferEngine::new(config);
     engine.start(adapter).await.unwrap();
 
@@ -210,7 +210,9 @@ async fn test_pipeline_mixed_file_sizes() {
             stats.completed_files + stats.failed_files >= stats.total_files
                 && stats.total_files == TOTAL
         };
-        if done { break; }
+        if done {
+            break;
+        }
         assert!(
             tokio::time::Instant::now() < deadline,
             "Timeout on mixed file test"
@@ -220,7 +222,11 @@ async fn test_pipeline_mixed_file_sizes() {
 
     let m = monitor.read().await;
     let stats = m.get_stats();
-    assert_eq!(stats.failed_files, 0, "Unexpected failures: {}", stats.failed_files);
+    assert_eq!(
+        stats.failed_files, 0,
+        "Unexpected failures: {}",
+        stats.failed_files
+    );
     assert_eq!(stats.completed_files, TOTAL);
 
     // 服务端收到 TOTAL 个文件
@@ -252,7 +258,10 @@ async fn test_auto_adapter_connection_refused_returns_network_error() {
         file_size: 4,
         sha256: None,
     };
-    let adapter = Arc::new(AutoAdapter::new(HttpConfig::default(), QuicConfig::default()));
+    let adapter = Arc::new(AutoAdapter::new(
+        HttpConfig::default(),
+        QuicConfig::default(),
+    ));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let result = adapter.upload(&task, tx).await;
     assert!(result.is_err(), "should fail without server");

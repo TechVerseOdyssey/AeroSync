@@ -170,9 +170,7 @@ impl AuditLogger {
         file.write_all(line.as_bytes())
             .await
             .map_err(AeroSyncError::FileIo)?;
-        file.flush()
-            .await
-            .map_err(AeroSyncError::FileIo)?;
+        file.flush().await.map_err(AeroSyncError::FileIo)?;
 
         Ok(())
     }
@@ -424,8 +422,12 @@ mod tests {
     async fn test_jsonl_format_one_line_per_record() {
         let (logger, _dir) = make_logger().await;
 
-        logger.log_completed(Direction::Receive, "ftp", "a.txt", 100, None, None).await;
-        logger.log_completed(Direction::Send, "s3", "b.txt", 200, None, None).await;
+        logger
+            .log_completed(Direction::Receive, "ftp", "a.txt", 100, None, None)
+            .await;
+        logger
+            .log_completed(Direction::Send, "s3", "b.txt", 200, None, None)
+            .await;
 
         let content = tokio::fs::read_to_string(logger.path()).await.unwrap();
         let lines: Vec<&str> = content.lines().collect();

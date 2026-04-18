@@ -3,7 +3,7 @@ use aerosync_mcp::{
     server::{self, McpConfig},
     task_store::TaskStore,
 };
-use rmcp::{ServiceExt, transport::stdio};
+use rmcp::{transport::stdio, ServiceExt};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -46,7 +46,10 @@ async fn main() -> anyhow::Result<()> {
         builder = builder.with_audit(Arc::new(logger));
         tracing::info!("MCP audit log: {}", audit_path.display());
     } else {
-        tracing::warn!("Failed to open MCP audit log at {}, proceeding without audit", audit_path.display());
+        tracing::warn!(
+            "Failed to open MCP audit log at {}, proceeding without audit",
+            audit_path.display()
+        );
     }
 
     match TaskStore::open(&db_path) {
@@ -66,13 +69,18 @@ async fn main() -> anyhow::Result<()> {
             );
             // 断点续传恢复：重新启动上次未完成的分片传输
             let resume_base_dir = aerosync_dir.clone();
-            let recovered = recover_pending_transfers(&builder, Arc::clone(&store), &resume_base_dir).await;
+            let recovered =
+                recover_pending_transfers(&builder, Arc::clone(&store), &resume_base_dir).await;
             if recovered > 0 {
                 tracing::info!("Recovery: {} transfer(s) resumed in background", recovered);
             }
         }
         Err(e) => {
-            tracing::warn!("Failed to open task store at {}: {}, proceeding without persistence", db_path.display(), e);
+            tracing::warn!(
+                "Failed to open task store at {}: {}, proceeding without persistence",
+                db_path.display(),
+                e
+            );
         }
     }
 

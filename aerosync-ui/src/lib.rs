@@ -15,7 +15,7 @@ pub use cli::CliApp;
 #[cfg(feature = "egui")]
 pub use egui_app::EguiApp;
 
-use aerosync_core::{TransferEngine, TransferConfig, FileReceiver, ServerConfig};
+use aerosync_core::{FileReceiver, ServerConfig, TransferConfig, TransferEngine};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -31,7 +31,7 @@ impl AppState {
         let transfer_engine = Arc::new(TransferEngine::new(config.clone()));
         let server_config = ServerConfig::default();
         let file_receiver = FileReceiver::new(server_config.clone());
-        
+
         Self {
             transfer_engine,
             config: Arc::new(RwLock::new(config)),

@@ -100,7 +100,9 @@ impl CircuitBreaker {
                     "Circuit breaker: opening after {} consecutive failures",
                     failures
                 );
-                *state = CircuitState::Open { opened_at: Instant::now() };
+                *state = CircuitState::Open {
+                    opened_at: Instant::now(),
+                };
             }
         }
     }
@@ -166,7 +168,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         cb.allow_request(); // → half_open
         cb.record_failure(); // probe failed → reopen
-        // failure_threshold is 1, counter is already 2
+                             // failure_threshold is 1, counter is already 2
         assert_eq!(cb.state_name(), "open");
         assert!(!cb.allow_request());
     }

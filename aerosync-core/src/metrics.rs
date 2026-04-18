@@ -80,11 +80,11 @@ impl Metrics {
     }
 
     pub fn dec_active_transfers(&self) {
-        let _ = self.active_transfers.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |v| Some(v.saturating_sub(1)),
-        );
+        let _ = self
+            .active_transfers
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
     }
 
     pub fn active_transfers(&self) -> u64 {
@@ -104,8 +104,12 @@ impl Metrics {
     pub fn inc_files_sent(&self, protocol: &str) {
         self.files_sent_total.fetch_add(1, Ordering::Relaxed);
         match protocol {
-            "quic" => { self.files_sent_quic.fetch_add(1, Ordering::Relaxed); }
-            _ => { self.files_sent_http.fetch_add(1, Ordering::Relaxed); }
+            "quic" => {
+                self.files_sent_quic.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                self.files_sent_http.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -134,11 +138,11 @@ impl Metrics {
 
     pub fn dec_ws_connections(&self) {
         // saturating sub to avoid underflow in tests
-        let _ = self.active_ws_connections.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |v| Some(v.saturating_sub(1)),
-        );
+        let _ =
+            self.active_ws_connections
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(1))
+                });
     }
 
     pub fn active_ws(&self) -> u64 {
@@ -161,14 +165,22 @@ impl Metrics {
         let mut out = String::with_capacity(512);
 
         // files_received_total
-        out.push_str("# HELP aerosync_files_received_total Total number of successfully received files\n");
+        out.push_str(
+            "# HELP aerosync_files_received_total Total number of successfully received files\n",
+        );
         out.push_str("# TYPE aerosync_files_received_total counter\n");
-        out.push_str(&format!("aerosync_files_received_total {}\n", files_received));
+        out.push_str(&format!(
+            "aerosync_files_received_total {}\n",
+            files_received
+        ));
 
         // bytes_received_total
         out.push_str("# HELP aerosync_bytes_received_total Total bytes received\n");
         out.push_str("# TYPE aerosync_bytes_received_total counter\n");
-        out.push_str(&format!("aerosync_bytes_received_total {}\n", bytes_received));
+        out.push_str(&format!(
+            "aerosync_bytes_received_total {}\n",
+            bytes_received
+        ));
 
         // upload_errors_total
         out.push_str("# HELP aerosync_upload_errors_total Total number of upload errors\n");
@@ -181,12 +193,16 @@ impl Metrics {
         out.push_str(&format!("aerosync_ws_connections_total {}\n", ws_total));
 
         // ws_active_connections (gauge)
-        out.push_str("# HELP aerosync_ws_active_connections Current active WebSocket connections\n");
+        out.push_str(
+            "# HELP aerosync_ws_active_connections Current active WebSocket connections\n",
+        );
         out.push_str("# TYPE aerosync_ws_active_connections gauge\n");
         out.push_str(&format!("aerosync_ws_active_connections {}\n", ws_active));
 
         // disk_free_bytes (gauge)
-        out.push_str("# HELP aerosync_disk_free_bytes Free disk space in bytes at the receive directory\n");
+        out.push_str(
+            "# HELP aerosync_disk_free_bytes Free disk space in bytes at the receive directory\n",
+        );
         out.push_str("# TYPE aerosync_disk_free_bytes gauge\n");
         out.push_str(&format!("aerosync_disk_free_bytes {}\n", free_bytes));
 
@@ -197,7 +213,9 @@ impl Metrics {
 
         // active_transfers (gauge)
         let active_tr = self.active_transfers();
-        out.push_str("# HELP aerosync_active_transfers Current number of in-progress file transfers\n");
+        out.push_str(
+            "# HELP aerosync_active_transfers Current number of in-progress file transfers\n",
+        );
         out.push_str("# TYPE aerosync_active_transfers gauge\n");
         out.push_str(&format!("aerosync_active_transfers {}\n", active_tr));
 
@@ -230,8 +248,14 @@ impl Metrics {
         let sent_quic = self.files_sent_quic.load(Ordering::Relaxed);
         out.push_str("# HELP aerosync_files_sent_by_protocol Total files sent per protocol\n");
         out.push_str("# TYPE aerosync_files_sent_by_protocol counter\n");
-        out.push_str(&format!("aerosync_files_sent_by_protocol{{protocol=\"http\"}} {}\n", sent_http));
-        out.push_str(&format!("aerosync_files_sent_by_protocol{{protocol=\"quic\"}} {}\n", sent_quic));
+        out.push_str(&format!(
+            "aerosync_files_sent_by_protocol{{protocol=\"http\"}} {}\n",
+            sent_http
+        ));
+        out.push_str(&format!(
+            "aerosync_files_sent_by_protocol{{protocol=\"quic\"}} {}\n",
+            sent_quic
+        ));
 
         // file size histogram (bucket counts)
         let h0 = self.hist_lt_1kb.load(Ordering::Relaxed);
@@ -239,13 +263,30 @@ impl Metrics {
         let h2 = self.hist_64kb_1mb.load(Ordering::Relaxed);
         let h3 = self.hist_1mb_100mb.load(Ordering::Relaxed);
         let h4 = self.hist_gt_100mb.load(Ordering::Relaxed);
-        out.push_str("# HELP aerosync_file_size_bucket File size distribution (count per bucket)\n");
+        out.push_str(
+            "# HELP aerosync_file_size_bucket File size distribution (count per bucket)\n",
+        );
         out.push_str("# TYPE aerosync_file_size_bucket gauge\n");
-        out.push_str(&format!("aerosync_file_size_bucket{{le=\"1024\"}} {}\n", h0));
-        out.push_str(&format!("aerosync_file_size_bucket{{le=\"65536\"}} {}\n", h1));
-        out.push_str(&format!("aerosync_file_size_bucket{{le=\"1048576\"}} {}\n", h2));
-        out.push_str(&format!("aerosync_file_size_bucket{{le=\"104857600\"}} {}\n", h3));
-        out.push_str(&format!("aerosync_file_size_bucket{{le=\"+Inf\"}} {}\n", h4));
+        out.push_str(&format!(
+            "aerosync_file_size_bucket{{le=\"1024\"}} {}\n",
+            h0
+        ));
+        out.push_str(&format!(
+            "aerosync_file_size_bucket{{le=\"65536\"}} {}\n",
+            h1
+        ));
+        out.push_str(&format!(
+            "aerosync_file_size_bucket{{le=\"1048576\"}} {}\n",
+            h2
+        ));
+        out.push_str(&format!(
+            "aerosync_file_size_bucket{{le=\"104857600\"}} {}\n",
+            h3
+        ));
+        out.push_str(&format!(
+            "aerosync_file_size_bucket{{le=\"+Inf\"}} {}\n",
+            h4
+        ));
 
         out
     }

@@ -4,19 +4,14 @@ use zeroize::Zeroizing;
 
 use aerosync_core::{
     auth::{AuthConfig, AuthManager},
+    discovery::AeroSyncMdns,
+    preflight::preflight_check,
     resume::ResumeStore,
     server::{FileReceiver, ServerConfig, TlsConfig},
     transfer::{TransferConfig, TransferEngine, TransferTask},
-    preflight::preflight_check,
-    discovery::AeroSyncMdns,
     FileManager,
 };
-use aerosync_protocols::{
-    http::HttpConfig,
-    quic::QuicConfig,
-    ratelimit::parse_limit,
-    AutoAdapter,
-};
+use aerosync_protocols::{http::HttpConfig, quic::QuicConfig, ratelimit::parse_limit, AutoAdapter};
 use clap::{Parser, Subcommand};
 use futures::stream::{self, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -340,7 +335,23 @@ async fn main() -> anyhow::Result<()> {
             pin_cert,
             accept_invalid_certs,
         } => {
-            cmd_send(source, destination, recursive, protocol, token, parallel, no_verify, dry_run, no_resume, no_preflight, limit, pin_cert, accept_invalid_certs, &app_config).await?;
+            cmd_send(
+                source,
+                destination,
+                recursive,
+                protocol,
+                token,
+                parallel,
+                no_verify,
+                dry_run,
+                no_resume,
+                no_preflight,
+                limit,
+                pin_cert,
+                accept_invalid_certs,
+                &app_config,
+            )
+            .await?;
         }
 
         Commands::Receive {
@@ -359,7 +370,25 @@ async fn main() -> anyhow::Result<()> {
             https_port,
             no_http,
         } => {
-            cmd_receive(port, quic_port, save_to, bind, auth_token, one_shot, overwrite, max_size, http_only, no_http, tls_cert, tls_key, https, https_port, &app_config, cli.config.clone()).await?;
+            cmd_receive(
+                port,
+                quic_port,
+                save_to,
+                bind,
+                auth_token,
+                one_shot,
+                overwrite,
+                max_size,
+                http_only,
+                no_http,
+                tls_cert,
+                tls_key,
+                https,
+                https_port,
+                &app_config,
+                cli.config.clone(),
+            )
+            .await?;
         }
 
         Commands::Token { action } => {
@@ -374,11 +403,23 @@ async fn main() -> anyhow::Result<()> {
             cmd_resume(action).await?;
         }
 
-        Commands::History { limit, sent, received, success_only } => {
+        Commands::History {
+            limit,
+            sent,
+            received,
+            success_only,
+        } => {
             cmd_history(limit, sent, received, success_only).await?;
         }
 
-        Commands::Watch { host, filter, format, reconnect, max_retries, retry_delay } => {
+        Commands::Watch {
+            host,
+            filter,
+            format,
+            reconnect,
+            max_retries,
+            retry_delay,
+        } => {
             cmd_watch(host, filter, format, reconnect, max_retries, retry_delay).await?;
         }
 
@@ -427,7 +468,12 @@ async fn cmd_send(
     if dry_run {
         println!("\nDry run — files that would be sent:");
         for (path, rel, size) in &files {
-            println!("  {} → {} ({:.2} KB)", path.display(), rel.display(), *size as f64 / 1024.0);
+            println!(
+                "  {} → {} ({:.2} KB)",
+                path.display(),
+                rel.display(),
+                *size as f64 / 1024.0
+            );
         }
         return Ok(());
     }
@@ -461,16 +507,17 @@ async fn cmd_send(
         retry_attempts: app_config.transfer.retry_attempts,
         timeout_seconds: app_config.transfer.timeout_seconds,
         use_quic: !destination.starts_with("http"),
-        auth_token: token.clone().or_else(|| app_config.auth.token.clone()).map(Zeroizing::new),
+        auth_token: token
+            .clone()
+            .or_else(|| app_config.auth.token.clone())
+            .map(Zeroizing::new),
         enable_resume: !no_resume,
         ..TransferConfig::default()
     };
 
     // 构建协议适配器
     let eff_token = token.clone().or_else(|| app_config.auth.token.clone());
-    let upload_limit_bps = limit.as_deref()
-        .and_then(parse_limit)
-        .unwrap_or(0);
+    let upload_limit_bps = limit.as_deref().and_then(parse_limit).unwrap_or(0);
     if upload_limit_bps > 0 {
         println!("Upload limit: {:.1} KB/s", upload_limit_bps as f64 / 1024.0);
     }
@@ -579,16 +626,16 @@ async fn cmd_send(
             for tp in m.get_active_transfers() {
                 if let Some(pb) = file_bars.get(&tp.task_id) {
                     pb.set_position(tp.bytes_transferred.min(tp.total_bytes));
-                    if matches!(tp.status, aerosync_core::progress::TransferStatus::Completed) {
-                        pb.finish_with_message(format!(
-                            "{} ✓",
-                            pb.message()
-                        ));
-                    } else if matches!(tp.status, aerosync_core::progress::TransferStatus::Failed(_)) {
-                        pb.abandon_with_message(format!(
-                            "{} ✗",
-                            pb.message()
-                        ));
+                    if matches!(
+                        tp.status,
+                        aerosync_core::progress::TransferStatus::Completed
+                    ) {
+                        pb.finish_with_message(format!("{} ✓", pb.message()));
+                    } else if matches!(
+                        tp.status,
+                        aerosync_core::progress::TransferStatus::Failed(_)
+                    ) {
+                        pb.abandon_with_message(format!("{} ✗", pb.message()));
                     }
                 }
             }
@@ -645,7 +692,10 @@ async fn cmd_send(
 }
 
 /// 收集要发送的文件列表，返回 (absolute_path, relative_path, size) 三元组
-async fn collect_files(source: &PathBuf, recursive: bool) -> anyhow::Result<Vec<(PathBuf, PathBuf, u64)>> {
+async fn collect_files(
+    source: &PathBuf,
+    recursive: bool,
+) -> anyhow::Result<Vec<(PathBuf, PathBuf, u64)>> {
     let meta = tokio::fs::metadata(source).await?;
     if meta.is_file() {
         // 单文件：relative_path 就是文件名本身
@@ -679,10 +729,7 @@ fn collect_files_recursive<'a>(
             let meta = entry.metadata().await?;
             if meta.is_file() {
                 // 计算相对于 base 的相对路径
-                let rel = path
-                    .strip_prefix(base)
-                    .unwrap_or(&path)
-                    .to_path_buf();
+                let rel = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
                 out.push((path, rel, meta.len()));
             } else if meta.is_dir() {
                 collect_files_recursive(base, &path, out).await?;
@@ -757,9 +804,7 @@ async fn negotiate_protocol(dest: &str) -> String {
                 // 解析端口，QUIC 端口 = HTTP 端口 + 1（默认 7789）
                 let quic_dest = if let Some(colon_pos) = dest.rfind(':') {
                     let host = &dest[..colon_pos];
-                    let http_port: u16 = dest[colon_pos + 1..]
-                        .parse()
-                        .unwrap_or(7788);
+                    let http_port: u16 = dest[colon_pos + 1..].parse().unwrap_or(7788);
                     let quic_port = http_port + 1;
                     format!("quic://{}:{}/upload", host, quic_port)
                 } else {
@@ -819,7 +864,10 @@ async fn cmd_receive(
         auth: auth_cfg,
         audit_log: None,
         tls: match (tls_cert, tls_key) {
-            (Some(cert), Some(key)) => Some(TlsConfig { cert_path: cert, key_path: key }),
+            (Some(cert), Some(key)) => Some(TlsConfig {
+                cert_path: cert,
+                key_path: key,
+            }),
             _ => None,
         },
         enable_metrics: app_config.metrics.enabled,
@@ -899,10 +947,14 @@ async fn cmd_receive(
 
 async fn cmd_token(action: TokenAction) -> anyhow::Result<()> {
     match action {
-        TokenAction::Generate { secret, hours, save, label } => {
-            let secret_key = secret.unwrap_or_else(|| {
-                format!("{}-{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
-            });
+        TokenAction::Generate {
+            secret,
+            hours,
+            save,
+            label,
+        } => {
+            let secret_key = secret
+                .unwrap_or_else(|| format!("{}-{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()));
 
             let config = AuthConfig {
                 enable_auth: true,
@@ -928,7 +980,8 @@ async fn cmd_token(action: TokenAction) -> anyhow::Result<()> {
                 let expires_at = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_secs() + hours * 3600;
+                    .as_secs()
+                    + hours * 3600;
                 store.save(&token, label.as_deref(), expires_at)?;
                 println!("Saved to: {}", store_path.display());
             }
@@ -995,7 +1048,10 @@ async fn cmd_token(action: TokenAction) -> anyhow::Result<()> {
                 if store.revoke(&token_prefix)? {
                     println!("Revoked token.");
                 } else {
-                    eprintln!("Token not found: {}", &token_prefix[..token_prefix.len().min(16)]);
+                    eprintln!(
+                        "Token not found: {}",
+                        &token_prefix[..token_prefix.len().min(16)]
+                    );
                 }
             }
         }
@@ -1044,7 +1100,7 @@ async fn cmd_history(
     received: bool,
     success_only: bool,
 ) -> anyhow::Result<()> {
-    use aerosync_core::{HistoryStore, HistoryQuery};
+    use aerosync_core::{HistoryQuery, HistoryStore};
 
     let store_path = HistoryStore::default_path();
     if !store_path.exists() {
@@ -1078,7 +1134,11 @@ async fn cmd_history(
     println!("{} record(s):\n", entries.len());
     for e in &entries {
         let status_marker = if e.success { "✓" } else { "✗" };
-        let speed_kb = if e.avg_speed_bps > 0 { e.avg_speed_bps as f64 / 1024.0 } else { 0.0 };
+        let speed_kb = if e.avg_speed_bps > 0 {
+            e.avg_speed_bps as f64 / 1024.0
+        } else {
+            0.0
+        };
         println!(
             "  {} [{:>7}] {:>6.1} KB/s  {:<30}  {} → {}",
             status_marker,
@@ -1108,7 +1168,11 @@ async fn cmd_resume(action: ResumeAction) -> anyhow::Result<()> {
                 for s in &pending {
                     let done = s.completed_chunks.len();
                     let total = s.total_chunks;
-                    let pct = if total > 0 { done * 100 / total as usize } else { 0 };
+                    let pct = if total > 0 {
+                        done * 100 / total as usize
+                    } else {
+                        0
+                    };
                     println!(
                         "  [{}] {} → {}",
                         s.task_id,
@@ -1253,17 +1317,16 @@ async fn cmd_watch(
 
                 attempt += 1;
                 if !unlimited && attempt > max_retries {
-                    eprintln!(
-                        "Max retries ({}) reached. Giving up.",
-                        max_retries
-                    );
-                    return Err(anyhow::anyhow!("Failed to connect after {} attempt(s)", attempt));
+                    eprintln!("Max retries ({}) reached. Giving up.", max_retries);
+                    return Err(anyhow::anyhow!(
+                        "Failed to connect after {} attempt(s)",
+                        attempt
+                    ));
                 }
 
                 // 指数退避：delay = retry_delay * 2^(attempt-1)，上限 MAX_DELAY_SECS
-                let delay = (retry_delay
-                    .saturating_mul(1u64 << (attempt - 1).min(5)))
-                .min(MAX_DELAY_SECS);
+                let delay =
+                    (retry_delay.saturating_mul(1u64 << (attempt - 1).min(5))).min(MAX_DELAY_SECS);
 
                 eprintln!(
                     "Disconnected ({}). Reconnecting in {}s... (attempt {}/{})",
@@ -1354,8 +1417,10 @@ async fn cmd_discover(timeout_secs: u64, json: bool) -> anyhow::Result<()> {
         println!("Tip: make sure receiver is running with: aerosync receive");
     } else {
         println!("\nFound {} receiver(s):\n", peers.len());
-        println!("{:<20} {:<22} {:<10} {:<6} {:<6}",
-            "NAME", "ADDRESS", "VERSION", "WS", "AUTH");
+        println!(
+            "{:<20} {:<22} {:<10} {:<6} {:<6}",
+            "NAME", "ADDRESS", "VERSION", "WS", "AUTH"
+        );
         println!("{}", "-".repeat(68));
         for peer in &peers {
             println!(
@@ -1385,18 +1450,12 @@ mod watch_tests {
 
     #[test]
     fn test_build_ws_url_already_ws_scheme() {
-        assert_eq!(
-            build_ws_url("ws://myhost:9000/ws"),
-            "ws://myhost:9000/ws"
-        );
+        assert_eq!(build_ws_url("ws://myhost:9000/ws"), "ws://myhost:9000/ws");
     }
 
     #[test]
     fn test_build_ws_url_wss_scheme() {
-        assert_eq!(
-            build_ws_url("wss://myhost:443/ws"),
-            "wss://myhost:443/ws"
-        );
+        assert_eq!(build_ws_url("wss://myhost:443/ws"), "wss://myhost:443/ws");
     }
 
     #[test]
@@ -1414,9 +1473,7 @@ mod watch_tests {
         const MAX: u64 = 60;
 
         let delays: Vec<u64> = (1u32..=8)
-            .map(|attempt| {
-                (base.saturating_mul(1u64 << (attempt - 1).min(5))).min(MAX)
-            })
+            .map(|attempt| (base.saturating_mul(1u64 << (attempt - 1).min(5))).min(MAX))
             .collect();
 
         // attempt 1 → 2s, 2 → 4s, 3 → 8s, 4 → 16s, 5 → 32s, 6+ → 60s (capped)

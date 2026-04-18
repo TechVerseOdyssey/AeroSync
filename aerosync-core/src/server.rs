@@ -5,12 +5,12 @@ use crate::metrics::Metrics;
 use crate::routing::{Router, RouterConfig};
 use crate::{AeroSyncError, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
@@ -105,10 +105,25 @@ pub enum ServerStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum WsEvent {
-    TransferStarted { filename: String, size: u64, sender_ip: String },
-    Progress { filename: String, bytes: u64, total: u64 },
-    Completed { filename: String, size: u64, sha256: String },
-    Failed { filename: String, reason: String },
+    TransferStarted {
+        filename: String,
+        size: u64,
+        sender_ip: String,
+    },
+    Progress {
+        filename: String,
+        bytes: u64,
+        total: u64,
+    },
+    Completed {
+        filename: String,
+        size: u64,
+        sha256: String,
+    },
+    Failed {
+        filename: String,
+        reason: String,
+    },
 }
 
 pub type WsBroadcast = broadcast::Sender<WsEvent>;
@@ -191,15 +206,12 @@ impl FileReceiver {
         self.audit_logger = audit_logger.clone();
 
         // 构建 AuthManager（如果配置了认证）
-        let auth_manager = config
-            .auth
-            .clone()
-            .and_then(|auth_cfg| {
-                AuthManager::new(auth_cfg)
-                    .map(Arc::new)
-                    .map_err(|e| tracing::warn!("Auth init failed: {}", e))
-                    .ok()
-            });
+        let auth_manager = config.auth.clone().and_then(|auth_cfg| {
+            AuthManager::new(auth_cfg)
+                .map(Arc::new)
+                .map_err(|e| tracing::warn!("Auth init failed: {}", e))
+                .ok()
+        });
 
         if config.enable_http {
             let http_cfg = config.clone();
@@ -212,8 +224,17 @@ impl FileReceiver {
             let chunk_arrivals_http = Arc::clone(&self.chunk_arrivals);
 
             let handle = tokio::spawn(async move {
-                if let Err(e) =
-                    start_http_server(http_cfg, status.clone(), received_files, auth, audit_http, metrics_http, ws_tx_http, chunk_arrivals_http).await
+                if let Err(e) = start_http_server(
+                    http_cfg,
+                    status.clone(),
+                    received_files,
+                    auth,
+                    audit_http,
+                    metrics_http,
+                    ws_tx_http,
+                    chunk_arrivals_http,
+                )
+                .await
                 {
                     tracing::error!("HTTP server error: {}", e);
                     *status.write().await = ServerStatus::Error(e.to_string());
@@ -231,7 +252,8 @@ impl FileReceiver {
 
             let handle = tokio::spawn(async move {
                 if let Err(e) =
-                    start_quic_server(quic_cfg, status.clone(), received_files, auth, audit_quic).await
+                    start_quic_server(quic_cfg, status.clone(), received_files, auth, audit_quic)
+                        .await
                 {
                     tracing::error!("QUIC server error: {}", e);
                     *status.write().await = ServerStatus::Error(e.to_string());
@@ -251,8 +273,17 @@ impl FileReceiver {
             let chunk_arrivals_https = Arc::clone(&self.chunk_arrivals);
 
             let handle = tokio::spawn(async move {
-                if let Err(e) =
-                    start_https_server(https_cfg, status.clone(), received_files, auth, audit_https, metrics_https, ws_tx_https, chunk_arrivals_https).await
+                if let Err(e) = start_https_server(
+                    https_cfg,
+                    status.clone(),
+                    received_files,
+                    auth,
+                    audit_https,
+                    metrics_https,
+                    ws_tx_https,
+                    chunk_arrivals_https,
+                )
+                .await
                 {
                     tracing::error!("HTTPS server error: {}", e);
                     *status.write().await = ServerStatus::Error(e.to_string());
@@ -265,12 +296,15 @@ impl FileReceiver {
         if config.enable_https {
             tracing::info!(
                 "File receiver started on HTTP:{} QUIC:{} HTTPS:{}",
-                config.http_port, config.quic_port, config.https_port
+                config.http_port,
+                config.quic_port,
+                config.https_port
             );
         } else {
             tracing::info!(
                 "File receiver started on HTTP:{} QUIC:{}",
-                config.http_port, config.quic_port
+                config.http_port,
+                config.quic_port
             );
         }
 
@@ -287,7 +321,11 @@ impl FileReceiver {
         ) {
             Ok(handle) => {
                 self.mdns_handle = Some(handle);
-                tracing::info!("mDNS: broadcasting as '{}' on port {}", instance_name, config.http_port);
+                tracing::info!(
+                    "mDNS: broadcasting as '{}' on port {}",
+                    instance_name,
+                    config.http_port
+                );
             }
             Err(e) => {
                 tracing::warn!("mDNS broadcast unavailable (non-fatal): {}", e);
@@ -393,7 +431,10 @@ async fn watch_config_reload_task(
         };
         loop {
             stream.recv().await;
-            tracing::info!("SIGHUP received — reloading config from {}", config_path.display());
+            tracing::info!(
+                "SIGHUP received — reloading config from {}",
+                config_path.display()
+            );
             match tokio::fs::read_to_string(&config_path).await {
                 Ok(contents) => {
                     match toml::from_str::<ServerConfig>(&contents) {
@@ -493,9 +534,10 @@ async fn start_https_server(
     let enable_metrics = config.enable_metrics;
     let enable_ws = config.enable_ws;
 
-    let router: Option<Arc<Router>> = config.routing.clone().map(|routing_cfg| {
-        Arc::new(Router::new(routing_cfg, receive_dir.clone()))
-    });
+    let router: Option<Arc<Router>> = config
+        .routing
+        .clone()
+        .map(|routing_cfg| Arc::new(Router::new(routing_cfg, receive_dir.clone())));
     let auth_mw = auth_manager.map(|m| Arc::new(AuthMiddleware::new(m)));
 
     let routes = build_warp_routes(
@@ -569,16 +611,17 @@ fn build_warp_routes(
         .and(warp::path::tail())
         .and(warp::post())
         // Content-Length 预检：超出 max_file_size 直接 413，避免读取请求体
-        .and(warp::header::optional::<u64>("content-length")
-            .and_then(move |content_len: Option<u64>| async move {
-                if let Some(len) = content_len {
-                    if len > max_size {
-                        return Err(warp::reject::custom(PayloadTooLarge));
+        .and(
+            warp::header::optional::<u64>("content-length")
+                .and_then(move |content_len: Option<u64>| async move {
+                    if let Some(len) = content_len {
+                        if len > max_size {
+                            return Err(warp::reject::custom(PayloadTooLarge));
+                        }
                     }
-                }
-                Ok(())
-            })
-            .untuple_one()
+                    Ok(())
+                })
+                .untuple_one(),
         )
         .and(warp::header::optional::<String>("authorization"))
         .and(warp::header::optional::<String>("x-file-hash"))
@@ -672,7 +715,7 @@ fn build_warp_routes(
         .and(warp::post())
         .and(warp::header::optional::<String>("authorization"))
         .and(warp::addr::remote())
-        .and(warp::multipart::form().max_length(512 * 1024 * 1024))  // 512 MB per batch
+        .and(warp::multipart::form().max_length(512 * 1024 * 1024)) // 512 MB per batch
         .and(warp::any().map(move || receive_dir_batch.clone()))
         .and(warp::any().map(move || allow_overwrite))
         .and(warp::any().map(move || received_files_batch.clone()))
@@ -701,29 +744,43 @@ fn build_warp_routes(
                 body,
                 "Content-Type",
                 "text/plain; version=0.0.4; charset=utf-8",
-            ).into_response())
+            )
+            .into_response())
         });
 
     // ── GET /ws (WebSocket) ───────────────────────────────────────────────────
     let ws_tx_ws = ws_tx.clone();
     let metrics_ws = Arc::clone(&metrics);
-    let ws_route = warp::path("ws")
-        .and(warp::get())
-        .and(warp::ws())
-        .and(warp::any().map(move || ws_tx_ws.subscribe()))
-        .and(warp::any().map(move || Arc::clone(&metrics_ws)))
-        .and(warp::any().map(move || enable_ws))
-        .and_then(|ws: warp::ws::Ws, rx: broadcast::Receiver<WsEvent>, m: Arc<Metrics>, enabled: bool| async move {
-            if !enabled {
-                return Err::<warp::reply::Response, _>(warp::reject::not_found());
-            }
-            use warp::Reply;
-            Ok(ws.on_upgrade(move |socket| handle_ws_client(socket, rx, m)).into_response())
-        });
+    let ws_route =
+        warp::path("ws")
+            .and(warp::get())
+            .and(warp::ws())
+            .and(warp::any().map(move || ws_tx_ws.subscribe()))
+            .and(warp::any().map(move || Arc::clone(&metrics_ws)))
+            .and(warp::any().map(move || enable_ws))
+            .and_then(
+                |ws: warp::ws::Ws,
+                 rx: broadcast::Receiver<WsEvent>,
+                 m: Arc<Metrics>,
+                 enabled: bool| async move {
+                    if !enabled {
+                        return Err::<warp::reply::Response, _>(warp::reject::not_found());
+                    }
+                    use warp::Reply;
+                    Ok(ws
+                        .on_upgrade(move |socket| handle_ws_client(socket, rx, m))
+                        .into_response())
+                },
+            );
 
     let cors = warp::cors()
         .allow_any_origin()
-        .allow_headers(vec!["content-type", "authorization", "x-file-hash", "x-aerosync-tag"])
+        .allow_headers(vec![
+            "content-type",
+            "authorization",
+            "x-file-hash",
+            "x-aerosync-tag",
+        ])
         .allow_methods(vec!["GET", "POST", "OPTIONS"]);
 
     upload_chunk
@@ -737,12 +794,15 @@ fn build_warp_routes(
         .recover(|err: warp::Rejection| async move {
             use warp::Reply;
             if err.find::<PayloadTooLarge>().is_some() {
-                Ok::<_, warp::Rejection>(warp::reply::with_status(
-                    warp::reply::json(&serde_json::json!({
-                        "error": "Payload Too Large: file exceeds server limit"
-                    })),
-                    warp::http::StatusCode::PAYLOAD_TOO_LARGE,
-                ).into_response())
+                Ok::<_, warp::Rejection>(
+                    warp::reply::with_status(
+                        warp::reply::json(&serde_json::json!({
+                            "error": "Payload Too Large: file exceeds server limit"
+                        })),
+                        warp::http::StatusCode::PAYLOAD_TOO_LARGE,
+                    )
+                    .into_response(),
+                )
             } else {
                 Err(err)
             }
@@ -767,9 +827,10 @@ async fn start_http_server(
     let enable_metrics = config.enable_metrics;
     let enable_ws = config.enable_ws;
 
-    let router: Option<Arc<Router>> = config.routing.clone().map(|routing_cfg| {
-        Arc::new(Router::new(routing_cfg, receive_dir.clone()))
-    });
+    let router: Option<Arc<Router>> = config
+        .routing
+        .clone()
+        .map(|routing_cfg| Arc::new(Router::new(routing_cfg, receive_dir.clone())));
     let auth_mw = auth_manager.map(|m| Arc::new(AuthMiddleware::new(m)));
 
     let routes = build_warp_routes(
@@ -831,7 +892,8 @@ async fn handle_file_upload(
             Ok(false) => {
                 tracing::warn!("HTTP: Unauthorized upload attempt from {}", client_ip);
                 if let Some(ref al) = audit_logger {
-                    al.log_auth_failed("http", Some(&client_ip), "Unauthorized").await;
+                    al.log_auth_failed("http", Some(&client_ip), "Unauthorized")
+                        .await;
                 }
                 let resp = mw.unauthorized_response();
                 return Ok(warp::reply::with_status(
@@ -839,7 +901,8 @@ async fn handle_file_upload(
                         "error": resp.message
                     })),
                     warp::http::StatusCode::UNAUTHORIZED,
-                ).into_response());
+                )
+                .into_response());
             }
             Err(e) => {
                 tracing::error!("HTTP: Auth error: {}", e);
@@ -889,7 +952,11 @@ async fn handle_file_upload(
         let mut hasher = Sha256::new();
         let mut stream = part.stream();
 
-        while let Some(chunk) = stream.try_next().await.map_err(|_| warp::reject::reject())? {
+        while let Some(chunk) = stream
+            .try_next()
+            .await
+            .map_err(|_| warp::reject::reject())?
+        {
             let data = chunk.chunk();
             hasher.update(data);
             size += data.len() as u64;
@@ -906,7 +973,9 @@ async fn handle_file_upload(
             if &actual_hash != expected {
                 tracing::error!(
                     "HTTP: Hash mismatch for '{}': expected={} actual={}",
-                    filename, expected, actual_hash
+                    filename,
+                    expected,
+                    actual_hash
                 );
                 let _ = tokio::fs::remove_file(&file_path).await;
                 metrics.inc_upload_errors();
@@ -915,7 +984,15 @@ async fn handle_file_upload(
                     reason: "SHA-256 mismatch".to_string(),
                 });
                 if let Some(ref al) = audit_logger {
-                    al.log_failed(Direction::Receive, "http", &filename, size, Some(&client_ip), "SHA-256 mismatch").await;
+                    al.log_failed(
+                        Direction::Receive,
+                        "http",
+                        &filename,
+                        size,
+                        Some(&client_ip),
+                        "SHA-256 mismatch",
+                    )
+                    .await;
                 }
                 use warp::Reply;
                 return Ok(warp::reply::with_status(
@@ -925,7 +1002,8 @@ async fn handle_file_upload(
                         "actual": actual_hash
                     })),
                     warp::http::StatusCode::BAD_REQUEST,
-                ).into_response());
+                )
+                .into_response());
             }
         }
 
@@ -949,7 +1027,15 @@ async fn handle_file_upload(
         });
 
         if let Some(ref al) = audit_logger {
-            al.log_completed(Direction::Receive, "http", &filename, size, Some(&actual_hash), Some(&client_ip)).await;
+            al.log_completed(
+                Direction::Receive,
+                "http",
+                &filename,
+                size,
+                Some(&actual_hash),
+                Some(&client_ip),
+            )
+            .await;
         }
 
         tracing::info!(
@@ -970,7 +1056,8 @@ async fn handle_file_upload(
                 "sha256": actual_hash,
             })),
             warp::http::StatusCode::OK,
-        ).into_response());
+        )
+        .into_response());
     }
 
     Err(warp::reject::reject())
@@ -1111,13 +1198,15 @@ async fn handle_batch_upload(
             Ok(false) => {
                 tracing::warn!("HTTP batch: Unauthorized attempt from {}", client_ip);
                 if let Some(ref al) = audit_logger {
-                    al.log_auth_failed("http", Some(&client_ip), "Unauthorized").await;
+                    al.log_auth_failed("http", Some(&client_ip), "Unauthorized")
+                        .await;
                 }
                 let resp = mw.unauthorized_response();
                 return Ok(warp::reply::with_status(
                     warp::reply::json(&serde_json::json!({"error": resp.message})),
                     warp::http::StatusCode::UNAUTHORIZED,
-                ).into_response());
+                )
+                .into_response());
             }
             Err(_) => return Err(warp::reject::reject()),
         }
@@ -1142,10 +1231,14 @@ async fn handle_batch_upload(
         }
 
         // 收集 part 数据
-        let data: bytes::Bytes = match part.stream().try_fold(bytes::BytesMut::new(), |mut acc, chunk| async move {
-            acc.extend_from_slice(chunk.chunk());
-            Ok(acc)
-        }).await {
+        let data: bytes::Bytes = match part
+            .stream()
+            .try_fold(bytes::BytesMut::new(), |mut acc, chunk| async move {
+                acc.extend_from_slice(chunk.chunk());
+                Ok(acc)
+            })
+            .await
+        {
             Ok(b) => b.freeze(),
             Err(e) => {
                 errors.push(format!("{}: read error: {}", filename, e));
@@ -1181,7 +1274,15 @@ async fn handle_batch_upload(
                     sha256: sha256.clone(),
                 });
                 if let Some(ref al) = audit_logger {
-                    al.log_completed(crate::audit::Direction::Receive, "http", &filename, size, Some(&sha256), Some(&client_ip)).await;
+                    al.log_completed(
+                        crate::audit::Direction::Receive,
+                        "http",
+                        &filename,
+                        size,
+                        Some(&sha256),
+                        Some(&client_ip),
+                    )
+                    .await;
                 }
                 saved += 1;
             }
@@ -1192,11 +1293,17 @@ async fn handle_batch_upload(
         }
     }
 
-    tracing::info!("Batch upload: {} saved, {} errors from {}", saved, errors.len(), client_ip);
+    tracing::info!(
+        "Batch upload: {} saved, {} errors from {}",
+        saved,
+        errors.len(),
+        client_ip
+    );
     Ok(warp::reply::json(&serde_json::json!({
         "saved": saved,
         "errors": errors,
-    })).into_response())
+    }))
+    .into_response())
 }
 
 /// 接收单个分片，直接 seek 写入最终文件（边传边写，无需合并阶段）。
@@ -1232,12 +1339,14 @@ async fn handle_chunk_upload(
             Ok(true) => {}
             _ => {
                 if let Some(ref al) = audit_logger {
-                    al.log_auth_failed("http", Some(&client_ip), "Unauthorized").await;
+                    al.log_auth_failed("http", Some(&client_ip), "Unauthorized")
+                        .await;
                 }
                 return Ok(warp::reply::with_status(
                     warp::reply::json(&serde_json::json!({"error": "Unauthorized"})),
                     warp::http::StatusCode::UNAUTHORIZED,
-                ).into_response());
+                )
+                .into_response());
             }
         }
     }
@@ -1261,7 +1370,8 @@ async fn handle_chunk_upload(
             return Ok(warp::reply::with_status(
                 warp::reply::json(&serde_json::json!({"error": "server error"})),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-            ).into_response());
+            )
+            .into_response());
         }
     }
 
@@ -1280,7 +1390,8 @@ async fn handle_chunk_upload(
                 return Ok(warp::reply::with_status(
                     warp::reply::json(&serde_json::json!({"error": "write failed"})),
                     warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-                ).into_response());
+                )
+                .into_response());
             }
         }
     } else {
@@ -1291,11 +1402,16 @@ async fn handle_chunk_upload(
         {
             Ok(f) => f,
             Err(e) => {
-                tracing::error!("Failed to open inprogress file for chunk {}: {}", query.chunk_index, e);
+                tracing::error!(
+                    "Failed to open inprogress file for chunk {}: {}",
+                    query.chunk_index,
+                    e
+                );
                 return Ok(warp::reply::with_status(
                     warp::reply::json(&serde_json::json!({"error": "write failed"})),
                     warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-                ).into_response());
+                )
+                .into_response());
             }
         }
     };
@@ -1315,14 +1431,16 @@ async fn handle_chunk_upload(
         return Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({"error": "seek failed"})),
             warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        ).into_response());
+        )
+        .into_response());
     }
     if let Err(e) = file.write_all(&body).await {
         tracing::error!("write_all chunk {} failed: {}", query.chunk_index, e);
         return Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({"error": "write failed"})),
             warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        ).into_response());
+        )
+        .into_response());
     }
     drop(file);
 
@@ -1330,14 +1448,20 @@ async fn handle_chunk_upload(
 
     tracing::debug!(
         "Chunk {}/{} written for task {} (offset={}, {} bytes)",
-        query.chunk_index + 1, query.total_chunks,
-        query.task_id, offset, body.len()
+        query.chunk_index + 1,
+        query.total_chunks,
+        query.task_id,
+        offset,
+        body.len()
     );
 
     // 原子递增到达计数
     let counter = {
         let mut map = chunk_arrivals.lock().unwrap();
-        Arc::clone(map.entry(query.task_id).or_insert_with(|| Arc::new(AtomicU32::new(0))))
+        Arc::clone(
+            map.entry(query.task_id)
+                .or_insert_with(|| Arc::new(AtomicU32::new(0))),
+        )
     };
     let arrived = counter.fetch_add(1, Ordering::AcqRel) + 1;
 
@@ -1357,7 +1481,9 @@ async fn handle_chunk_upload(
         } else {
             tracing::info!(
                 "All {} chunks received for task {}, file ready: {}",
-                query.total_chunks, query.task_id, final_path.display()
+                query.total_chunks,
+                query.task_id,
+                final_path.display()
             );
             // 记录接收文件（size 未校验，complete 端点会再次确认）
             let record = ReceivedFile {
@@ -1374,10 +1500,14 @@ async fn handle_chunk_upload(
 
             if let Some(ref al) = audit_logger {
                 al.log_completed(
-                    Direction::Receive, "http-chunk",
-                    &query.filename, query.total_size, None,
+                    Direction::Receive,
+                    "http-chunk",
+                    &query.filename,
+                    query.total_size,
+                    None,
                     remote_addr.map(|a| a.ip().to_string()).as_deref(),
-                ).await;
+                )
+                .await;
             }
             let _ = ws_tx.send(WsEvent::Completed {
                 filename: query.filename.clone(),
@@ -1395,7 +1525,8 @@ async fn handle_chunk_upload(
             "all_chunks_done": all_done,
         })),
         warp::http::StatusCode::OK,
-    ).into_response())
+    )
+    .into_response())
 }
 
 /// 所有分片到齐后由客户端调用，进行 SHA-256 校验并更新记录。
@@ -1428,7 +1559,8 @@ async fn handle_chunk_complete(
                 return Ok(warp::reply::with_status(
                     warp::reply::json(&serde_json::json!({"error": "Unauthorized"})),
                     warp::http::StatusCode::UNAUTHORIZED,
-                ).into_response());
+                )
+                .into_response());
             }
         }
     }
@@ -1462,14 +1594,16 @@ async fn handle_chunk_complete(
                 return Ok(warp::reply::with_status(
                     warp::reply::json(&serde_json::json!({"error": "file not ready"})),
                     warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-                ).into_response());
+                )
+                .into_response());
             }
             fp
         } else {
             return Ok(warp::reply::with_status(
                 warp::reply::json(&serde_json::json!({"error": "file not found"})),
                 warp::http::StatusCode::NOT_FOUND,
-            ).into_response());
+            )
+            .into_response());
         }
     };
 
@@ -1481,7 +1615,8 @@ async fn handle_chunk_complete(
             return Ok(warp::reply::with_status(
                 warp::reply::json(&serde_json::json!({"error": "read failed"})),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-            ).into_response());
+            )
+            .into_response());
         }
     };
     let actual_sha256 = hex::encode(Sha256::digest(&data));
@@ -1492,7 +1627,9 @@ async fn handle_chunk_complete(
         if &actual_sha256 != expected {
             tracing::error!(
                 "Chunk complete: SHA-256 mismatch for {} (expected={}, got={})",
-                query.filename, expected, actual_sha256
+                query.filename,
+                expected,
+                actual_sha256
             );
             let _ = tokio::fs::remove_file(&final_path).await;
             metrics.inc_upload_errors();
@@ -1507,7 +1644,8 @@ async fn handle_chunk_complete(
                     "actual": actual_sha256,
                 })),
                 warp::http::StatusCode::BAD_REQUEST,
-            ).into_response());
+            )
+            .into_response());
         }
     }
 
@@ -1522,7 +1660,9 @@ async fn handle_chunk_complete(
 
     tracing::info!(
         "Chunked upload verified: {} ({} bytes, sha256={})",
-        safe_name, total_size, actual_sha256
+        safe_name,
+        total_size,
+        actual_sha256
     );
 
     // 发送带 sha256 的完成事件
@@ -1534,9 +1674,14 @@ async fn handle_chunk_complete(
 
     if let Some(ref al) = audit_logger {
         al.log_completed(
-            Direction::Receive, "http-chunk-complete",
-            &query.filename, total_size, Some(&actual_sha256), None,
-        ).await;
+            Direction::Receive,
+            "http-chunk-complete",
+            &query.filename,
+            total_size,
+            Some(&actual_sha256),
+            None,
+        )
+        .await;
     }
 
     Ok(warp::reply::with_status(
@@ -1547,7 +1692,8 @@ async fn handle_chunk_complete(
             "sha256": actual_sha256,
         })),
         warp::http::StatusCode::OK,
-    ).into_response())
+    )
+    .into_response())
 }
 
 // ─────────────────────────────── WebSocket handler ──────────────────────────
@@ -1561,7 +1707,10 @@ async fn handle_ws_client(
     use warp::ws::Message;
 
     metrics.inc_ws_connections();
-    tracing::debug!("WebSocket client connected (active={})", metrics.active_ws());
+    tracing::debug!(
+        "WebSocket client connected (active={})",
+        metrics.active_ws()
+    );
 
     let (mut tx, mut client_rx) = ws.split();
 
@@ -1596,7 +1745,10 @@ async fn handle_ws_client(
     }
 
     metrics.dec_ws_connections();
-    tracing::debug!("WebSocket client disconnected (active={})", metrics.active_ws());
+    tracing::debug!(
+        "WebSocket client disconnected (active={})",
+        metrics.active_ws()
+    );
 }
 
 // ─────────────────────────────── QUIC server ────────────────────────────────
@@ -1668,9 +1820,9 @@ fn configure_quic_server(tls: Option<&TlsConfig>) -> Result<quinn::ServerConfig>
         // 自动生成自签名证书
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
             .map_err(|e| AeroSyncError::System(format!("Failed to generate certificate: {}", e)))?;
-        let cert_der = cert
-            .serialize_der()
-            .map_err(|e| AeroSyncError::System(format!("Failed to serialize certificate: {}", e)))?;
+        let cert_der = cert.serialize_der().map_err(|e| {
+            AeroSyncError::System(format!("Failed to serialize certificate: {}", e))
+        })?;
         let key_der = cert.serialize_private_key_der();
         (vec![Certificate(cert_der)], PrivateKey(key_der))
     };
@@ -1687,11 +1839,19 @@ fn configure_quic_server(tls: Option<&TlsConfig>) -> Result<quinn::ServerConfig>
 }
 
 /// 从 PEM 文件加载证书链和私钥
-fn load_tls_from_pem(cert_path: &PathBuf, key_path: &PathBuf) -> Result<(Vec<rustls::Certificate>, rustls::PrivateKey)> {
+fn load_tls_from_pem(
+    cert_path: &PathBuf,
+    key_path: &PathBuf,
+) -> Result<(Vec<rustls::Certificate>, rustls::PrivateKey)> {
     use std::io::BufReader;
 
-    let cert_file = std::fs::File::open(cert_path)
-        .map_err(|e| AeroSyncError::System(format!("Cannot open cert file {}: {}", cert_path.display(), e)))?;
+    let cert_file = std::fs::File::open(cert_path).map_err(|e| {
+        AeroSyncError::System(format!(
+            "Cannot open cert file {}: {}",
+            cert_path.display(),
+            e
+        ))
+    })?;
     let mut cert_reader = BufReader::new(cert_file);
     let certs: Vec<rustls::Certificate> = rustls_pemfile::certs(&mut cert_reader)
         .map_err(|e| AeroSyncError::System(format!("Failed to parse cert PEM: {}", e)))?
@@ -1706,8 +1866,13 @@ fn load_tls_from_pem(cert_path: &PathBuf, key_path: &PathBuf) -> Result<(Vec<rus
         )));
     }
 
-    let key_file = std::fs::File::open(key_path)
-        .map_err(|e| AeroSyncError::System(format!("Cannot open key file {}: {}", key_path.display(), e)))?;
+    let key_file = std::fs::File::open(key_path).map_err(|e| {
+        AeroSyncError::System(format!(
+            "Cannot open key file {}: {}",
+            key_path.display(),
+            e
+        ))
+    })?;
     let mut key_reader = BufReader::new(key_file);
 
     // 尝试 PKCS8，再尝试 RSA
@@ -1720,9 +1885,15 @@ fn load_tls_from_pem(cert_path: &PathBuf, key_path: &PathBuf) -> Result<(Vec<rus
             // 重新打开文件读 RSA 格式
             let key_file2 = std::fs::File::open(key_path).ok()?;
             let mut kr = BufReader::new(key_file2);
-            rustls_pemfile::rsa_private_keys(&mut kr).ok()?.into_iter().next().map(rustls::PrivateKey)
+            rustls_pemfile::rsa_private_keys(&mut kr)
+                .ok()?
+                .into_iter()
+                .next()
+                .map(rustls::PrivateKey)
         })
-        .ok_or_else(|| AeroSyncError::System(format!("No private key found in {}", key_path.display())))?;
+        .ok_or_else(|| {
+            AeroSyncError::System(format!("No private key found in {}", key_path.display()))
+        })?;
 
     Ok((certs, key))
 }
@@ -1757,7 +1928,10 @@ async fn handle_quic_connection(
 
         // 格式: UPLOAD:<filename>:<size>[:<token>]
         if !header_str.starts_with("UPLOAD:") {
-            tracing::warn!("QUIC: Unknown command: {}", &header_str[..header_str.len().min(64)]);
+            tracing::warn!(
+                "QUIC: Unknown command: {}",
+                &header_str[..header_str.len().min(64)]
+            );
             continue;
         }
 
@@ -1780,7 +1954,8 @@ async fn handle_quic_connection(
                 Ok(false) => {
                     tracing::warn!("QUIC: Unauthorized from {}", remote_ip);
                     if let Some(ref al) = audit_logger {
-                        al.log_auth_failed("quic", Some(&remote_ip), "Unauthorized").await;
+                        al.log_auth_failed("quic", Some(&remote_ip), "Unauthorized")
+                            .await;
                     }
                     let _ = send.write_all(b"ERROR:Unauthorized").await;
                     let _ = send.finish().await;
@@ -1832,11 +2007,17 @@ async fn handle_quic_connection(
             }
             Err(e) => {
                 if let Some(ref al) = audit_logger {
-                    al.log_failed(Direction::Receive, "quic", filename, file_size, Some(&remote_ip), &e.to_string()).await;
-                }
-                let _ = send
-                    .write_all(format!("ERROR:{}", e).as_bytes())
+                    al.log_failed(
+                        Direction::Receive,
+                        "quic",
+                        filename,
+                        file_size,
+                        Some(&remote_ip),
+                        &e.to_string(),
+                    )
                     .await;
+                }
+                let _ = send.write_all(format!("ERROR:{}", e).as_bytes()).await;
             }
         }
         let _ = send.finish().await;
@@ -1914,7 +2095,15 @@ async fn handle_quic_file_upload(
     });
 
     if let Some(ref al) = audit_logger {
-        al.log_completed(Direction::Receive, "quic", filename, total, Some(&actual_hash), Some(sender_ip)).await;
+        al.log_completed(
+            Direction::Receive,
+            "quic",
+            filename,
+            total,
+            Some(&actual_hash),
+            Some(sender_ip),
+        )
+        .await;
     }
 
     tracing::info!(
@@ -1966,7 +2155,8 @@ fn sanitize_filename(filename: &str) -> String {
     let filename = if filename.contains("..") || filename.starts_with('/') {
         // 仅保留最后一个路径段
         filename
-            .split('/').rfind(|s| !s.is_empty() && *s != ".." && *s != ".")
+            .split('/')
+            .rfind(|s| !s.is_empty() && *s != ".." && *s != ".")
             .unwrap_or("file")
     } else {
         filename
@@ -1992,11 +2182,7 @@ fn sanitize_filename(filename: &str) -> String {
         .join("/")
 }
 
-fn get_unique_file_path(
-    receive_dir: &Path,
-    safe_name: &str,
-    allow_overwrite: bool,
-) -> PathBuf {
+fn get_unique_file_path(receive_dir: &Path, safe_name: &str, allow_overwrite: bool) -> PathBuf {
     let mut path = receive_dir.join(safe_name);
     if allow_overwrite || !path.exists() {
         return path;
@@ -2044,7 +2230,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_filename_normal() {
-        assert_eq!(sanitize_filename("hello-world_v1.2.bin"), "hello-world_v1.2.bin");
+        assert_eq!(
+            sanitize_filename("hello-world_v1.2.bin"),
+            "hello-world_v1.2.bin"
+        );
     }
 
     #[test]
@@ -2064,14 +2253,26 @@ mod tests {
     fn test_sanitize_filename_path_traversal_stripped() {
         // ".." 路径穿越：只保留最后一个段
         let result = sanitize_filename("../../etc/passwd");
-        assert!(!result.contains(".."), "result should not contain ..: {}", result);
-        assert!(!result.starts_with('/'), "result should not start with /: {}", result);
+        assert!(
+            !result.contains(".."),
+            "result should not contain ..: {}",
+            result
+        );
+        assert!(
+            !result.starts_with('/'),
+            "result should not start with /: {}",
+            result
+        );
     }
 
     #[test]
     fn test_sanitize_filename_absolute_path_stripped() {
         let result = sanitize_filename("/etc/passwd");
-        assert!(!result.starts_with('/'), "result should not start with /: {}", result);
+        assert!(
+            !result.starts_with('/'),
+            "result should not start with /: {}",
+            result
+        );
     }
 
     #[test]
@@ -2140,14 +2341,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_receiver_get_config() {
-        let receiver = FileReceiver::new(ServerConfig { http_port: 9999, ..ServerConfig::default() });
+        let receiver = FileReceiver::new(ServerConfig {
+            http_port: 9999,
+            ..ServerConfig::default()
+        });
         assert_eq!(receiver.get_config().await.http_port, 9999);
     }
 
     #[tokio::test]
     async fn test_receiver_update_config() {
         let receiver = FileReceiver::new(ServerConfig::default());
-        let new_cfg = ServerConfig { http_port: 8888, ..ServerConfig::default() };
+        let new_cfg = ServerConfig {
+            http_port: 8888,
+            ..ServerConfig::default()
+        };
         receiver.update_config(new_cfg).await.unwrap();
         assert_eq!(receiver.get_config().await.http_port, 8888);
     }
@@ -2290,7 +2497,10 @@ mod tests {
         let client = reqwest::Client::new();
         let resp = client
             .post(format!("http://127.0.0.1:{}/upload", port))
-            .header("X-File-Hash", "0000000000000000000000000000000000000000000000000000000000000000")
+            .header(
+                "X-File-Hash",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
             .multipart(form)
             .send()
             .await
@@ -2425,12 +2635,19 @@ mod tests {
                 base, task_id, i, total_chunks, filename, total_size, chunk_size
             );
             let resp = client.post(&url).body(data.to_vec()).send().await.unwrap();
-            assert!(resp.status().is_success(), "chunk {} failed: {:?}", i, resp.status());
+            assert!(
+                resp.status().is_success(),
+                "chunk {} failed: {:?}",
+                i,
+                resp.status()
+            );
         }
 
         // /upload/complete: SHA-256 校验 + 更新记录
         let mut hasher = Sha256::new();
-        for _ in 0..total_chunks { hasher.update(data); }
+        for _ in 0..total_chunks {
+            hasher.update(data);
+        }
         let sha = hex::encode(hasher.finalize());
 
         let complete_url = format!(
@@ -2438,7 +2655,11 @@ mod tests {
             base, task_id, filename, total_chunks, total_size, sha
         );
         let resp = client.post(&complete_url).send().await.unwrap();
-        assert!(resp.status().is_success(), "complete failed: {:?}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "complete failed: {:?}",
+            resp.status()
+        );
 
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["status"], "complete");
@@ -2574,12 +2795,22 @@ mod tests {
 
         let client = insecure_https_client();
         let url = format!("https://127.0.0.1:{}/health", https_port);
-        let resp = client.get(&url).send().await
+        let resp = client
+            .get(&url)
+            .send()
+            .await
             .expect("HTTPS /health request failed");
 
-        assert!(resp.status().is_success(), "expected 200, got {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "expected 200, got {}",
+            resp.status()
+        );
         let body: serde_json::Value = resp.json().await.unwrap();
-        assert!(body.get("status").is_some(), "/health should contain 'status' field");
+        assert!(
+            body.get("status").is_some(),
+            "/health should contain 'status' field"
+        );
 
         receiver.stop().await.unwrap();
     }
@@ -2593,9 +2824,10 @@ mod tests {
         let data = b"hello from HTTPS upload test";
 
         // 单文件上传（multipart）
-        let form = reqwest::multipart::Form::new()
-            .part("file", reqwest::multipart::Part::bytes(data.to_vec())
-                .file_name("https_test.txt"));
+        let form = reqwest::multipart::Form::new().part(
+            "file",
+            reqwest::multipart::Part::bytes(data.to_vec()).file_name("https_test.txt"),
+        );
         let resp = client
             .post(format!("{}/upload", base))
             .multipart(form)
@@ -2603,7 +2835,11 @@ mod tests {
             .await
             .expect("HTTPS upload request failed");
 
-        assert!(resp.status().is_success(), "upload failed: {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "upload failed: {}",
+            resp.status()
+        );
 
         // 验证文件落盘
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -2635,7 +2871,10 @@ mod tests {
             enable_quic: false,
             enable_https: true,
             https_port,
-            tls: Some(TlsConfig { cert_path, key_path }),
+            tls: Some(TlsConfig {
+                cert_path,
+                key_path,
+            }),
             receive_directory: recv_dir.path().to_path_buf(),
             ..ServerConfig::default()
         };
@@ -2645,9 +2884,15 @@ mod tests {
 
         let client = insecure_https_client();
         let url = format!("https://127.0.0.1:{}/health", https_port);
-        let resp = client.get(&url).send().await
+        let resp = client
+            .get(&url)
+            .send()
+            .await
             .expect("external cert HTTPS /health request failed");
-        assert!(resp.status().is_success(), "external cert HTTPS should serve /health");
+        assert!(
+            resp.status().is_success(),
+            "external cert HTTPS should serve /health"
+        );
 
         recv.stop().await.unwrap();
     }

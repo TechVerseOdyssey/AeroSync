@@ -114,13 +114,16 @@ impl ResumeState {
 
     /// 已传输字节数（估算，基于已完成分片）
     pub fn bytes_transferred(&self) -> u64 {
-        self.completed_chunks.iter().map(|&i| self.chunk_size_of(i)).sum()
+        self.completed_chunks
+            .iter()
+            .map(|&i| self.chunk_size_of(i))
+            .sum()
     }
 
     /// 计算指定分片的实际大小
     pub fn chunk_size_of(&self, index: u32) -> u64 {
         let last = self.total_chunks.saturating_sub(1);
-        if index == last && !self.total_size.is_multiple_of(self.chunk_size) {
+        if index == last && self.total_size % self.chunk_size != 0 {
             self.total_size % self.chunk_size
         } else {
             self.chunk_size
@@ -163,8 +166,9 @@ impl ResumeStore {
     pub async fn save(&self, state: &ResumeState) -> Result<()> {
         self.ensure_dir().await?;
         let path = self.state_path(state.task_id);
-        let json = serde_json::to_string_pretty(state)
-            .map_err(|e| AeroSyncError::Protocol(format!("Failed to serialize resume state: {}", e)))?;
+        let json = serde_json::to_string_pretty(state).map_err(|e| {
+            AeroSyncError::Protocol(format!("Failed to serialize resume state: {}", e))
+        })?;
         tokio::fs::write(&path, json).await?;
         Ok(())
     }
@@ -174,8 +178,9 @@ impl ResumeStore {
         let path = self.state_path(task_id);
         match tokio::fs::read_to_string(&path).await {
             Ok(content) => {
-                let state: ResumeState = serde_json::from_str(&content)
-                    .map_err(|e| AeroSyncError::Protocol(format!("Failed to parse resume state: {}", e)))?;
+                let state: ResumeState = serde_json::from_str(&content).map_err(|e| {
+                    AeroSyncError::Protocol(format!("Failed to parse resume state: {}", e))
+                })?;
                 Ok(Some(state))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -231,9 +236,9 @@ impl ResumeStore {
         destination: &str,
     ) -> Result<Option<ResumeState>> {
         let pending = self.list_pending().await?;
-        Ok(pending.into_iter().find(|s| {
-            s.source_path == source_path && s.destination == destination
-        }))
+        Ok(pending
+            .into_iter()
+            .find(|s| s.source_path == source_path && s.destination == destination))
     }
 }
 
@@ -293,14 +298,28 @@ mod tests {
 
     #[test]
     fn test_empty_file_has_one_chunk() {
-        let s = ResumeState::new(Uuid::new_v4(), PathBuf::from("/f"), "h".to_string(), 0, DEFAULT_CHUNK_SIZE, None);
+        let s = ResumeState::new(
+            Uuid::new_v4(),
+            PathBuf::from("/f"),
+            "h".to_string(),
+            0,
+            DEFAULT_CHUNK_SIZE,
+            None,
+        );
         assert_eq!(s.total_chunks, 1);
     }
 
     // ── 2. chunk_offset / chunk_size_of ──────────────────────────────────────
     #[test]
     fn test_chunk_offset() {
-        let s = ResumeState::new(Uuid::new_v4(), PathBuf::from("/f"), "h".to_string(), 100 * 1024 * 1024, DEFAULT_CHUNK_SIZE, None);
+        let s = ResumeState::new(
+            Uuid::new_v4(),
+            PathBuf::from("/f"),
+            "h".to_string(),
+            100 * 1024 * 1024,
+            DEFAULT_CHUNK_SIZE,
+            None,
+        );
         assert_eq!(s.chunk_offset(0), 0);
         assert_eq!(s.chunk_offset(1), DEFAULT_CHUNK_SIZE);
         assert_eq!(s.chunk_offset(2), 2 * DEFAULT_CHUNK_SIZE);
@@ -309,7 +328,14 @@ mod tests {
     #[test]
     fn test_last_chunk_size_is_remainder() {
         // 100MB 文件，32MB 分片 → 最后一片 = 100 - 3*32 = 4 MB
-        let s = ResumeState::new(Uuid::new_v4(), PathBuf::from("/f"), "h".to_string(), 100 * 1024 * 1024, DEFAULT_CHUNK_SIZE, None);
+        let s = ResumeState::new(
+            Uuid::new_v4(),
+            PathBuf::from("/f"),
+            "h".to_string(),
+            100 * 1024 * 1024,
+            DEFAULT_CHUNK_SIZE,
+            None,
+        );
         assert_eq!(s.total_chunks, 4);
         assert_eq!(s.chunk_size_of(3), 4 * 1024 * 1024);
         assert_eq!(s.chunk_size_of(0), DEFAULT_CHUNK_SIZE);
@@ -318,7 +344,14 @@ mod tests {
     // ── 3. mark_chunk_done / pending_chunks / is_complete ────────────────────
     #[test]
     fn test_mark_chunk_done() {
-        let mut s = ResumeState::new(Uuid::new_v4(), PathBuf::from("/f"), "h".to_string(), 64 * 1024 * 1024, DEFAULT_CHUNK_SIZE, None);
+        let mut s = ResumeState::new(
+            Uuid::new_v4(),
+            PathBuf::from("/f"),
+            "h".to_string(),
+            64 * 1024 * 1024,
+            DEFAULT_CHUNK_SIZE,
+            None,
+        );
         assert_eq!(s.pending_chunks(), vec![0, 1]);
         s.mark_chunk_done(0);
         assert_eq!(s.pending_chunks(), vec![1]);
@@ -328,7 +361,14 @@ mod tests {
 
     #[test]
     fn test_mark_chunk_done_idempotent() {
-        let mut s = ResumeState::new(Uuid::new_v4(), PathBuf::from("/f"), "h".to_string(), DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_SIZE, None);
+        let mut s = ResumeState::new(
+            Uuid::new_v4(),
+            PathBuf::from("/f"),
+            "h".to_string(),
+            DEFAULT_CHUNK_SIZE,
+            DEFAULT_CHUNK_SIZE,
+            None,
+        );
         s.mark_chunk_done(0);
         s.mark_chunk_done(0); // 重复标记不应产生重复
         assert_eq!(s.completed_chunks.len(), 1);
@@ -336,7 +376,14 @@ mod tests {
 
     #[test]
     fn test_bytes_transferred() {
-        let mut s = ResumeState::new(Uuid::new_v4(), PathBuf::from("/f"), "h".to_string(), 100 * 1024 * 1024, DEFAULT_CHUNK_SIZE, None);
+        let mut s = ResumeState::new(
+            Uuid::new_v4(),
+            PathBuf::from("/f"),
+            "h".to_string(),
+            100 * 1024 * 1024,
+            DEFAULT_CHUNK_SIZE,
+            None,
+        );
         assert_eq!(s.bytes_transferred(), 0);
         s.mark_chunk_done(0);
         assert_eq!(s.bytes_transferred(), DEFAULT_CHUNK_SIZE);

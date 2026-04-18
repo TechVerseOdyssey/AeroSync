@@ -14,7 +14,7 @@ use crate::ftp::{FtpConfig, FtpTransfer};
 use crate::http::{HttpConfig, HttpTransfer};
 use crate::quic::{QuicConfig, QuicTransfer};
 use crate::s3::{S3Config, S3Transfer};
-use crate::traits::{TransferProtocol, TransferProgress as ProtoProgress};
+use crate::traits::{TransferProgress as ProtoProgress, TransferProtocol};
 
 pub struct AutoAdapter {
     http_config: HttpConfig,
@@ -72,7 +72,9 @@ impl ProtocolAdapter for AutoAdapter {
         // S3 路由
         if task.destination.starts_with("s3://") {
             let cfg = self.s3_config.clone().ok_or_else(|| {
-                AeroSyncError::InvalidConfig("S3 config not set; use AutoAdapter::with_s3()".to_string())
+                AeroSyncError::InvalidConfig(
+                    "S3 config not set; use AutoAdapter::with_s3()".to_string(),
+                )
             })?;
             let s3 = S3Transfer::new(cfg)?;
             let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
@@ -91,7 +93,9 @@ impl ProtocolAdapter for AutoAdapter {
         // FTP 路由
         if task.destination.starts_with("ftp://") {
             let cfg = self.ftp_config.clone().ok_or_else(|| {
-                AeroSyncError::InvalidConfig("FTP config not set; use AutoAdapter::with_ftp()".to_string())
+                AeroSyncError::InvalidConfig(
+                    "FTP config not set; use AutoAdapter::with_ftp()".to_string(),
+                )
             })?;
             let ft = FtpTransfer::new(cfg);
             let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
@@ -124,7 +128,10 @@ impl ProtocolAdapter for AutoAdapter {
             qt.upload_file(task, tx).await
         } else {
             // HTTP（包括 http:// 和 host:port 规范化后的地址）
-            let ht = HttpTransfer::new_with_client(Arc::clone(&self.shared_client), self.http_config.clone());
+            let ht = HttpTransfer::new_with_client(
+                Arc::clone(&self.shared_client),
+                self.http_config.clone(),
+            );
             let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
             let ptx = progress_tx.clone();
             tokio::spawn(async move {
@@ -146,9 +153,10 @@ impl ProtocolAdapter for AutoAdapter {
     ) -> Result<()> {
         // S3 路由
         if task.destination.starts_with("s3://") {
-            let cfg = self.s3_config.clone().ok_or_else(|| {
-                AeroSyncError::InvalidConfig("S3 config not set".to_string())
-            })?;
+            let cfg = self
+                .s3_config
+                .clone()
+                .ok_or_else(|| AeroSyncError::InvalidConfig("S3 config not set".to_string()))?;
             let s3 = S3Transfer::new(cfg)?;
             let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
             let ptx = progress_tx.clone();
@@ -165,9 +173,10 @@ impl ProtocolAdapter for AutoAdapter {
 
         // FTP 路由
         if task.destination.starts_with("ftp://") {
-            let cfg = self.ftp_config.clone().ok_or_else(|| {
-                AeroSyncError::InvalidConfig("FTP config not set".to_string())
-            })?;
+            let cfg = self
+                .ftp_config
+                .clone()
+                .ok_or_else(|| AeroSyncError::InvalidConfig("FTP config not set".to_string()))?;
             let ft = FtpTransfer::new(cfg);
             let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
             let ptx = progress_tx.clone();
@@ -197,7 +206,10 @@ impl ProtocolAdapter for AutoAdapter {
             });
             qt.download_file(task, tx).await
         } else {
-            let ht = HttpTransfer::new_with_client(Arc::clone(&self.shared_client), self.http_config.clone());
+            let ht = HttpTransfer::new_with_client(
+                Arc::clone(&self.shared_client),
+                self.http_config.clone(),
+            );
             let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
             let ptx = progress_tx.clone();
             tokio::spawn(async move {
@@ -253,7 +265,8 @@ impl ProtocolAdapter for AutoAdapter {
             }
         });
 
-        ht.upload_chunked(&task.source_path, &base_url, state, tx).await
+        ht.upload_chunked(&task.source_path, &base_url, state, tx)
+            .await
     }
 }
 
@@ -275,9 +288,9 @@ fn extract_base_url(url: &str) -> Result<String> {
 }
 
 fn resolve_quic_config(destination: &str, base: &QuicConfig) -> Result<QuicConfig> {
-    let stripped = destination
-        .strip_prefix("quic://")
-        .ok_or_else(|| AeroSyncError::InvalidConfig(format!("Invalid QUIC URL: {}", destination)))?;
+    let stripped = destination.strip_prefix("quic://").ok_or_else(|| {
+        AeroSyncError::InvalidConfig(format!("Invalid QUIC URL: {}", destination))
+    })?;
 
     let host_port = stripped.split('/').next().unwrap_or(stripped);
     let (host, port_str) = host_port.split_once(':').ok_or_else(|| {

@@ -2,14 +2,14 @@
 //!
 //! 实现基于 HMAC-SHA256 的 Token 认证机制。
 
+use hex;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-use sha2::{Sha256, Digest};
-use hex;
 
-use crate::error::{Result, AeroSyncError};
+use crate::error::{AeroSyncError, Result};
 
 /// Token 信息
 #[derive(Debug, Clone)]
@@ -71,7 +71,7 @@ impl TokenManager {
     pub fn new(secret_key: String) -> Result<Self> {
         if secret_key.is_empty() {
             return Err(AeroSyncError::Config(
-                "Secret key cannot be empty".to_string()
+                "Secret key cannot be empty".to_string(),
             ));
         }
 
@@ -96,16 +96,16 @@ impl TokenManager {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         let expires_at = now + (self.lifetime_hours * 3600);
         let uuid = Uuid::new_v4().to_string();
-        
+
         // 生成签名
         let signature = self.sign_token(&uuid, now, expires_at);
-        
+
         // 拼接 Token: {uuid}.{timestamp}.{expires}.{signature}
         let token = format!("{}.{}.{}.{}", uuid, now, expires_at, signature);
-        
+
         // 存储 Token 信息
         let token_info = TokenInfo {
             token: token.clone(),
@@ -113,12 +113,9 @@ impl TokenManager {
             expires_at,
             revoked: false,
         };
-        
-        self.tokens
-            .write()
-            .unwrap()
-            .insert(uuid, token_info);
-        
+
+        self.tokens.write().unwrap().insert(uuid, token_info);
+
         Ok(token)
     }
 
@@ -131,12 +128,12 @@ impl TokenManager {
         }
 
         let uuid = parts[0];
-        let created_at: u64 = parts[1].parse().map_err(|_| {
-            AeroSyncError::Auth("Invalid token format".to_string())
-        })?;
-        let expires_at: u64 = parts[2].parse().map_err(|_| {
-            AeroSyncError::Auth("Invalid token format".to_string())
-        })?;
+        let created_at: u64 = parts[1]
+            .parse()
+            .map_err(|_| AeroSyncError::Auth("Invalid token format".to_string()))?;
+        let expires_at: u64 = parts[2]
+            .parse()
+            .map_err(|_| AeroSyncError::Auth("Invalid token format".to_string()))?;
         let signature = parts[3];
 
         // 验证签名
@@ -156,7 +153,7 @@ impl TokenManager {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         Ok(now <= expires_at)
     }
 
@@ -169,7 +166,7 @@ impl TokenManager {
 
         let uuid = parts[0];
         let mut tokens = self.tokens.write().unwrap();
-        
+
         if let Some(token_info) = tokens.get_mut(uuid) {
             token_info.revoked = true;
             Ok(())
@@ -210,7 +207,7 @@ mod tests {
     fn test_token_generation() {
         let manager = TokenManager::new("test-secret".to_string()).unwrap();
         let token = manager.generate_token().unwrap();
-        
+
         // Token 应该包含 4 个部分
         assert_eq!(token.split('.').count(), 4);
     }
@@ -219,7 +216,7 @@ mod tests {
     fn test_token_verification() {
         let manager = TokenManager::new("test-secret".to_string()).unwrap();
         let token = manager.generate_token().unwrap();
-        
+
         // 刚生成的 Token 应该有效
         assert!(manager.verify_token(&token).unwrap());
     }
@@ -227,10 +224,10 @@ mod tests {
     #[test]
     fn test_invalid_token() {
         let manager = TokenManager::new("test-secret".to_string()).unwrap();
-        
+
         // 无效的 Token 格式
         assert!(!manager.verify_token("invalid-token").unwrap());
-        
+
         // 篡改的 Token
         let token = manager.generate_token().unwrap();
         let tampered = token.replace("a", "b");
@@ -241,13 +238,13 @@ mod tests {
     fn test_token_revocation() {
         let manager = TokenManager::new("test-secret".to_string()).unwrap();
         let token = manager.generate_token().unwrap();
-        
+
         // 撤销前应该有效
         assert!(manager.verify_token(&token).unwrap());
-        
+
         // 撤销
         manager.revoke_token(&token).unwrap();
-        
+
         // 撤销后应该无效
         assert!(!manager.verify_token(&token).unwrap());
     }
@@ -257,12 +254,12 @@ mod tests {
         let manager = TokenManager::new("test-secret".to_string())
             .unwrap()
             .with_lifetime(0); // 0 小时，立即过期
-        
+
         let token = manager.generate_token().unwrap();
-        
+
         // 等待 1 秒让 Token 过期
         sleep(Duration::from_secs(1));
-        
+
         // 过期的 Token 应该无效
         assert!(!manager.verify_token(&token).unwrap());
     }
@@ -272,22 +269,21 @@ mod tests {
         let manager = TokenManager::new("test-secret".to_string())
             .unwrap()
             .with_lifetime(0);
-        
+
         // 生成一些 Token
         for _ in 0..5 {
             manager.generate_token().unwrap();
         }
-        
+
         assert_eq!(manager.active_token_count(), 5);
-        
+
         // 等待过期
         sleep(Duration::from_secs(1));
-        
+
         // 清理
         manager.cleanup_expired_tokens();
-        
+
         // 应该没有有效 Token
         assert_eq!(manager.active_token_count(), 0);
     }
 }
-

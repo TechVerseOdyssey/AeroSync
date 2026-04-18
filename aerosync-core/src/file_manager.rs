@@ -38,9 +38,10 @@ impl FileManager {
     pub async fn get_file_info<P: AsRef<Path>>(path: P) -> Result<FileInfo> {
         let path = path.as_ref();
         let metadata = tokio::fs::metadata(path).await?;
-        
+
         // Better handling for file names with non-ASCII characters (e.g., Chinese)
-        let name = path.file_name()
+        let name = path
+            .file_name()
             .and_then(|os_str| os_str.to_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
@@ -81,12 +82,10 @@ impl FileManager {
             }
         }
 
-        files.sort_by(|a, b| {
-            match (a.is_directory, b.is_directory) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.name.cmp(&b.name),
-            }
+        files.sort_by(|a, b| match (a.is_directory, b.is_directory) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
         });
 
         Ok(files)
@@ -126,7 +125,9 @@ impl FileManager {
 
         let path_str = path.to_string_lossy();
         if path_str.contains('\0') {
-            return Err(AeroSyncError::InvalidConfig("Path contains null character".to_string()));
+            return Err(AeroSyncError::InvalidConfig(
+                "Path contains null character".to_string(),
+            ));
         }
 
         // 禁止路径中出现 `..` 组件，防止目录穿越攻击
@@ -216,7 +217,12 @@ fn is_executable(path: &Path) -> bool {
         // Windows: 以扩展名判断是否可执行
         path.extension()
             .and_then(|e| e.to_str())
-            .map(|e| matches!(e.to_ascii_lowercase().as_str(), "exe" | "bat" | "cmd" | "com"))
+            .map(|e| {
+                matches!(
+                    e.to_ascii_lowercase().as_str(),
+                    "exe" | "bat" | "cmd" | "com"
+                )
+            })
             .unwrap_or(false)
     }
     #[cfg(not(any(unix, windows)))]
@@ -337,7 +343,12 @@ mod tests {
     async fn test_verify_sha256_mismatch() {
         let dir = TempDir::new().unwrap();
         let path = write_temp_file(&dir, "d.bin", b"original").await;
-        let ok = FileManager::verify_sha256(&path, "0000000000000000000000000000000000000000000000000000000000000000").await.unwrap();
+        let ok = FileManager::verify_sha256(
+            &path,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .await
+        .unwrap();
         assert!(!ok);
     }
 
@@ -394,7 +405,9 @@ mod tests {
     async fn test_list_directory_dirs_before_files() {
         let dir = TempDir::new().unwrap();
         write_temp_file(&dir, "file.bin", b"data").await;
-        tokio::fs::create_dir(dir.path().join("subdir")).await.unwrap();
+        tokio::fs::create_dir(dir.path().join("subdir"))
+            .await
+            .unwrap();
 
         let entries = FileManager::list_directory(dir.path()).await.unwrap();
         assert_eq!(entries.len(), 2);
@@ -466,7 +479,7 @@ mod tests {
         let path = write_temp_file(&dir, "large.bin", &content).await;
         let hash = FileManager::compute_sha256(&path).await.unwrap();
         assert_eq!(hash.len(), 64); // hex-encoded 32 bytes
-        // Verify consistency
+                                    // Verify consistency
         let hash2 = FileManager::compute_sha256(&path).await.unwrap();
         assert_eq!(hash, hash2);
     }

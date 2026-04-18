@@ -38,16 +38,27 @@ async fn test_task_registry_completed_fields() {
     let server = AeroSyncMcpServer::new();
     let id = Uuid::new_v4();
 
-    server.tasks_registry().lock().await.insert(id, TaskEntry {
-        status: BackgroundTaskStatus::Completed { files: 7, bytes: 204800, speed_mbs: 12.3 },
-        description: "send_file: /tmp/a → http://host/upload".to_string(),
-        last_updated: Instant::now(),
-    });
+    server.tasks_registry().lock().await.insert(
+        id,
+        TaskEntry {
+            status: BackgroundTaskStatus::Completed {
+                files: 7,
+                bytes: 204800,
+                speed_mbs: 12.3,
+            },
+            description: "send_file: /tmp/a → http://host/upload".to_string(),
+            last_updated: Instant::now(),
+        },
+    );
 
     let guard = server.tasks_registry().lock().await;
     let entry = guard.get(&id).expect("task should be present");
     match &entry.status {
-        BackgroundTaskStatus::Completed { files, bytes, speed_mbs } => {
+        BackgroundTaskStatus::Completed {
+            files,
+            bytes,
+            speed_mbs,
+        } => {
             assert_eq!(*files, 7);
             assert_eq!(*bytes, 204800);
             assert!((*speed_mbs - 12.3).abs() < 0.001);
@@ -63,16 +74,25 @@ async fn test_task_registry_failed_message_preserved() {
     let server = AeroSyncMcpServer::new();
     let id = Uuid::new_v4();
 
-    server.tasks_registry().lock().await.insert(id, TaskEntry {
-        status: BackgroundTaskStatus::Failed("connection refused to 192.168.1.1:7788".to_string()),
-        description: "send_file: /tmp/b → http://192.168.1.1:7788/upload".to_string(),
-        last_updated: Instant::now(),
-    });
+    server.tasks_registry().lock().await.insert(
+        id,
+        TaskEntry {
+            status: BackgroundTaskStatus::Failed(
+                "connection refused to 192.168.1.1:7788".to_string(),
+            ),
+            description: "send_file: /tmp/b → http://192.168.1.1:7788/upload".to_string(),
+            last_updated: Instant::now(),
+        },
+    );
 
     let guard = server.tasks_registry().lock().await;
     match &guard.get(&id).unwrap().status {
         BackgroundTaskStatus::Failed(msg) => {
-            assert!(msg.contains("connection refused"), "unexpected msg: {}", msg);
+            assert!(
+                msg.contains("connection refused"),
+                "unexpected msg: {}",
+                msg
+            );
         }
         other => panic!("expected Failed, got {:?}", other),
     }
@@ -84,14 +104,20 @@ async fn test_task_registry_running_state() {
     let server = AeroSyncMcpServer::new();
     let id = Uuid::new_v4();
 
-    server.tasks_registry().lock().await.insert(id, TaskEntry {
-        status: BackgroundTaskStatus::Running,
-        description: "send_directory: /data → http://host/upload".to_string(),
-        last_updated: Instant::now(),
-    });
+    server.tasks_registry().lock().await.insert(
+        id,
+        TaskEntry {
+            status: BackgroundTaskStatus::Running,
+            description: "send_directory: /data → http://host/upload".to_string(),
+            last_updated: Instant::now(),
+        },
+    );
 
     let guard = server.tasks_registry().lock().await;
-    assert!(matches!(guard.get(&id).unwrap().status, BackgroundTaskStatus::Running));
+    assert!(matches!(
+        guard.get(&id).unwrap().status,
+        BackgroundTaskStatus::Running
+    ));
 }
 
 /// Pending → Running → Completed state progression in the registry.
@@ -101,29 +127,64 @@ async fn test_task_registry_state_progression() {
     let id = Uuid::new_v4();
 
     // Insert as Pending
-    server.tasks_registry().lock().await.insert(id, TaskEntry {
-        status: BackgroundTaskStatus::Pending,
-        description: "progression test".to_string(),
-        last_updated: Instant::now(),
-    });
+    server.tasks_registry().lock().await.insert(
+        id,
+        TaskEntry {
+            status: BackgroundTaskStatus::Pending,
+            description: "progression test".to_string(),
+            last_updated: Instant::now(),
+        },
+    );
     assert!(matches!(
-        server.tasks_registry().lock().await.get(&id).unwrap().status,
+        server
+            .tasks_registry()
+            .lock()
+            .await
+            .get(&id)
+            .unwrap()
+            .status,
         BackgroundTaskStatus::Pending
     ));
 
     // Advance to Running
-    server.tasks_registry().lock().await.get_mut(&id).unwrap().status =
-        BackgroundTaskStatus::Running;
+    server
+        .tasks_registry()
+        .lock()
+        .await
+        .get_mut(&id)
+        .unwrap()
+        .status = BackgroundTaskStatus::Running;
     assert!(matches!(
-        server.tasks_registry().lock().await.get(&id).unwrap().status,
+        server
+            .tasks_registry()
+            .lock()
+            .await
+            .get(&id)
+            .unwrap()
+            .status,
         BackgroundTaskStatus::Running
     ));
 
     // Advance to Completed
-    server.tasks_registry().lock().await.get_mut(&id).unwrap().status =
-        BackgroundTaskStatus::Completed { files: 1, bytes: 1024, speed_mbs: 5.0 };
+    server
+        .tasks_registry()
+        .lock()
+        .await
+        .get_mut(&id)
+        .unwrap()
+        .status = BackgroundTaskStatus::Completed {
+        files: 1,
+        bytes: 1024,
+        speed_mbs: 5.0,
+    };
     assert!(matches!(
-        server.tasks_registry().lock().await.get(&id).unwrap().status,
+        server
+            .tasks_registry()
+            .lock()
+            .await
+            .get(&id)
+            .unwrap()
+            .status,
         BackgroundTaskStatus::Completed { .. }
     ));
 }
@@ -152,29 +213,53 @@ async fn test_task_store_survives_restart() {
     {
         let store = TaskStore::open(&db_path).unwrap();
 
-        store.upsert(completed_id, &TaskEntry {
-            status: BackgroundTaskStatus::Completed { files: 3, bytes: 9000, speed_mbs: 15.0 },
-            description: "completed task".to_string(),
-            last_updated: Instant::now(),
-        }).await;
+        store
+            .upsert(
+                completed_id,
+                &TaskEntry {
+                    status: BackgroundTaskStatus::Completed {
+                        files: 3,
+                        bytes: 9000,
+                        speed_mbs: 15.0,
+                    },
+                    description: "completed task".to_string(),
+                    last_updated: Instant::now(),
+                },
+            )
+            .await;
 
-        store.upsert(failed_id, &TaskEntry {
-            status: BackgroundTaskStatus::Failed("disk full".to_string()),
-            description: "failed task".to_string(),
-            last_updated: Instant::now(),
-        }).await;
+        store
+            .upsert(
+                failed_id,
+                &TaskEntry {
+                    status: BackgroundTaskStatus::Failed("disk full".to_string()),
+                    description: "failed task".to_string(),
+                    last_updated: Instant::now(),
+                },
+            )
+            .await;
 
-        store.upsert(pending_id, &TaskEntry {
-            status: BackgroundTaskStatus::Pending,
-            description: "pending — never completed".to_string(),
-            last_updated: Instant::now(),
-        }).await;
+        store
+            .upsert(
+                pending_id,
+                &TaskEntry {
+                    status: BackgroundTaskStatus::Pending,
+                    description: "pending — never completed".to_string(),
+                    last_updated: Instant::now(),
+                },
+            )
+            .await;
 
-        store.upsert(running_id, &TaskEntry {
-            status: BackgroundTaskStatus::Running,
-            description: "running — interrupted by shutdown".to_string(),
-            last_updated: Instant::now(),
-        }).await;
+        store
+            .upsert(
+                running_id,
+                &TaskEntry {
+                    status: BackgroundTaskStatus::Running,
+                    description: "running — interrupted by shutdown".to_string(),
+                    last_updated: Instant::now(),
+                },
+            )
+            .await;
     } // store dropped — simulates process exit
 
     // "second process": reload
@@ -183,7 +268,8 @@ async fn test_task_store_survives_restart() {
     assert_eq!(restored.len(), 4);
 
     let find = |id: Uuid| {
-        restored.iter()
+        restored
+            .iter()
             .find(|(rid, _)| *rid == id)
             .map(|(_, e)| e.status.clone())
             .expect("task not found after reload")
@@ -191,7 +277,11 @@ async fn test_task_store_survives_restart() {
 
     // Completed survives as-is
     match find(completed_id) {
-        BackgroundTaskStatus::Completed { files, bytes, speed_mbs } => {
+        BackgroundTaskStatus::Completed {
+            files,
+            bytes,
+            speed_mbs,
+        } => {
             assert_eq!(files, 3);
             assert_eq!(bytes, 9000);
             assert!((speed_mbs - 15.0).abs() < 0.001);
@@ -209,18 +299,26 @@ async fn test_task_store_survives_restart() {
     match find(pending_id) {
         BackgroundTaskStatus::Failed(msg) => assert!(
             msg.contains("process restarted"),
-            "expected 'process restarted', got: {}", msg
+            "expected 'process restarted', got: {}",
+            msg
         ),
-        other => panic!("pending task: expected Failed(process restarted), got {:?}", other),
+        other => panic!(
+            "pending task: expected Failed(process restarted), got {:?}",
+            other
+        ),
     }
 
     // Running at shutdown → also Failed("process restarted…")
     match find(running_id) {
         BackgroundTaskStatus::Failed(msg) => assert!(
             msg.contains("process restarted"),
-            "expected 'process restarted', got: {}", msg
+            "expected 'process restarted', got: {}",
+            msg
         ),
-        other => panic!("running task: expected Failed(process restarted), got {:?}", other),
+        other => panic!(
+            "running task: expected Failed(process restarted), got {:?}",
+            other
+        ),
     }
 }
 
@@ -233,23 +331,38 @@ async fn test_task_store_upsert_overwrites() {
 
     let id = Uuid::new_v4();
 
-    store.upsert(id, &TaskEntry {
-        status: BackgroundTaskStatus::Pending,
-        description: "evolving task".to_string(),
-        last_updated: Instant::now(),
-    }).await;
+    store
+        .upsert(
+            id,
+            &TaskEntry {
+                status: BackgroundTaskStatus::Pending,
+                description: "evolving task".to_string(),
+                last_updated: Instant::now(),
+            },
+        )
+        .await;
 
-    store.upsert(id, &TaskEntry {
-        status: BackgroundTaskStatus::Completed { files: 2, bytes: 500, speed_mbs: 3.0 },
-        description: "evolving task".to_string(),
-        last_updated: Instant::now(),
-    }).await;
+    store
+        .upsert(
+            id,
+            &TaskEntry {
+                status: BackgroundTaskStatus::Completed {
+                    files: 2,
+                    bytes: 500,
+                    speed_mbs: 3.0,
+                },
+                description: "evolving task".to_string(),
+                last_updated: Instant::now(),
+            },
+        )
+        .await;
 
     let all = store.load_all().await;
     assert_eq!(all.len(), 1, "upsert should not create a duplicate row");
     assert!(
         matches!(all[0].1.status, BackgroundTaskStatus::Completed { .. }),
-        "status should be Completed after upsert, got {:?}", all[0].1.status
+        "status should be Completed after upsert, got {:?}",
+        all[0].1.status
     );
 }
 
@@ -261,20 +374,35 @@ async fn test_restore_tasks_populates_registry() {
     let store = Arc::new(TaskStore::open(&db_path).unwrap());
 
     let id = Uuid::new_v4();
-    store.upsert(id, &TaskEntry {
-        status: BackgroundTaskStatus::Completed { files: 1, bytes: 100, speed_mbs: 1.0 },
-        description: "restored task".to_string(),
-        last_updated: Instant::now(),
-    }).await;
+    store
+        .upsert(
+            id,
+            &TaskEntry {
+                status: BackgroundTaskStatus::Completed {
+                    files: 1,
+                    bytes: 100,
+                    speed_mbs: 1.0,
+                },
+                description: "restored task".to_string(),
+                last_updated: Instant::now(),
+            },
+        )
+        .await;
 
     let server = AeroSyncMcpServer::new().with_task_store(Arc::clone(&store));
     let restored = store.load_all().await;
     server.restore_tasks(restored).await;
 
     let guard = server.tasks_registry().lock().await;
-    assert!(guard.contains_key(&id), "registry should contain restored task after restore_tasks()");
     assert!(
-        matches!(guard.get(&id).unwrap().status, BackgroundTaskStatus::Completed { .. }),
+        guard.contains_key(&id),
+        "registry should contain restored task after restore_tasks()"
+    );
+    assert!(
+        matches!(
+            guard.get(&id).unwrap().status,
+            BackgroundTaskStatus::Completed { .. }
+        ),
         "restored status should be Completed"
     );
 }
@@ -294,7 +422,8 @@ async fn test_evict_old_keeps_fresh_removes_ancient() {
                 status TEXT NOT NULL, files INTEGER, bytes INTEGER,
                 speed_mbs REAL, error TEXT, updated_at INTEGER NOT NULL
             );",
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO tasks VALUES ('ancient', 'ancient task', 'completed', 1, 100, 1.0, NULL, 0)",
             [],
@@ -305,18 +434,34 @@ async fn test_evict_old_keeps_fresh_removes_ancient() {
 
     // Insert a fresh task
     let fresh_id = Uuid::new_v4();
-    store.upsert(fresh_id, &TaskEntry {
-        status: BackgroundTaskStatus::Completed { files: 1, bytes: 50, speed_mbs: 1.0 },
-        description: "fresh".to_string(),
-        last_updated: Instant::now(),
-    }).await;
+    store
+        .upsert(
+            fresh_id,
+            &TaskEntry {
+                status: BackgroundTaskStatus::Completed {
+                    files: 1,
+                    bytes: 50,
+                    speed_mbs: 1.0,
+                },
+                description: "fresh".to_string(),
+                last_updated: Instant::now(),
+            },
+        )
+        .await;
 
     // Evict tasks older than 1 second — ancient (epoch 0) should be removed
     store.evict_old(1).await;
 
     let remaining = store.load_all().await;
-    assert_eq!(remaining.len(), 1, "only fresh task should remain after eviction");
-    assert_eq!(remaining[0].0, fresh_id, "remaining task should be the fresh one");
+    assert_eq!(
+        remaining.len(),
+        1,
+        "only fresh task should remain after eviction"
+    );
+    assert_eq!(
+        remaining[0].0, fresh_id,
+        "remaining task should be the fresh one"
+    );
 }
 
 // ── 6. P1 修复回归测试：send_file 必须把 resume_json_path 写入 SQLite ──────────
@@ -373,7 +518,9 @@ async fn test_send_file_records_resume_path_in_sqlite() {
     );
 
     let resume_path: String = conn
-        .query_row("SELECT resume_json_path FROM tasks LIMIT 1", [], |r| r.get(0))
+        .query_row("SELECT resume_json_path FROM tasks LIMIT 1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     let expected_prefix = aerosync_dir
         .join(".aerosync")
@@ -439,7 +586,9 @@ async fn test_send_file_keeps_resume_path_after_failure() {
     // 失败后 resume_json_path 必须保留（让重启后 recovery 可识别）
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let resume_path: Option<String> = conn
-        .query_row("SELECT resume_json_path FROM tasks LIMIT 1", [], |r| r.get(0))
+        .query_row("SELECT resume_json_path FROM tasks LIMIT 1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert!(
         resume_path.is_some(),
@@ -493,7 +642,9 @@ async fn test_recover_marks_already_complete_state_as_completed() {
     // 用 ResumeStore 落盘到 {aerosync_dir}/.aerosync/{task_id}.json
     let resume_store = ResumeStore::new(&aerosync_dir);
     resume_store.save(&state).await.unwrap();
-    let resume_json = aerosync_dir.join(".aerosync").join(format!("{}.json", task_id));
+    let resume_json = aerosync_dir
+        .join(".aerosync")
+        .join(format!("{}.json", task_id));
     assert!(resume_json.exists(), "fixture: ResumeStore 应已写入 JSON");
 
     // TaskStore 注册一个 Pending 任务并指向该 JSON
@@ -518,7 +669,11 @@ async fn test_recover_marks_already_complete_state_as_completed() {
 
     // registry 中状态必须是 Completed
     let guard = server.tasks_registry().lock().await;
-    match &guard.get(&task_id).expect("task should be in registry").status {
+    match &guard
+        .get(&task_id)
+        .expect("task should be in registry")
+        .status
+    {
         BackgroundTaskStatus::Completed { bytes, .. } => {
             assert_eq!(*bytes, chunk_size, "Completed.bytes 应等于 total_size");
         }
@@ -527,7 +682,10 @@ async fn test_recover_marks_already_complete_state_as_completed() {
     drop(guard);
 
     // JSON 文件必须已被删除（防止重复扫描）
-    assert!(!resume_json.exists(), "已完成任务的 ResumeState JSON 必须被清理");
+    assert!(
+        !resume_json.exists(),
+        "已完成任务的 ResumeState JSON 必须被清理"
+    );
 }
 
 /// 损坏的 ResumeState JSON（无法解析）：recover 必须将任务标为 Failed
@@ -544,7 +702,9 @@ async fn test_recover_handles_malformed_resume_json() {
     tokio::fs::create_dir_all(&resume_subdir).await.unwrap();
     let task_id = Uuid::new_v4();
     let resume_json = resume_subdir.join(format!("{}.json", task_id));
-    tokio::fs::write(&resume_json, b"this is not valid json {").await.unwrap();
+    tokio::fs::write(&resume_json, b"this is not valid json {")
+        .await
+        .unwrap();
 
     store
         .upsert_with_resume(
@@ -566,7 +726,11 @@ async fn test_recover_handles_malformed_resume_json() {
     assert_eq!(count, 0, "解析失败的任务不应计入 recovered（未 spawn）");
 
     let guard = server.tasks_registry().lock().await;
-    match &guard.get(&task_id).expect("task should still be tracked").status {
+    match &guard
+        .get(&task_id)
+        .expect("task should still be tracked")
+        .status
+    {
         BackgroundTaskStatus::Failed(msg) => {
             assert!(
                 msg.contains("recovery failed") && msg.contains("parse error"),
@@ -588,7 +752,9 @@ async fn test_recover_skips_tasks_with_missing_resume_json() {
     let store = Arc::new(TaskStore::open(&db_path).unwrap());
 
     let task_id = Uuid::new_v4();
-    let ghost_path = aerosync_dir.join(".aerosync").join(format!("{}.json", task_id));
+    let ghost_path = aerosync_dir
+        .join(".aerosync")
+        .join(format!("{}.json", task_id));
     // 故意不创建文件
     store
         .upsert_with_resume(
@@ -622,7 +788,8 @@ fn test_mcp_config_defaults_are_consistent() {
     assert!(
         cfg.task_ttl >= cfg.transfer_timeout,
         "task_ttl({:?}) 必须 ≥ transfer_timeout({:?})，否则进行中任务可能被误清",
-        cfg.task_ttl, cfg.transfer_timeout
+        cfg.task_ttl,
+        cfg.transfer_timeout
     );
 }
 
@@ -664,8 +831,8 @@ fn test_mcp_config_task_ttl_is_in_seconds() {
 mod e2e {
     use super::*;
     use rmcp::{
-        ClientHandler, ServiceExt,
         model::{CallToolRequestParams, ClientInfo},
+        ClientHandler, ServiceExt,
     };
 
     #[derive(Debug, Clone, Default)]
@@ -714,7 +881,10 @@ mod e2e {
         let server = AeroSyncMcpServer::new().with_aerosync_dir(dir.path().to_path_buf());
         let (client, _h) = spawn_pair(server).await;
 
-        let tools = client.list_tools(None).await.expect("list_tools should succeed");
+        let tools = client
+            .list_tools(None)
+            .await
+            .expect("list_tools should succeed");
         let names: Vec<String> = tools.tools.iter().map(|t| t.name.to_string()).collect();
 
         let expected = [
@@ -753,9 +923,7 @@ mod e2e {
             .unwrap()
             .clone();
         let result = client
-            .call_tool(
-                CallToolRequestParams::new("get_transfer_status").with_arguments(args),
-            )
+            .call_tool(CallToolRequestParams::new("get_transfer_status").with_arguments(args))
             .await
             .expect("call should succeed");
 
@@ -815,15 +983,15 @@ mod e2e {
             .unwrap()
             .clone();
         let result = client
-            .call_tool(
-                CallToolRequestParams::new("get_receiver_status").with_arguments(args_new),
-            )
+            .call_tool(CallToolRequestParams::new("get_receiver_status").with_arguments(args_new))
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(first_text(&result)).unwrap();
         assert_eq!(
-            parsed["success"], serde_json::json!(true),
-            "正确密钥应放行，实际响应：{}", first_text(&result)
+            parsed["success"],
+            serde_json::json!(true),
+            "正确密钥应放行，实际响应：{}",
+            first_text(&result)
         );
 
         // 旧字段名 alias
@@ -832,15 +1000,15 @@ mod e2e {
             .unwrap()
             .clone();
         let result = client
-            .call_tool(
-                CallToolRequestParams::new("get_receiver_status").with_arguments(args_old),
-            )
+            .call_tool(CallToolRequestParams::new("get_receiver_status").with_arguments(args_old))
             .await
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(first_text(&result)).unwrap();
         assert_eq!(
-            parsed["success"], serde_json::json!(true),
-            "旧字段名 _auth_token alias 必须仍可鉴权，实际：{}", first_text(&result)
+            parsed["success"],
+            serde_json::json!(true),
+            "旧字段名 _auth_token alias 必须仍可鉴权，实际：{}",
+            first_text(&result)
         );
 
         client.cancel().await.unwrap();
@@ -862,7 +1030,10 @@ fn test_legacy_auth_token_alias_still_deserializes() {
     }"#;
     let params: SendFileParams = serde_json::from_str(json_old)
         .expect("legacy _auth_token field should still deserialize via serde alias");
-    assert_eq!(params.mcp_auth_token.as_deref(), Some("secret-from-old-client"));
+    assert_eq!(
+        params.mcp_auth_token.as_deref(),
+        Some("secret-from-old-client")
+    );
     assert_eq!(params.source, "/tmp/x");
 
     // 新命名同样工作
@@ -872,7 +1043,10 @@ fn test_legacy_auth_token_alias_still_deserializes() {
         "mcp_auth_token": "secret-from-new-client"
     }"#;
     let params: SendFileParams = serde_json::from_str(json_new).unwrap();
-    assert_eq!(params.mcp_auth_token.as_deref(), Some("secret-from-new-client"));
+    assert_eq!(
+        params.mcp_auth_token.as_deref(),
+        Some("secret-from-new-client")
+    );
 }
 
 /// Multiple tasks with different statuses — all persisted and loaded correctly.
@@ -884,33 +1058,77 @@ async fn test_task_store_multiple_tasks() {
 
     let ids: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
 
-    store.upsert(ids[0], &TaskEntry {
-        status: BackgroundTaskStatus::Completed { files: 1, bytes: 100, speed_mbs: 1.0 },
-        description: "task 0".to_string(), last_updated: Instant::now(),
-    }).await;
-    store.upsert(ids[1], &TaskEntry {
-        status: BackgroundTaskStatus::Failed("err".to_string()),
-        description: "task 1".to_string(), last_updated: Instant::now(),
-    }).await;
-    store.upsert(ids[2], &TaskEntry {
-        status: BackgroundTaskStatus::Pending,
-        description: "task 2".to_string(), last_updated: Instant::now(),
-    }).await;
-    store.upsert(ids[3], &TaskEntry {
-        status: BackgroundTaskStatus::Running,
-        description: "task 3".to_string(), last_updated: Instant::now(),
-    }).await;
-    store.upsert(ids[4], &TaskEntry {
-        status: BackgroundTaskStatus::Completed { files: 10, bytes: 99999, speed_mbs: 50.0 },
-        description: "task 4".to_string(), last_updated: Instant::now(),
-    }).await;
+    store
+        .upsert(
+            ids[0],
+            &TaskEntry {
+                status: BackgroundTaskStatus::Completed {
+                    files: 1,
+                    bytes: 100,
+                    speed_mbs: 1.0,
+                },
+                description: "task 0".to_string(),
+                last_updated: Instant::now(),
+            },
+        )
+        .await;
+    store
+        .upsert(
+            ids[1],
+            &TaskEntry {
+                status: BackgroundTaskStatus::Failed("err".to_string()),
+                description: "task 1".to_string(),
+                last_updated: Instant::now(),
+            },
+        )
+        .await;
+    store
+        .upsert(
+            ids[2],
+            &TaskEntry {
+                status: BackgroundTaskStatus::Pending,
+                description: "task 2".to_string(),
+                last_updated: Instant::now(),
+            },
+        )
+        .await;
+    store
+        .upsert(
+            ids[3],
+            &TaskEntry {
+                status: BackgroundTaskStatus::Running,
+                description: "task 3".to_string(),
+                last_updated: Instant::now(),
+            },
+        )
+        .await;
+    store
+        .upsert(
+            ids[4],
+            &TaskEntry {
+                status: BackgroundTaskStatus::Completed {
+                    files: 10,
+                    bytes: 99999,
+                    speed_mbs: 50.0,
+                },
+                description: "task 4".to_string(),
+                last_updated: Instant::now(),
+            },
+        )
+        .await;
 
     let all = store.load_all().await;
     assert_eq!(all.len(), 5);
 
     // Two completed, one failed(original), two failed(process restarted)
-    let completed = all.iter().filter(|(_, e)| matches!(e.status, BackgroundTaskStatus::Completed { .. })).count();
-    let failed = all.iter().filter(|(_, e)| matches!(e.status, BackgroundTaskStatus::Failed(_))).count();
+    let completed = all
+        .iter()
+        .filter(|(_, e)| matches!(e.status, BackgroundTaskStatus::Completed { .. }))
+        .count();
+    let failed = all
+        .iter()
+        .filter(|(_, e)| matches!(e.status, BackgroundTaskStatus::Failed(_)))
+        .count();
     assert_eq!(completed, 2);
     assert_eq!(failed, 3); // 1 original + 2 from pending/running → "process restarted"
 }

@@ -252,9 +252,10 @@ mod tests {
 
     #[test]
     fn test_advice_file_not_found() {
-        let err = AeroSyncError::FileIo(
-            std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory"),
-        );
+        let err = AeroSyncError::FileIo(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory",
+        ));
         let adv = advice_for(&err).unwrap();
         assert!(adv.summary.contains("not found"));
     }

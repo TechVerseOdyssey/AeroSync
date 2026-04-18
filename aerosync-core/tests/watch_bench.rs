@@ -161,7 +161,10 @@ async fn bench_event_throughput_single_client() {
     let throughput = N as f64 / elapsed.as_secs_f64();
     let avg_us = elapsed.as_micros() as f64 / N as f64;
 
-    eprintln!("\n━━━ Bench 2: Event throughput (single client, {} events) ━━━", N);
+    eprintln!(
+        "\n━━━ Bench 2: Event throughput (single client, {} events) ━━━",
+        N
+    );
     eprintln!("  Total time : {:.2}ms", elapsed.as_millis());
     eprintln!("  Throughput : {:.0} events/s", throughput);
     eprintln!("  Avg latency: {:.1}μs / event", avg_us);
@@ -206,7 +209,10 @@ async fn bench_concurrent_connect_time() {
     eprintln!("\n━━━ Bench 3: Concurrent connect ({} clients) ━━━", N);
     eprintln!("  Total time : {:.2}ms", elapsed.as_millis());
     eprintln!("  Connect rate: {:.0} conn/s", rate);
-    eprintln!("  Avg per conn: {:.2}ms", elapsed.as_millis() as f64 / N as f64);
+    eprintln!(
+        "  Avg per conn: {:.2}ms",
+        elapsed.as_millis() as f64 / N as f64
+    );
 
     // 100 个 loopback 连接应在 2s 内全部建立
     assert!(

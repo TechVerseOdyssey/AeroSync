@@ -2,20 +2,20 @@
 //!
 //! 提供 Token 认证、用户管理、IP 访问控制等安全功能。
 
-mod token;
 mod config;
 mod middleware;
 pub mod store;
+mod token;
 
-pub use token::{TokenManager, TokenInfo, TokenError};
 pub use config::AuthConfig;
 pub use middleware::AuthMiddleware;
-pub use store::{TokenStore, StoredToken};
+pub use store::{StoredToken, TokenStore};
+pub use token::{TokenError, TokenInfo, TokenManager};
 
 use crate::error::Result;
 
 /// 认证管理器
-/// 
+///
 /// 统一管理所有认证相关功能，包括 Token 验证、用户验证、IP 验证等。
 #[derive(Clone)]
 pub struct AuthManager {
@@ -65,9 +65,9 @@ impl AuthManager {
             return Ok(true);
         }
 
-        let client_addr: std::net::IpAddr = client_ip
-            .parse()
-            .map_err(|_| crate::error::AeroSyncError::Auth(format!("Invalid client IP: {}", client_ip)))?;
+        let client_addr: std::net::IpAddr = client_ip.parse().map_err(|_| {
+            crate::error::AeroSyncError::Auth(format!("Invalid client IP: {}", client_ip))
+        })?;
 
         for cidr in &self.config.allowed_ips {
             if ip_in_cidr(client_addr, cidr) {
@@ -154,4 +154,3 @@ mod tests {
         assert!(manager.authenticate(None, "127.0.0.1").unwrap());
     }
 }
-

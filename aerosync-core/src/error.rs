@@ -6,34 +6,34 @@ pub type Result<T> = std::result::Result<T, AeroSyncError>;
 pub enum AeroSyncError {
     #[error("File I/O error: {0}")]
     FileIo(#[from] std::io::Error),
-    
+
     #[error("Network error: {0}")]
     Network(String),
-    
+
     #[error("Storage error: {message}")]
     Storage { message: String },
-    
+
     #[error("Transfer cancelled by user")]
     Cancelled,
-    
+
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
-    
+
     #[error("Protocol error: {0}")]
     Protocol(String),
-    
+
     #[error("System error: {0}")]
     System(String),
-    
+
     #[error("Unknown error: {0}")]
     Unknown(String),
-    
+
     #[error("Authentication error: {0}")]
     Auth(String),
-    
+
     #[error("Configuration error: {0}")]
     Config(String),
-    
+
     #[error("TOML parsing error: {0}")]
     TomlParse(String),
 }

@@ -168,7 +168,9 @@ impl HistoryStore {
 
     /// 读取全部记录
     pub async fn read_all(&self) -> Result<Vec<HistoryEntry>> {
-        let content = tokio::fs::read_to_string(&self.path).await.unwrap_or_default();
+        let content = tokio::fs::read_to_string(&self.path)
+            .await
+            .unwrap_or_default();
         let entries = content
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -250,10 +252,23 @@ mod tests {
     #[tokio::test]
     async fn test_query_direction_filter() {
         let (store, _dir) = tmp_store().await;
-        store.append(HistoryEntry::success("a.bin", None, 1, None, None, "http", "send", 10)).await.unwrap();
-        store.append(HistoryEntry::success("b.bin", None, 2, None, None, "http", "receive", 10)).await.unwrap();
+        store
+            .append(HistoryEntry::success(
+                "a.bin", None, 1, None, None, "http", "send", 10,
+            ))
+            .await
+            .unwrap();
+        store
+            .append(HistoryEntry::success(
+                "b.bin", None, 2, None, None, "http", "receive", 10,
+            ))
+            .await
+            .unwrap();
 
-        let q = HistoryQuery { direction: Some("send".into()), ..Default::default() };
+        let q = HistoryQuery {
+            direction: Some("send".into()),
+            ..Default::default()
+        };
         let result = store.query(&q).await.unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].filename, "a.bin");
@@ -262,10 +277,23 @@ mod tests {
     #[tokio::test]
     async fn test_query_protocol_filter() {
         let (store, _dir) = tmp_store().await;
-        store.append(HistoryEntry::success("a.bin", None, 1, None, None, "http", "send", 10)).await.unwrap();
-        store.append(HistoryEntry::success("b.bin", None, 2, None, None, "quic", "send", 10)).await.unwrap();
+        store
+            .append(HistoryEntry::success(
+                "a.bin", None, 1, None, None, "http", "send", 10,
+            ))
+            .await
+            .unwrap();
+        store
+            .append(HistoryEntry::success(
+                "b.bin", None, 2, None, None, "quic", "send", 10,
+            ))
+            .await
+            .unwrap();
 
-        let q = HistoryQuery { protocol: Some("quic".into()), ..Default::default() };
+        let q = HistoryQuery {
+            protocol: Some("quic".into()),
+            ..Default::default()
+        };
         let result = store.query(&q).await.unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].filename, "b.bin");
@@ -274,10 +302,23 @@ mod tests {
     #[tokio::test]
     async fn test_query_success_only() {
         let (store, _dir) = tmp_store().await;
-        store.append(HistoryEntry::success("ok.bin", None, 1, None, None, "http", "send", 10)).await.unwrap();
-        store.append(HistoryEntry::failure("fail.bin", 1, None, "http", "send", 10, "err")).await.unwrap();
+        store
+            .append(HistoryEntry::success(
+                "ok.bin", None, 1, None, None, "http", "send", 10,
+            ))
+            .await
+            .unwrap();
+        store
+            .append(HistoryEntry::failure(
+                "fail.bin", 1, None, "http", "send", 10, "err",
+            ))
+            .await
+            .unwrap();
 
-        let q = HistoryQuery { success_only: true, ..Default::default() };
+        let q = HistoryQuery {
+            success_only: true,
+            ..Default::default()
+        };
         let result = store.query(&q).await.unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].filename, "ok.bin");
@@ -287,9 +328,19 @@ mod tests {
     async fn test_query_limit() {
         let (store, _dir) = tmp_store().await;
         for i in 0..5 {
-            store.append(HistoryEntry::success(
-                format!("f{}.bin", i), None, i, None, None, "http", "send", 10
-            )).await.unwrap();
+            store
+                .append(HistoryEntry::success(
+                    format!("f{}.bin", i),
+                    None,
+                    i,
+                    None,
+                    None,
+                    "http",
+                    "send",
+                    10,
+                ))
+                .await
+                .unwrap();
         }
         let result = store.recent(3).await.unwrap();
         assert_eq!(result.len(), 3);
@@ -297,15 +348,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_avg_speed_bps() {
-        let entry = HistoryEntry::success("x.bin", None, 1_000_000, None, None, "http", "send", 1000);
+        let entry =
+            HistoryEntry::success("x.bin", None, 1_000_000, None, None, "http", "send", 1000);
         assert_eq!(entry.avg_speed_bps, 1_000_000); // 1MB / 1s = 1MB/s
     }
 
     #[tokio::test]
     async fn test_jsonl_one_line_per_record() {
         let (store, _dir) = tmp_store().await;
-        store.append(HistoryEntry::success("a.bin", None, 1, None, None, "http", "send", 1)).await.unwrap();
-        store.append(HistoryEntry::success("b.bin", None, 2, None, None, "http", "send", 2)).await.unwrap();
+        store
+            .append(HistoryEntry::success(
+                "a.bin", None, 1, None, None, "http", "send", 1,
+            ))
+            .await
+            .unwrap();
+        store
+            .append(HistoryEntry::success(
+                "b.bin", None, 2, None, None, "http", "send", 2,
+            ))
+            .await
+            .unwrap();
 
         let content = tokio::fs::read_to_string(&store.path).await.unwrap();
         let lines: Vec<_> = content.lines().collect();

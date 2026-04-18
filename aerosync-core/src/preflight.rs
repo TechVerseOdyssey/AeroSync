@@ -51,9 +51,10 @@ pub async fn probe_receiver(http_base: &str) -> Result<PreflightResult> {
         )));
     }
 
-    let body: serde_json::Value = resp.json().await.map_err(|e| {
-        AeroSyncError::Network(format!("Failed to parse health response: {}", e))
-    })?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AeroSyncError::Network(format!("Failed to parse health response: {}", e)))?;
 
     Ok(PreflightResult {
         version: body["version"].as_str().map(|s| s.to_string()),
@@ -69,11 +70,16 @@ pub async fn probe_receiver(http_base: &str) -> Result<PreflightResult> {
 /// `total_bytes`：即将发送的文件总字节数
 ///
 /// 若空间不足，返回 Err；`free_bytes == 0` 时（接收端不支持磁盘查询）视为跳过检查。
-pub async fn preflight_check(http_base: &str, total_bytes: u64) -> std::result::Result<PreflightResult, PreflightError> {
-    let result = probe_receiver(http_base).await.map_err(|e| PreflightError::Unreachable {
-        url: http_base.to_string(),
-        reason: e.to_string(),
-    })?;
+pub async fn preflight_check(
+    http_base: &str,
+    total_bytes: u64,
+) -> std::result::Result<PreflightResult, PreflightError> {
+    let result = probe_receiver(http_base)
+        .await
+        .map_err(|e| PreflightError::Unreachable {
+            url: http_base.to_string(),
+            reason: e.to_string(),
+        })?;
 
     // free_bytes == 0 表示接收端未上报磁盘信息（旧版本兼容），跳过检查
     if result.free_bytes > 0 && total_bytes > 0 && result.free_bytes < total_bytes {
@@ -104,7 +110,10 @@ mod tests {
 
     #[test]
     fn test_preflight_insufficient_disk_error_message() {
-        let err = PreflightError::InsufficientDisk { need: 1000, free: 500 };
+        let err = PreflightError::InsufficientDisk {
+            need: 1000,
+            free: 500,
+        };
         let msg = err.to_string();
         assert!(msg.contains("500"), "message: {}", msg);
         assert!(msg.contains("1000"), "message: {}", msg);

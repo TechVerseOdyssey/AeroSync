@@ -106,7 +106,7 @@ impl AeroSyncMdns {
             MDNS_SERVICE_TYPE,
             instance_name,
             &host,
-            (),          // IP 由 mdns-sd 自动从网卡获取
+            (), // IP 由 mdns-sd 自动从网卡获取
             port,
             properties,
         )?;
@@ -119,7 +119,10 @@ impl AeroSyncMdns {
             instance_name, port
         );
 
-        Ok(MdnsHandle { daemon, service_fullname: fullname })
+        Ok(MdnsHandle {
+            daemon,
+            service_fullname: fullname,
+        })
     }
 
     /// 扫描局域网内的 AeroSync receiver，等待 `timeout` 后返回结果。
@@ -192,7 +195,10 @@ impl AeroSyncMdns {
                         .map(|r| r.status().as_u16() == 101 || r.status().as_u16() == 400)
                         .unwrap_or(false);
 
-                    debug!("localhost probe: found AeroSync on port {} (version={:?} ws={})", port, version, ws_enabled);
+                    debug!(
+                        "localhost probe: found AeroSync on port {} (version={:?} ws={})",
+                        port, version, ws_enabled
+                    );
 
                     peers.push(AeroSyncPeer {
                         name: hostname_or_localhost(),
@@ -265,7 +271,14 @@ impl AeroSyncMdns {
 
                     peers.insert(
                         fullname,
-                        AeroSyncPeer { name, host, port, version, ws_enabled, auth_required },
+                        AeroSyncPeer {
+                            name,
+                            host,
+                            port,
+                            version,
+                            ws_enabled,
+                            auth_required,
+                        },
                     );
                 }
                 Ok(mdns_sd::ServiceEvent::SearchStopped(_)) => break,

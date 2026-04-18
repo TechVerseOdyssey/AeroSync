@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use aerosync_core::resume::{ResumeStore, ResumeState};
+use aerosync_core::resume::{ResumeState, ResumeStore};
 use aerosync_core::transfer::{ProtocolAdapter, TransferTask};
 use aerosync_protocols::adapter::AutoAdapter;
 use aerosync_protocols::http::HttpConfig;
@@ -36,7 +36,10 @@ pub async fn recover_pending_transfers(
         return 0;
     }
 
-    tracing::info!("Recovery: {} resumable task(s) found, attempting restart", resumable.len());
+    tracing::info!(
+        "Recovery: {} resumable task(s) found, attempting restart",
+        resumable.len()
+    );
     let resume_store = Arc::new(ResumeStore::new(resume_base_dir));
     let mut recovered = 0usize;
 
@@ -48,18 +51,36 @@ pub async fn recover_pending_transfers(
                 Err(e) => {
                     tracing::warn!(
                         "Recovery: failed to parse ResumeState for task {} at {}: {}",
-                        task_id, resume_json_path.display(), e
+                        task_id,
+                        resume_json_path.display(),
+                        e
                     );
-                    mark_failed(server, &task_store, task_id, &entry.description, &format!("parse error: {}", e)).await;
+                    mark_failed(
+                        server,
+                        &task_store,
+                        task_id,
+                        &entry.description,
+                        &format!("parse error: {}", e),
+                    )
+                    .await;
                     continue;
                 }
             },
             Err(e) => {
                 tracing::warn!(
                     "Recovery: failed to read resume file for task {} at {}: {}",
-                    task_id, resume_json_path.display(), e
+                    task_id,
+                    resume_json_path.display(),
+                    e
                 );
-                mark_failed(server, &task_store, task_id, &entry.description, &format!("read error: {}", e)).await;
+                mark_failed(
+                    server,
+                    &task_store,
+                    task_id,
+                    &entry.description,
+                    &format!("read error: {}", e),
+                )
+                .await;
                 continue;
             }
         };
@@ -76,7 +97,9 @@ pub async fn recover_pending_transfers(
                 description: entry.description.clone(),
                 last_updated: Instant::now(),
             };
-            task_store.upsert_with_resume(task_id, &done_entry, None).await;
+            task_store
+                .upsert_with_resume(task_id, &done_entry, None)
+                .await;
             insert_task(server, task_id, done_entry).await;
             let _ = resume_store.delete(task_id).await;
             recovered += 1;
@@ -108,14 +131,17 @@ pub async fn recover_pending_transfers(
             description: description.clone(),
             last_updated: Instant::now(),
         };
-        task_store.upsert_with_resume(task_id, &running_entry, Some(&resume_json_path)).await;
+        task_store
+            .upsert_with_resume(task_id, &running_entry, Some(&resume_json_path))
+            .await;
         registry.lock().await.insert(task_id, running_entry);
 
         tokio::spawn(async move {
             let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
             let mut resume_state = state;
 
-            let transfer_task = TransferTask::new_upload(file_path.clone(), base_url.clone(), total_size);
+            let transfer_task =
+                TransferTask::new_upload(file_path.clone(), base_url.clone(), total_size);
             let result = adapter
                 .upload_chunked(&transfer_task, &mut resume_state, progress_tx)
                 .await;

@@ -54,22 +54,32 @@ async fn test_health_has_new_fields() {
     let body: serde_json::Value = resp.json().await.unwrap();
 
     assert_eq!(body["status"], "ok");
-    assert!(body.get("active_transfers").is_some(), "missing active_transfers");
+    assert!(
+        body.get("active_transfers").is_some(),
+        "missing active_transfers"
+    );
     assert!(body.get("queue_depth").is_some(), "missing queue_depth");
     assert_eq!(body["active_transfers"], 0);
     assert_eq!(body["queue_depth"], 0);
 
     // protocols list must include "http"
-    let protocols = body["protocols"].as_array().expect("protocols must be array");
+    let protocols = body["protocols"]
+        .as_array()
+        .expect("protocols must be array");
     assert!(
         protocols.contains(&serde_json::json!("http")),
-        "protocols must include http, got: {:?}", protocols
+        "protocols must include http, got: {:?}",
+        protocols
     );
 
     // version string present and non-empty
     assert!(
-        body["version"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
-        "version must be a non-empty string, got: {}", body["version"]
+        body["version"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "version must be a non-empty string, got: {}",
+        body["version"]
     );
 
     receiver.stop().await.unwrap();
@@ -124,7 +134,10 @@ async fn test_health_received_files_count() {
         .json()
         .await
         .unwrap();
-    assert_eq!(body["received_files"], 1, "expected 1 received file after upload");
+    assert_eq!(
+        body["received_files"], 1,
+        "expected 1 received file after upload"
+    );
 
     // And the file exists on disk
     assert!(dir.path().join("count_test.txt").exists());
@@ -170,7 +183,8 @@ async fn test_batch_upload_saves_all_files() {
     assert_eq!(
         body["errors"].as_array().unwrap().len(),
         0,
-        "expected no errors, got: {:?}", body["errors"]
+        "expected no errors, got: {:?}",
+        body["errors"]
     );
 
     // Files must exist on disk with correct content
@@ -235,7 +249,10 @@ async fn test_batch_upload_preserves_subdir() {
     // depending on sanitisation; either way it must not escape the receive dir.
     let saved_somewhere = dir.path().join("sub").join("nested.txt").exists()
         || dir.path().join("nested.txt").exists();
-    assert!(saved_somewhere, "file should be saved somewhere under receive dir");
+    assert!(
+        saved_somewhere,
+        "file should be saved somewhere under receive dir"
+    );
 
     receiver.stop().await.unwrap();
 }
@@ -248,7 +265,12 @@ async fn test_batch_upload_increments_received_files() {
 
     let before: serde_json::Value = client
         .get(format!("http://127.0.0.1:{}/health", port))
-        .send().await.unwrap().json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let before_count = before["received_files"].as_u64().unwrap_or(0);
 
     // Upload 3 files via batch
@@ -263,15 +285,23 @@ async fn test_batch_upload_increments_received_files() {
     client
         .post(format!("http://127.0.0.1:{}/upload/batch", port))
         .multipart(form)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     let after: serde_json::Value = client
         .get(format!("http://127.0.0.1:{}/health", port))
-        .send().await.unwrap().json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let after_count = after["received_files"].as_u64().unwrap_or(0);
 
     assert_eq!(
-        after_count, before_count + 3,
+        after_count,
+        before_count + 3,
         "received_files should increase by 3 after batch upload"
     );
 
@@ -291,7 +321,7 @@ async fn test_upload_oversized_content_length_returns_413() {
         receive_directory: dir.path().to_path_buf(),
         enable_quic: false,
         enable_ws: false,
-        max_file_size: 1024,    // 1 KB limit
+        max_file_size: 1024, // 1 KB limit
         ..ServerConfig::default()
     };
     let mut receiver = FileReceiver::new(cfg);
@@ -305,7 +335,7 @@ async fn test_upload_oversized_content_length_returns_413() {
         .post(format!("http://127.0.0.1:{}/upload/oversized.bin", port))
         .header("content-length", "2048")
         .header("content-type", "multipart/form-data; boundary=boundary")
-        .body(vec![0u8; 16])    // small actual body — precheck fires on header value
+        .body(vec![0u8; 16]) // small actual body — precheck fires on header value
         .send()
         .await
         .unwrap();
@@ -313,13 +343,23 @@ async fn test_upload_oversized_content_length_returns_413() {
     assert_eq!(
         resp.status(),
         reqwest::StatusCode::PAYLOAD_TOO_LARGE,
-        "expected 413 Payload Too Large, got {}", resp.status()
+        "expected 413 Payload Too Large, got {}",
+        resp.status()
     );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(
-        body["error"].as_str().unwrap_or("").to_lowercase().contains("large")
-            || body["error"].as_str().unwrap_or("").to_lowercase().contains("payload"),
-        "error message should reference size limit: {}", body
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("large")
+            || body["error"]
+                .as_str()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains("payload"),
+        "error message should reference size limit: {}",
+        body
     );
 
     receiver.stop().await.unwrap();
@@ -359,7 +399,8 @@ async fn test_upload_within_limit_succeeds() {
 
     assert!(
         resp.status().is_success(),
-        "expected 2xx, got {}", resp.status()
+        "expected 2xx, got {}",
+        resp.status()
     );
     assert!(dir.path().join("within.bin").exists());
 

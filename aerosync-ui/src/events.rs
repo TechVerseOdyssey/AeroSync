@@ -9,22 +9,22 @@ pub enum UiEvent {
     FilesSelected(Vec<PathBuf>),
     FolderSelected(PathBuf),
     DestinationSet(String),
-    
+
     // Transfer control events
     StartTransfer,
     PauseTransfer(Uuid),
     ResumeTransfer(Uuid),
     CancelTransfer(Uuid),
     CancelAllTransfers,
-    
+
     // Progress events
     ProgressUpdate(TransferProgress),
     StatsUpdate(TransferStats),
-    
+
     // Error events
     TransferError { task_id: Uuid, error: String },
     SystemError(String),
-    
+
     // UI events
     ShowSettings,
     HideSettings,

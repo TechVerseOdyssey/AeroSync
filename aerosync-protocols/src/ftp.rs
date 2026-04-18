@@ -3,7 +3,7 @@
 //! 使用 suppaftp（tokio 异步后端）实现 FTP/FTPS 文件传输。
 //! URL 格式：ftp://host:port/path/to/file
 
-use crate::traits::{TransferProtocol, TransferProgress};
+use crate::traits::{TransferProgress, TransferProtocol};
 use aerosync_core::{AeroSyncError, Result, TransferTask};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -75,7 +75,9 @@ impl FtpTransfer {
         let addr = format!("{}:{}", self.config.host, self.config.port);
         let mut stream = suppaftp::tokio::AsyncFtpStream::connect(&addr)
             .await
-            .map_err(|e| AeroSyncError::Network(format!("FTP connect failed to {}: {}", addr, e)))?;
+            .map_err(|e| {
+                AeroSyncError::Network(format!("FTP connect failed to {}: {}", addr, e))
+            })?;
 
         stream
             .login(&self.config.username, &self.config.password)
@@ -86,7 +88,9 @@ impl FtpTransfer {
             stream
                 .transfer_type(suppaftp::types::FileType::Binary)
                 .await
-                .map_err(|e| AeroSyncError::Network(format!("FTP set binary mode failed: {}", e)))?;
+                .map_err(|e| {
+                    AeroSyncError::Network(format!("FTP set binary mode failed: {}", e))
+                })?;
         }
 
         Ok(stream)
@@ -123,9 +127,7 @@ impl TransferProtocol for FtpTransfer {
         // 确保远端目录存在（尽力而为，失败不报错）
         if let Some(parent) = std::path::Path::new(&remote_path).parent() {
             if parent != std::path::Path::new("") {
-                let _ = stream
-                    .mkdir(&parent.to_string_lossy())
-                    .await;
+                let _ = stream.mkdir(&parent.to_string_lossy()).await;
             }
         }
 
@@ -148,7 +150,12 @@ impl TransferProtocol for FtpTransfer {
             transfer_speed: speed,
         });
 
-        tracing::info!("FTP: Upload OK: {} → {} ({} bytes)", task.source_path.display(), remote_path, file_size);
+        tracing::info!(
+            "FTP: Upload OK: {} → {} ({} bytes)",
+            task.source_path.display(),
+            remote_path,
+            file_size
+        );
         Ok(())
     }
 
@@ -207,7 +214,12 @@ impl TransferProtocol for FtpTransfer {
             transfer_speed: speed,
         });
 
-        tracing::info!("FTP: Download OK: {} → {} ({} bytes)", remote_path, task.source_path.display(), file_size);
+        tracing::info!(
+            "FTP: Download OK: {} → {} ({} bytes)",
+            remote_path,
+            task.source_path.display(),
+            file_size
+        );
         Ok(())
     }
 
@@ -254,7 +266,8 @@ mod tests {
     // ── 3. parse_ftp_url: with port ───────────────────────────────────────────
     #[test]
     fn test_parse_ftp_url_with_port() {
-        let (host, port, path) = FtpTransfer::parse_ftp_url("ftp://myhost:2121/uploads/file.txt").unwrap();
+        let (host, port, path) =
+            FtpTransfer::parse_ftp_url("ftp://myhost:2121/uploads/file.txt").unwrap();
         assert_eq!(host, "myhost");
         assert_eq!(port, 2121);
         assert_eq!(path, "uploads/file.txt");
@@ -263,7 +276,8 @@ mod tests {
     // ── 4. parse_ftp_url: default port ───────────────────────────────────────
     #[test]
     fn test_parse_ftp_url_default_port() {
-        let (host, port, path) = FtpTransfer::parse_ftp_url("ftp://ftpserver/data/file.bin").unwrap();
+        let (host, port, path) =
+            FtpTransfer::parse_ftp_url("ftp://ftpserver/data/file.bin").unwrap();
         assert_eq!(host, "ftpserver");
         assert_eq!(port, 21);
         assert_eq!(path, "data/file.bin");

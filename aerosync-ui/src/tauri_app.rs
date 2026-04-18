@@ -38,10 +38,7 @@ async fn start_transfer(
     destination: String,
 ) -> Result<Vec<String>, String> {
     // 防止路径穿越：目标地址不能包含 ".." 段
-    if destination
-        .split(['/', '\\'])
-        .any(|seg| seg == "..")
-    {
+    if destination.split(['/', '\\']).any(|seg| seg == "..") {
         return Err(format!(
             "Invalid destination '{}': path traversal sequences are not allowed",
             destination
@@ -96,12 +93,9 @@ async fn get_transfer_progress(
 
 #[cfg(feature = "tauri")]
 #[tauri::command]
-async fn cancel_transfer(
-    state: tauri::State<'_, AppState>,
-    task_id: String,
-) -> Result<(), String> {
-    let uuid = Uuid::parse_str(&task_id)
-        .map_err(|e| format!("Invalid task_id '{task_id}': {e}"))?;
+async fn cancel_transfer(state: tauri::State<'_, AppState>, task_id: String) -> Result<(), String> {
+    let uuid =
+        Uuid::parse_str(&task_id).map_err(|e| format!("Invalid task_id '{task_id}': {e}"))?;
 
     state
         .transfer_engine

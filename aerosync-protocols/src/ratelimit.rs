@@ -119,10 +119,18 @@ pub fn parse_limit(s: &str) -> Option<u64> {
     let s = s.trim_end_matches("/S").trim_end_matches("/SEC");
 
     if let Some(n) = s.strip_suffix("GB") {
-        return n.trim().parse::<f64>().ok().map(|v| (v * 1024.0 * 1024.0 * 1024.0) as u64);
+        return n
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|v| (v * 1024.0 * 1024.0 * 1024.0) as u64);
     }
     if let Some(n) = s.strip_suffix("MB") {
-        return n.trim().parse::<f64>().ok().map(|v| (v * 1024.0 * 1024.0) as u64);
+        return n
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|v| (v * 1024.0 * 1024.0) as u64);
     }
     if let Some(n) = s.strip_suffix("KB") {
         return n.trim().parse::<f64>().ok().map(|v| (v * 1024.0) as u64);
@@ -154,7 +162,11 @@ mod tests {
         let start = Instant::now();
         limiter.consume(20 * 1024).await;
         let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(900), "elapsed={:?}", elapsed);
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "elapsed={:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]

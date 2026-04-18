@@ -1,7 +1,7 @@
 use crate::audit::{AuditLogger, Direction};
-use crate::{AeroSyncError, Result, ProgressMonitor, TransferProgress};
 use crate::progress::TransferStatus;
 use crate::resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
+use crate::{AeroSyncError, ProgressMonitor, Result, TransferProgress};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -50,12 +50,12 @@ impl Default for TransferConfig {
             timeout_seconds: 60,
             use_quic: true,
             auth_token: None,
-            chunked_threshold: 64 * 1024 * 1024,  // 64MB
+            chunked_threshold: 64 * 1024 * 1024, // 64MB
             resume_state_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             enable_resume: true,
             small_file_concurrency: 16,
             medium_file_concurrency: 8,
-            small_file_threshold: 1024 * 1024,     // 1MB
+            small_file_threshold: 1024 * 1024, // 1MB
         }
     }
 }
@@ -415,7 +415,10 @@ async fn transfer_worker(
 }
 
 async fn handle_join_result(
-    join_result: std::result::Result<(Uuid, std::result::Result<(), String>), tokio::task::JoinError>,
+    join_result: std::result::Result<
+        (Uuid, std::result::Result<(), String>),
+        tokio::task::JoinError,
+    >,
     monitor: &Arc<RwLock<ProgressMonitor>>,
 ) {
     match join_result {
@@ -450,7 +453,10 @@ async fn execute_upload(
     let store = ResumeStore::new(&config.resume_state_dir);
 
     let mut state = if config.enable_resume {
-        match store.find_by_file(&task.source_path, &task.destination).await {
+        match store
+            .find_by_file(&task.source_path, &task.destination)
+            .await
+        {
             Ok(Some(existing)) => {
                 // 校验源文件大小未变更，防止文件被修改后用旧分片状态续传
                 let current_size = tokio::fs::metadata(&task.source_path)
@@ -559,34 +565,70 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ProtocolAdapter for SuccessAdapter {
-        async fn upload(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
+        async fn upload(
+            &self,
+            _: &TransferTask,
+            _: mpsc::UnboundedSender<ProtocolProgress>,
+        ) -> Result<()> {
             self.upload_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        async fn download(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
+        async fn download(
+            &self,
+            _: &TransferTask,
+            _: mpsc::UnboundedSender<ProtocolProgress>,
+        ) -> Result<()> {
             self.download_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        async fn upload_chunked(&self, _: &TransferTask, _: &mut ResumeState, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
+        async fn upload_chunked(
+            &self,
+            _: &TransferTask,
+            _: &mut ResumeState,
+            _: mpsc::UnboundedSender<ProtocolProgress>,
+        ) -> Result<()> {
             self.upload_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        fn protocol_name(&self) -> &'static str { "mock-success" }
+        fn protocol_name(&self) -> &'static str {
+            "mock-success"
+        }
     }
 
     struct FailAdapter;
     #[async_trait::async_trait]
     impl ProtocolAdapter for FailAdapter {
-        async fn upload(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
-            Err(AeroSyncError::Network("simulated upload failure".to_string()))
+        async fn upload(
+            &self,
+            _: &TransferTask,
+            _: mpsc::UnboundedSender<ProtocolProgress>,
+        ) -> Result<()> {
+            Err(AeroSyncError::Network(
+                "simulated upload failure".to_string(),
+            ))
         }
-        async fn download(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
-            Err(AeroSyncError::Network("simulated download failure".to_string()))
+        async fn download(
+            &self,
+            _: &TransferTask,
+            _: mpsc::UnboundedSender<ProtocolProgress>,
+        ) -> Result<()> {
+            Err(AeroSyncError::Network(
+                "simulated download failure".to_string(),
+            ))
         }
-        async fn upload_chunked(&self, _: &TransferTask, _: &mut ResumeState, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
-            Err(AeroSyncError::Network("simulated chunked failure".to_string()))
+        async fn upload_chunked(
+            &self,
+            _: &TransferTask,
+            _: &mut ResumeState,
+            _: mpsc::UnboundedSender<ProtocolProgress>,
+        ) -> Result<()> {
+            Err(AeroSyncError::Network(
+                "simulated chunked failure".to_string(),
+            ))
         }
-        fn protocol_name(&self) -> &'static str { "mock-fail" }
+        fn protocol_name(&self) -> &'static str {
+            "mock-fail"
+        }
     }
 
     /// 有延迟的 adapter，用于验证 Semaphore 实际限流效果
@@ -617,11 +659,20 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ProtocolAdapter for SlowAdapter {
-        async fn upload(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
+        async fn upload(
+            &self,
+            _: &TransferTask,
+            _: mpsc::UnboundedSender<ProtocolProgress>,
+        ) -> Result<()> {
             let c = self.current_concurrent.fetch_add(1, Ordering::SeqCst) + 1;
             let mut max = self.max_concurrent_seen.load(Ordering::SeqCst);
             while c > max {
-                match self.max_concurrent_seen.compare_exchange(max, c, Ordering::SeqCst, Ordering::SeqCst) {
+                match self.max_concurrent_seen.compare_exchange(
+                    max,
+                    c,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
                     Ok(_) => break,
                     Err(actual) => max = actual,
                 }
@@ -631,18 +682,35 @@ mod tests {
             self.upload_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        async fn download(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> { Ok(()) }
-        async fn upload_chunked(&self, task: &TransferTask, _: &mut ResumeState, tx: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
+        async fn download(
+            &self,
+            _: &TransferTask,
+            _: mpsc::UnboundedSender<ProtocolProgress>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn upload_chunked(
+            &self,
+            task: &TransferTask,
+            _: &mut ResumeState,
+            tx: mpsc::UnboundedSender<ProtocolProgress>,
+        ) -> Result<()> {
             self.upload(task, tx).await
         }
-        fn protocol_name(&self) -> &'static str { "mock-slow" }
+        fn protocol_name(&self) -> &'static str {
+            "mock-slow"
+        }
     }
 
     // ── TransferTask ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_new_upload_task() {
-        let task = TransferTask::new_upload(PathBuf::from("/src/file.bin"), "http://host/upload".to_string(), 1024);
+        let task = TransferTask::new_upload(
+            PathBuf::from("/src/file.bin"),
+            "http://host/upload".to_string(),
+            1024,
+        );
         assert!(task.is_upload);
         assert_eq!(task.file_size, 1024);
         assert!(task.sha256.is_none());
@@ -650,7 +718,11 @@ mod tests {
 
     #[test]
     fn test_new_download_task() {
-        let task = TransferTask::new_download("http://host/file.bin".to_string(), PathBuf::from("/dst/file.bin"), 4096);
+        let task = TransferTask::new_download(
+            "http://host/file.bin".to_string(),
+            PathBuf::from("/dst/file.bin"),
+            4096,
+        );
         assert!(!task.is_upload);
         assert_eq!(task.file_size, 4096);
     }
@@ -702,7 +774,8 @@ mod tests {
     #[tokio::test]
     async fn test_engine_add_transfer_registers_progress() {
         let engine = TransferEngine::new(TransferConfig::default());
-        let task = TransferTask::new_upload(PathBuf::from("/file.bin"), "http://h".to_string(), 512);
+        let task =
+            TransferTask::new_upload(PathBuf::from("/file.bin"), "http://h".to_string(), 512);
         let task_id = task.id;
         engine.add_transfer(task).await.unwrap();
         let monitor = engine.get_progress_monitor().await;
@@ -715,7 +788,9 @@ mod tests {
     async fn test_engine_successful_upload_completes() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let file_path = dir.path().join("upload.bin");
-        tokio::fs::write(&file_path, b"test data").await.expect("failed to write temp file");
+        tokio::fs::write(&file_path, b"test data")
+            .await
+            .expect("failed to write temp file");
 
         let engine = TransferEngine::new(TransferConfig::default());
         let (adapter, up_count, _) = SuccessAdapter::new();
@@ -723,7 +798,10 @@ mod tests {
 
         let task = TransferTask::new_upload(file_path, "http://host/upload".to_string(), 9);
         let task_id = task.id;
-        engine.add_transfer(task).await.expect("add_transfer failed");
+        engine
+            .add_transfer(task)
+            .await
+            .expect("add_transfer failed");
         sleep(Duration::from_millis(200)).await;
 
         let monitor = engine.get_progress_monitor().await;
@@ -731,7 +809,10 @@ mod tests {
         assert_eq!(m.get_stats().completed_files, 1);
         assert_eq!(m.get_stats().failed_files, 0);
         assert_eq!(up_count.load(Ordering::SeqCst), 1);
-        assert!(matches!(m.get_transfer(&task_id).unwrap().status, TransferStatus::Completed));
+        assert!(matches!(
+            m.get_transfer(&task_id).unwrap().status,
+            TransferStatus::Completed
+        ));
     }
 
     #[tokio::test]
@@ -739,7 +820,11 @@ mod tests {
         let engine = TransferEngine::new(TransferConfig::default());
         engine.start(Arc::new(FailAdapter)).await.unwrap();
 
-        let task = TransferTask::new_upload(PathBuf::from("/any/path.bin"), "http://host/upload".to_string(), 0);
+        let task = TransferTask::new_upload(
+            PathBuf::from("/any/path.bin"),
+            "http://host/upload".to_string(),
+            0,
+        );
         let task_id = task.id;
         engine.add_transfer(task).await.unwrap();
         sleep(Duration::from_millis(200)).await;
@@ -747,7 +832,10 @@ mod tests {
         let monitor = engine.get_progress_monitor().await;
         let m = monitor.read().await;
         assert_eq!(m.get_stats().failed_files, 1);
-        assert!(matches!(m.get_transfer(&task_id).unwrap().status, TransferStatus::Failed(_)));
+        assert!(matches!(
+            m.get_transfer(&task_id).unwrap().status,
+            TransferStatus::Failed(_)
+        ));
     }
 
     // ── 并发测试 ──────────────────────────────────────────────────────────────
@@ -798,12 +886,17 @@ mod tests {
         }
         sleep(Duration::from_millis(1500)).await;
 
-        assert_eq!(up_count.load(Ordering::SeqCst), 20, "all tasks should complete");
+        assert_eq!(
+            up_count.load(Ordering::SeqCst),
+            20,
+            "all tasks should complete"
+        );
         let observed_max = max_seen.load(Ordering::SeqCst);
         assert!(
             observed_max <= max_concurrent,
             "max concurrent {} should be <= semaphore limit {}",
-            observed_max, max_concurrent
+            observed_max,
+            max_concurrent
         );
     }
 
@@ -835,7 +928,11 @@ mod tests {
         let (adapter, _, down_count) = SuccessAdapter::new();
         engine.start(adapter).await.unwrap();
 
-        let task = TransferTask::new_download("http://host/file.bin".to_string(), PathBuf::from("/dst/file.bin"), 0);
+        let task = TransferTask::new_download(
+            "http://host/file.bin".to_string(),
+            PathBuf::from("/dst/file.bin"),
+            0,
+        );
         engine.add_transfer(task).await.unwrap();
         sleep(Duration::from_millis(200)).await;
         assert_eq!(down_count.load(Ordering::SeqCst), 1);
@@ -848,7 +945,11 @@ mod tests {
         engine.start(adapter).await.unwrap();
 
         for i in 0..5 {
-            let task = TransferTask::new_upload(PathBuf::from(format!("/file{}.bin", i)), "http://host/upload".to_string(), 0);
+            let task = TransferTask::new_upload(
+                PathBuf::from(format!("/file{}.bin", i)),
+                "http://host/upload".to_string(),
+                0,
+            );
             engine.add_transfer(task).await.unwrap();
         }
         sleep(Duration::from_millis(300)).await;
@@ -862,7 +963,11 @@ mod tests {
         struct ProgressAdapter;
         #[async_trait::async_trait]
         impl ProtocolAdapter for ProgressAdapter {
-            async fn upload(&self, task: &TransferTask, tx: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
+            async fn upload(
+                &self,
+                task: &TransferTask,
+                tx: mpsc::UnboundedSender<ProtocolProgress>,
+            ) -> Result<()> {
                 let total = task.file_size;
                 for step in [25u64, 50, 75, 100] {
                     let _ = tx.send(ProtocolProgress {
@@ -872,16 +977,33 @@ mod tests {
                 }
                 Ok(())
             }
-            async fn download(&self, _: &TransferTask, _: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> { Ok(()) }
-            async fn upload_chunked(&self, task: &TransferTask, _: &mut ResumeState, tx: mpsc::UnboundedSender<ProtocolProgress>) -> Result<()> {
+            async fn download(
+                &self,
+                _: &TransferTask,
+                _: mpsc::UnboundedSender<ProtocolProgress>,
+            ) -> Result<()> {
+                Ok(())
+            }
+            async fn upload_chunked(
+                &self,
+                task: &TransferTask,
+                _: &mut ResumeState,
+                tx: mpsc::UnboundedSender<ProtocolProgress>,
+            ) -> Result<()> {
                 self.upload(task, tx).await
             }
-            fn protocol_name(&self) -> &'static str { "mock-progress" }
+            fn protocol_name(&self) -> &'static str {
+                "mock-progress"
+            }
         }
 
         let engine = TransferEngine::new(TransferConfig::default());
         engine.start(Arc::new(ProgressAdapter)).await.unwrap();
-        let task = TransferTask::new_upload(PathBuf::from("/big.bin"), "http://host/upload".to_string(), 1024 * 1024);
+        let task = TransferTask::new_upload(
+            PathBuf::from("/big.bin"),
+            "http://host/upload".to_string(),
+            1024 * 1024,
+        );
         engine.add_transfer(task).await.unwrap();
         sleep(Duration::from_millis(200)).await;
         let m = engine.get_progress_monitor().await;

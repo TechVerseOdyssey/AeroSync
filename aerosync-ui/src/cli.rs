@@ -1,5 +1,5 @@
 use crate::{AppState, UiEvent, UiEventHandler};
-use aerosync_core::{TransferTask, FileManager};
+use aerosync_core::{FileManager, TransferTask};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -25,10 +25,10 @@ impl CliApp {
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         println!("AeroSync - Cross-Platform File Transfer Engine");
         println!("==============================================");
-        
+
         loop {
             self.show_main_menu().await?;
-            
+
             let input = self.read_input("Select an option: ")?;
             match input.trim() {
                 "1" => self.handle_file_selection().await?,
@@ -42,7 +42,7 @@ impl CliApp {
                 _ => println!("Invalid option. Please try again."),
             }
         }
-        
+
         Ok(())
     }
 
@@ -73,7 +73,7 @@ impl CliApp {
         }
 
         let destination = self.read_input("Enter destination URL: ")?;
-        
+
         // Create transfer tasks
         for path in paths {
             if let Ok(file_info) = FileManager::get_file_info(&path).await {
@@ -107,10 +107,11 @@ impl CliApp {
                 let confirm = self.read_input("Transfer all files? (y/n): ")?;
                 if confirm.trim().to_lowercase() == "y" {
                     let destination = self.read_input("Enter destination URL: ")?;
-                    
+
                     for file in files {
                         if !file.is_directory {
-                            let task = TransferTask::new_upload(file.path, destination.clone(), file.size);
+                            let task =
+                                TransferTask::new_upload(file.path, destination.clone(), file.size);
                             if let Err(e) = self.state.transfer_engine.add_transfer(task).await {
                                 println!("Failed to add transfer for {}: {}", file.name, e);
                             }
@@ -128,7 +129,7 @@ impl CliApp {
     async fn show_transfer_status(&self) -> Result<(), Box<dyn std::error::Error>> {
         let monitor = self.state.transfer_engine.get_progress_monitor().await;
         let monitor_guard = monitor.read().await;
-        
+
         let stats = monitor_guard.get_stats();
         let active_transfers = monitor_guard.get_active_transfers();
 
@@ -137,7 +138,10 @@ impl CliApp {
         println!("Total files: {}", stats.total_files);
         println!("Completed: {}", stats.completed_files);
         println!("Failed: {}", stats.failed_files);
-        println!("Overall speed: {:.2} MB/s", stats.overall_speed / (1024.0 * 1024.0));
+        println!(
+            "Overall speed: {:.2} MB/s",
+            stats.overall_speed / (1024.0 * 1024.0)
+        );
 
         if !active_transfers.is_empty() {
             println!("\nActive transfers:");
@@ -147,8 +151,9 @@ impl CliApp {
                 } else {
                     0.0
                 };
-                
-                println!("  {} - {:.1}% ({:.2} MB/s)", 
+
+                println!(
+                    "  {} - {:.1}% ({:.2} MB/s)",
                     transfer.file_name,
                     progress_percent,
                     transfer.transfer_speed / (1024.0 * 1024.0)
@@ -163,7 +168,10 @@ impl CliApp {
         let config = self.state.config.read().await;
         println!("\nCurrent Settings:");
         println!("================");
-        println!("Max concurrent transfers: {}", config.max_concurrent_transfers);
+        println!(
+            "Max concurrent transfers: {}",
+            config.max_concurrent_transfers
+        );
         println!("Chunk size: {} bytes", config.chunk_size);
         println!("Retry attempts: {}", config.retry_attempts);
         println!("Timeout: {} seconds", config.timeout_seconds);
@@ -174,7 +182,7 @@ impl CliApp {
     fn read_input(&self, prompt: &str) -> Result<String, io::Error> {
         print!("{}", prompt);
         io::stdout().flush()?;
-        
+
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         Ok(input)
@@ -185,10 +193,9 @@ impl UiEventHandler for CliApp {
     fn handle_event(&mut self, event: UiEvent) {
         match event {
             UiEvent::ProgressUpdate(progress) => {
-                println!("Progress: {} - {}/{} bytes", 
-                    progress.file_name,
-                    progress.bytes_transferred,
-                    progress.total_bytes
+                println!(
+                    "Progress: {} - {}/{} bytes",
+                    progress.file_name, progress.bytes_transferred, progress.total_bytes
                 );
             }
             UiEvent::TransferError { task_id, error } => {

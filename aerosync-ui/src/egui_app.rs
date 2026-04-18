@@ -1,9 +1,9 @@
+use crate::AppState;
+use aerosync_core::{FileManager, ServerStatus, TransferTask};
 #[cfg(feature = "egui")]
 use eframe::egui;
 #[cfg(feature = "egui")]
 use rfd::FileDialog;
-use crate::AppState;
-use aerosync_core::{TransferTask, FileManager, ServerStatus};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -37,15 +37,15 @@ impl EguiApp {
         let (config_cache, server_config_cache) = rt.block_on(async {
             let config = state.config.read().await.clone();
             let server_config = state.server_config.read().await.clone();
-            
+
             // Start the transfer engine
             if let Err(e) = state.transfer_engine.start().await {
                 tracing::error!("Failed to start transfer engine: {}", e);
             }
-            
+
             (config, server_config)
         });
-        
+
         Self {
             state,
             selected_files: Vec::new(),
@@ -78,7 +78,7 @@ impl EguiApp {
                 style.spacing.window_margin = egui::Margin::same(12.0);
                 style.spacing.button_padding = egui::vec2(12.0, 6.0);
                 cc.egui_ctx.set_style(style);
-                
+
                 Box::new(EguiApp::new(state))
             }),
         )
@@ -107,17 +107,14 @@ impl EguiApp {
 
     fn select_files(&mut self) {
         // Try multiple files selection with better configuration
-        match FileDialog::new().pick_files()
-        {
+        match FileDialog::new().pick_files() {
             Some(files) if !files.is_empty() => {
                 self.selected_files = files;
                 self.transfer_status = format!("Selected {} files", self.selected_files.len());
             }
             _ => {
                 // Fallback to single file selection if multiple selection fails or is empty
-                if let Some(file) = FileDialog::new()
-                    .pick_file()
-                {
+                if let Some(file) = FileDialog::new().pick_file() {
                     self.selected_files = vec![file];
                     self.transfer_status = "Selected 1 file".to_string();
                 } else {
@@ -137,25 +134,22 @@ impl EguiApp {
     }
 
     fn select_folder(&mut self) {
-        if let Some(folder) = FileDialog::new()
-            .set_directory(".")
-            .pick_folder()
-        {
+        if let Some(folder) = FileDialog::new().set_directory(".").pick_folder() {
             // Get all files in the folder
             let files = self.rt.block_on(async {
                 match FileManager::list_directory(&folder).await {
-                    Ok(file_infos) => {
-                        file_infos.into_iter()
-                            .filter(|f| !f.is_directory)
-                            .map(|f| f.path)
-                            .collect::<Vec<_>>()
-                    }
-                    Err(_) => Vec::new()
+                    Ok(file_infos) => file_infos
+                        .into_iter()
+                        .filter(|f| !f.is_directory)
+                        .map(|f| f.path)
+                        .collect::<Vec<_>>(),
+                    Err(_) => Vec::new(),
                 }
             });
-            
+
             self.selected_files = files;
-            self.transfer_status = format!("Selected folder with {} files", self.selected_files.len());
+            self.transfer_status =
+                format!("Selected folder with {} files", self.selected_files.len());
         }
     }
 
@@ -177,12 +171,9 @@ impl EguiApp {
         self.rt.spawn(async move {
             for file_path in files {
                 if let Ok(file_info) = FileManager::get_file_info(&file_path).await {
-                    let task = TransferTask::new_upload(
-                        file_path,
-                        destination.clone(),
-                        file_info.size
-                    );
-                    
+                    let task =
+                        TransferTask::new_upload(file_path, destination.clone(), file_info.size);
+
                     if let Err(e) = engine.add_transfer(task).await {
                         tracing::error!("Failed to add transfer: {}", e);
                     }
@@ -202,7 +193,7 @@ impl EguiApp {
                 stats.total_files,
                 stats.completed_files,
                 stats.failed_files,
-                stats.overall_speed / (1024.0 * 1024.0) // Convert to MB/s
+                stats.overall_speed / (1024.0 * 1024.0), // Convert to MB/s
             )
         })
     }
@@ -212,16 +203,25 @@ impl EguiApp {
             let monitor = self.state.transfer_engine.get_progress_monitor().await;
             let monitor_guard = monitor.read().await;
             let transfers = monitor_guard.get_active_transfers();
-            
-            transfers.iter().map(|t| {
-                let progress = if t.total_bytes > 0 {
-                    (t.bytes_transferred as f64 / t.total_bytes as f64) * 100.0
-                } else {
-                    0.0
-                };
-                let speed_mb = t.transfer_speed / (1024.0 * 1024.0);
-                (t.file_name.clone(), progress, speed_mb, t.bytes_transferred, t.total_bytes)
-            }).collect()
+
+            transfers
+                .iter()
+                .map(|t| {
+                    let progress = if t.total_bytes > 0 {
+                        (t.bytes_transferred as f64 / t.total_bytes as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    let speed_mb = t.transfer_speed / (1024.0 * 1024.0);
+                    (
+                        t.file_name.clone(),
+                        progress,
+                        speed_mb,
+                        t.bytes_transferred,
+                        t.total_bytes,
+                    )
+                })
+                .collect()
         })
     }
 
@@ -229,20 +229,20 @@ impl EguiApp {
         let receiver = Arc::clone(&self.state.file_receiver);
         let config = self.server_config_cache.clone();
         let state_config = Arc::clone(&self.state.server_config);
-        
+
         self.rt.spawn(async move {
             // Update the server configuration first
             let mut config_guard = state_config.write().await;
             *config_guard = config.clone();
             drop(config_guard);
-            
+
             // Update FileReceiver's config and start
             let mut receiver_guard = receiver.write().await;
             if let Err(e) = receiver_guard.update_config(config).await {
                 tracing::error!("Failed to update server config: {}", e);
                 return;
             }
-            
+
             if let Err(e) = receiver_guard.start().await {
                 tracing::error!("Failed to start server: {}", e);
             }
@@ -266,14 +266,14 @@ impl EguiApp {
             let receiver = self.state.file_receiver.read().await;
             let status = receiver.get_status().await;
             let urls = receiver.get_server_urls().await;
-            
+
             let status_text = match status {
                 ServerStatus::Stopped => "Stopped".to_string(),
                 ServerStatus::Starting => "Starting...".to_string(),
                 ServerStatus::Running => "Running".to_string(),
                 ServerStatus::Error(e) => format!("Error: {}", e),
             };
-            
+
             (status_text, urls)
         })
     }
@@ -282,52 +282,53 @@ impl EguiApp {
         self.rt.block_on(async {
             let receiver = self.state.file_receiver.read().await;
             let files = receiver.get_received_files().await;
-            
-            files.iter().map(|f| {
-                let time_str = f.received_at
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| {
-                        let secs = d.as_secs();
-                        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
-                    })
-                    .unwrap_or_else(|_| "Unknown".to_string());
-                
-                (f.original_name.clone(), f.size, time_str)
-            }).collect()
+
+            files
+                .iter()
+                .map(|f| {
+                    let time_str = f
+                        .received_at
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| {
+                            let secs = d.as_secs();
+                            format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+                        })
+                        .unwrap_or_else(|_| "Unknown".to_string());
+
+                    (f.original_name.clone(), f.size, time_str)
+                })
+                .collect()
         })
     }
 
     fn select_receive_directory(&mut self) {
-        if let Some(folder) = rfd::FileDialog::new()
-            .set_directory(".")
-            .pick_folder()
-        {
+        if let Some(folder) = rfd::FileDialog::new().set_directory(".").pick_folder() {
             self.server_config_cache.receive_directory = folder.clone();
-            
+
             // Update the state configuration and ensure the directory exists
             let state_config = Arc::clone(&self.state.server_config);
             let receiver = Arc::clone(&self.state.file_receiver);
             let config = self.server_config_cache.clone();
-            
+
             self.rt.spawn(async move {
                 // Ensure the directory exists
                 if let Err(e) = tokio::fs::create_dir_all(&folder).await {
                     tracing::error!("Failed to create receive directory: {}", e);
                     return;
                 }
-                
+
                 // Update the configuration in state
                 let mut config_guard = state_config.write().await;
                 *config_guard = config.clone();
                 drop(config_guard);
-                
+
                 // Update FileReceiver's config (but don't restart if not running)
                 let mut receiver_guard = receiver.write().await;
                 if let Err(e) = receiver_guard.update_config(config).await {
                     tracing::error!("Failed to update server config: {}", e);
                 }
             });
-            
+
             self.server_status = "Receive directory updated".to_string();
         }
     }
@@ -344,17 +345,20 @@ impl eframe::App for EguiApp {
             ui.horizontal(|ui| {
                 ui.heading(egui::RichText::new("🚀 AeroSync").size(24.0));
                 ui.separator();
-                ui.label(egui::RichText::new("Cross-Platform File Transfer Engine").color(egui::Color32::GRAY));
-                
+                ui.label(
+                    egui::RichText::new("Cross-Platform File Transfer Engine")
+                        .color(egui::Color32::GRAY),
+                );
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("⚙️").clicked() {
                         self.show_settings = !self.show_settings;
                     }
                 });
             });
-            
+
             ui.separator();
-            
+
             // Tab bar
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.current_tab, Tab::Transfer, "📤 Transfer");
@@ -364,12 +368,10 @@ impl eframe::App for EguiApp {
         });
 
         // Main content area
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.current_tab {
-                Tab::Transfer => self.render_transfer_tab(ui),
-                Tab::Server => self.render_server_tab(ui),
-                Tab::History => self.render_history_tab(ui),
-            }
+        egui::CentralPanel::default().show(ctx, |ui| match self.current_tab {
+            Tab::Transfer => self.render_transfer_tab(ui),
+            Tab::Server => self.render_server_tab(ui),
+            Tab::History => self.render_history_tab(ui),
         });
 
         // Settings window
@@ -396,26 +398,26 @@ impl EguiApp {
                             }
                         });
                     });
-                    
+
                     ui.add_space(8.0);
-                    
+
                     // File selection buttons
                     ui.horizontal(|ui| {
                         if ui.button("📄 Select File").clicked() {
                             self.select_single_file();
                         }
-                        
+
                         if ui.button("📄📄 Select Files").clicked() {
                             self.select_files();
                         }
-                        
+
                         if ui.button("📂 Select Folder").clicked() {
                             self.select_folder();
                         }
                     });
-                    
+
                     ui.add_space(12.0);
-                    
+
                     // File list table
                     if !self.selected_files.is_empty() {
                         egui::Frame::none()
@@ -430,10 +432,11 @@ impl EguiApp {
                                         ui.strong("Size");
                                         ui.strong("Path");
                                         ui.end_row();
-                                        
+
                                         for file in &self.selected_files {
                                             // Better handling for file names with non-ASCII characters
-                                            let file_name = file.file_name()
+                                            let file_name = file
+                                                .file_name()
                                                 .and_then(|os_str| os_str.to_str())
                                                 .map(|s| s.to_string())
                                                 .unwrap_or_else(|| {
@@ -442,15 +445,17 @@ impl EguiApp {
                                                         .to_string_lossy()
                                                         .to_string()
                                                 });
-                                            
-                                            let (name, size) = self.get_file_info(file)
+
+                                            let (name, size) = self
+                                                .get_file_info(file)
                                                 .unwrap_or_else(|| (file_name.clone(), 0));
-                                            
+
                                             ui.label(&name);
                                             ui.label(self.format_file_size(size));
-                                            
+
                                             // Better handling for path display with non-ASCII characters
-                                            let path_str = file.parent()
+                                            let path_str = file
+                                                .parent()
                                                 .and_then(|p| p.as_os_str().to_str())
                                                 .map(|s| s.to_string())
                                                 .unwrap_or_else(|| {
@@ -465,94 +470,112 @@ impl EguiApp {
                                         }
                                     });
                             });
-                        
+
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new(format!("{} file(s) selected", self.selected_files.len()))
-                            .color(egui::Color32::GRAY));
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} file(s) selected",
+                                self.selected_files.len()
+                            ))
+                            .color(egui::Color32::GRAY),
+                        );
                     } else {
-                        ui.label(egui::RichText::new("No files selected. Click buttons above to select files.")
+                        ui.label(
+                            egui::RichText::new(
+                                "No files selected. Click buttons above to select files.",
+                            )
                             .color(egui::Color32::GRAY)
-                            .italics());
+                            .italics(),
+                        );
                     }
                 });
-            
+
             ui.add_space(16.0);
-            
+
             // Destination card
             egui::Frame::group(ui.style())
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
                     ui.heading("🌐 Destination");
                     ui.add_space(8.0);
-                    
+
                     ui.horizontal(|ui| {
                         ui.label("URL:");
                         ui.text_edit_singleline(&mut self.destination_url);
                     });
-                    
+
                     ui.add_space(8.0);
-                    
+
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Protocol:").strong());
-                        let protocol_text = if self.config_cache.use_quic { "QUIC" } else { "HTTP" };
+                        let protocol_text = if self.config_cache.use_quic {
+                            "QUIC"
+                        } else {
+                            "HTTP"
+                        };
                         let protocol_color = if self.config_cache.use_quic {
                             egui::Color32::from_rgb(100, 200, 100)
                         } else {
                             egui::Color32::from_rgb(100, 150, 255)
                         };
                         ui.colored_label(protocol_color, protocol_text);
-                        
+
                         ui.separator();
-                        
+
                         ui.label(egui::RichText::new("Chunk Size:").strong());
                         ui.label(format!("{} KB", self.config_cache.chunk_size / 1024));
                     });
                 });
-            
+
             ui.add_space(16.0);
-            
+
             // Transfer controls card
             egui::Frame::group(ui.style())
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let start_enabled = !self.selected_files.is_empty() && !self.destination_url.is_empty();
-                        
-                        let start_button = egui::Button::new(egui::RichText::new("▶ Start Transfer").size(16.0))
-                            .fill(if start_enabled {
-                                egui::Color32::from_rgb(0, 150, 0)
-                            } else {
-                                egui::Color32::GRAY
-                            });
-                        
+                        let start_enabled =
+                            !self.selected_files.is_empty() && !self.destination_url.is_empty();
+
+                        let start_button =
+                            egui::Button::new(egui::RichText::new("▶ Start Transfer").size(16.0))
+                                .fill(if start_enabled {
+                                    egui::Color32::from_rgb(0, 150, 0)
+                                } else {
+                                    egui::Color32::GRAY
+                                });
+
                         if ui.add_enabled(start_enabled, start_button).clicked() {
                             self.start_transfer();
                         }
-                        
+
                         if ui.button("⏸ Pause All").clicked() {
-                            self.transfer_status = "Pause functionality not yet implemented".to_string();
+                            self.transfer_status =
+                                "Pause functionality not yet implemented".to_string();
                         }
-                        
+
                         if ui.button("⏹ Cancel All").clicked() {
-                            self.transfer_status = "Cancel functionality not yet implemented".to_string();
+                            self.transfer_status =
+                                "Cancel functionality not yet implemented".to_string();
                         }
                     });
                 });
-            
+
             ui.add_space(16.0);
-            
+
             // Status and progress card
             egui::Frame::group(ui.style())
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
                     ui.heading("📊 Transfer Status");
                     ui.add_space(8.0);
-                    
+
                     // Status indicators
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Status:").strong());
-                        let status_color = if self.transfer_status.contains("Ready") || 
-                                           self.transfer_status.contains("Started") {
+                        let status_color = if self.transfer_status.contains("Ready")
+                            || self.transfer_status.contains("Started")
+                        {
                             egui::Color32::from_rgb(0, 200, 0)
                         } else if self.transfer_status.contains("Error") {
                             egui::Color32::from_rgb(200, 0, 0)
@@ -561,47 +584,55 @@ impl EguiApp {
                         };
                         ui.colored_label(status_color, &self.transfer_status);
                     });
-                    
+
                     ui.add_space(12.0);
-                    
+
                     // Overall statistics
                     let (total, completed, failed, speed) = self.get_transfer_stats();
                     if total > 0 {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(format!("📈 Total: {}", total)).strong());
                             ui.separator();
-                            ui.colored_label(egui::Color32::from_rgb(0, 200, 0), 
-                                format!("✅ Completed: {}", completed));
+                            ui.colored_label(
+                                egui::Color32::from_rgb(0, 200, 0),
+                                format!("✅ Completed: {}", completed),
+                            );
                             ui.separator();
-                            ui.colored_label(egui::Color32::from_rgb(200, 0, 0), 
-                                format!("❌ Failed: {}", failed));
+                            ui.colored_label(
+                                egui::Color32::from_rgb(200, 0, 0),
+                                format!("❌ Failed: {}", failed),
+                            );
                             ui.separator();
-                            ui.colored_label(egui::Color32::from_rgb(100, 150, 255), 
-                                format!("🚀 Speed: {:.2} MB/s", speed));
+                            ui.colored_label(
+                                egui::Color32::from_rgb(100, 150, 255),
+                                format!("🚀 Speed: {:.2} MB/s", speed),
+                            );
                         });
-                        
+
                         ui.add_space(8.0);
-                        
+
                         // Overall progress bar
                         let overall_progress = if total > 0 {
                             (completed as f32) / (total as f32)
                         } else {
                             0.0
                         };
-                        
-                        ui.add(egui::ProgressBar::new(overall_progress)
-                            .fill(egui::Color32::from_rgb(0, 200, 0))
-                            .text(format!("{}/{} files", completed, total)));
+
+                        ui.add(
+                            egui::ProgressBar::new(overall_progress)
+                                .fill(egui::Color32::from_rgb(0, 200, 0))
+                                .text(format!("{}/{} files", completed, total)),
+                        );
                     }
-                    
+
                     ui.add_space(12.0);
-                    
+
                     // Active transfers table
                     let active_transfers = self.get_active_transfers();
                     if !active_transfers.is_empty() {
                         ui.label(egui::RichText::new("🔄 Active Transfers").strong());
                         ui.add_space(8.0);
-                        
+
                         egui::Frame::none()
                             .fill(ui.style().visuals.extreme_bg_color)
                             .inner_margin(egui::Margin::same(8.0))
@@ -609,25 +640,39 @@ impl EguiApp {
                                 egui::ScrollArea::vertical()
                                     .max_height(250.0)
                                     .show(ui, |ui| {
-                                        for (filename, progress, speed, transferred, total_bytes) in active_transfers {
+                                        for (filename, progress, speed, transferred, total_bytes) in
+                                            active_transfers
+                                        {
                                             ui.horizontal(|ui| {
                                                 ui.label(egui::RichText::new(&filename));
-                                                
-                                                ui.add(egui::ProgressBar::new((progress / 100.0) as f32)
+
+                                                ui.add(
+                                                    egui::ProgressBar::new(
+                                                        (progress / 100.0) as f32,
+                                                    )
                                                     .fill(egui::Color32::from_rgb(0, 150, 255))
                                                     .desired_width(200.0)
-                                                    .text(format!("{:.1}%", progress)));
-                                                
+                                                    .text(format!("{:.1}%", progress)),
+                                                );
+
                                                 ui.label(format!("{:.2} MB/s", speed));
-                                                
-                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    ui.label(egui::RichText::new(
-                                                        format!("{}/{}", 
-                                                            self.format_file_size(transferred),
-                                                            self.format_file_size(total_bytes)
-                                                        )
-                                                    ).small().color(egui::Color32::GRAY));
-                                                });
+
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(format!(
+                                                                "{}/{}",
+                                                                self.format_file_size(transferred),
+                                                                self.format_file_size(total_bytes)
+                                                            ))
+                                                            .small()
+                                                            .color(egui::Color32::GRAY),
+                                                        );
+                                                    },
+                                                );
                                             });
                                             ui.add_space(4.0);
                                         }
@@ -637,10 +682,10 @@ impl EguiApp {
                 });
         });
     }
-    
+
     fn render_server_tab(&mut self, ui: &mut egui::Ui) {
         let (status, urls) = self.get_server_status();
-        
+
         ui.vertical(|ui| {
             // Server status card
             egui::Frame::group(ui.style())
@@ -652,27 +697,29 @@ impl EguiApp {
                             let status_color = match status.as_str() {
                                 "Running" => egui::Color32::from_rgb(0, 200, 0),
                                 "Stopped" => egui::Color32::GRAY,
-                                _ if status.starts_with("Error") => egui::Color32::from_rgb(200, 0, 0),
+                                _ if status.starts_with("Error") => {
+                                    egui::Color32::from_rgb(200, 0, 0)
+                                }
                                 _ => egui::Color32::from_rgb(200, 150, 0),
                             };
-                            
+
                             // Status indicator dot
                             ui.painter().circle_filled(
                                 ui.max_rect().right_top() + egui::vec2(-8.0, 8.0),
                                 6.0,
-                                status_color
+                                status_color,
                             );
-                            
+
                             ui.colored_label(status_color, &status);
                         });
                     });
-                    
+
                     ui.add_space(12.0);
-                    
+
                     if !urls.is_empty() {
                         ui.label(egui::RichText::new("📍 Server URLs").strong());
                         ui.add_space(8.0);
-                        
+
                         for url in &urls {
                             ui.horizontal(|ui| {
                                 ui.label("•");
@@ -685,79 +732,94 @@ impl EguiApp {
                         }
                     }
                 });
-            
+
             ui.add_space(16.0);
-            
+
             // Server controls card
             egui::Frame::group(ui.style())
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
                     ui.heading("🎮 Server Controls");
                     ui.add_space(12.0);
-                    
+
                     let is_running = status == "Running";
-                    
+
                     ui.horizontal(|ui| {
                         let start_color = if is_running {
                             egui::Color32::GRAY
                         } else {
                             egui::Color32::from_rgb(0, 150, 0)
                         };
-                        
-                        if ui.add_enabled(!is_running, 
-                            egui::Button::new(egui::RichText::new("▶ Start Server").size(16.0))
-                                .fill(start_color)
-                        ).clicked() {
+
+                        if ui
+                            .add_enabled(
+                                !is_running,
+                                egui::Button::new(egui::RichText::new("▶ Start Server").size(16.0))
+                                    .fill(start_color),
+                            )
+                            .clicked()
+                        {
                             self.start_server();
                         }
-                        
+
                         let stop_color = if is_running {
                             egui::Color32::from_rgb(200, 0, 0)
                         } else {
                             egui::Color32::GRAY
                         };
-                        
-                        if ui.add_enabled(is_running,
-                            egui::Button::new(egui::RichText::new("⏹ Stop Server").size(16.0))
-                                .fill(stop_color)
-                        ).clicked() {
+
+                        if ui
+                            .add_enabled(
+                                is_running,
+                                egui::Button::new(egui::RichText::new("⏹ Stop Server").size(16.0))
+                                    .fill(stop_color),
+                            )
+                            .clicked()
+                        {
                             self.stop_server();
                         }
                     });
                 });
-            
+
             ui.add_space(16.0);
-            
+
             // Server configuration card
             egui::Frame::group(ui.style())
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
                     ui.heading("⚙️ Server Configuration");
                     ui.add_space(12.0);
-                    
+
                     ui.horizontal(|ui| {
                         ui.label("HTTP Port:");
-                        ui.add(egui::DragValue::new(&mut self.server_config_cache.http_port)
-                            .clamp_range(1024..=65535)
-                            .speed(1.0));
+                        ui.add(
+                            egui::DragValue::new(&mut self.server_config_cache.http_port)
+                                .clamp_range(1024..=65535)
+                                .speed(1.0),
+                        );
                     });
-                    
+
                     ui.horizontal(|ui| {
                         ui.label("QUIC Port:");
-                        ui.add(egui::DragValue::new(&mut self.server_config_cache.quic_port)
-                            .clamp_range(1024..=65535)
-                            .speed(1.0));
+                        ui.add(
+                            egui::DragValue::new(&mut self.server_config_cache.quic_port)
+                                .clamp_range(1024..=65535)
+                                .speed(1.0),
+                        );
                     });
-                    
+
                     ui.horizontal(|ui| {
                         ui.label("Receive Directory:");
-                        let dir_str = self.server_config_cache.receive_directory
+                        let dir_str = self
+                            .server_config_cache
+                            .receive_directory
                             .as_os_str()
                             .to_str()
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| {
                                 // Use to_string_lossy as fallback to handle non-UTF-8 paths
-                                self.server_config_cache.receive_directory
+                                self.server_config_cache
+                                    .receive_directory
                                     .to_string_lossy()
                                     .to_string()
                             });
@@ -766,55 +828,72 @@ impl EguiApp {
                             self.select_receive_directory();
                         }
                     });
-                    
+
                     ui.horizontal(|ui| {
                         ui.label("Max File Size (MB):");
-                        let mut max_size_mb = self.server_config_cache.max_file_size / (1024 * 1024);
-                        ui.add(egui::DragValue::new(&mut max_size_mb)
-                            .clamp_range(1..=10240)
-                            .speed(10.0));
+                        let mut max_size_mb =
+                            self.server_config_cache.max_file_size / (1024 * 1024);
+                        ui.add(
+                            egui::DragValue::new(&mut max_size_mb)
+                                .clamp_range(1..=10240)
+                                .speed(10.0),
+                        );
                         self.server_config_cache.max_file_size = max_size_mb * 1024 * 1024;
                     });
-                    
-                    ui.checkbox(&mut self.server_config_cache.allow_overwrite, "Allow file overwrite");
-                    ui.checkbox(&mut self.server_config_cache.enable_http, "Enable HTTP server");
-                    ui.checkbox(&mut self.server_config_cache.enable_quic, "Enable QUIC server");
-                    
+
+                    ui.checkbox(
+                        &mut self.server_config_cache.allow_overwrite,
+                        "Allow file overwrite",
+                    );
+                    ui.checkbox(
+                        &mut self.server_config_cache.enable_http,
+                        "Enable HTTP server",
+                    );
+                    ui.checkbox(
+                        &mut self.server_config_cache.enable_quic,
+                        "Enable QUIC server",
+                    );
+
                     ui.add_space(12.0);
-                    
-                    if ui.button(egui::RichText::new("💾 Save Configuration").size(14.0)).clicked() {
+
+                    if ui
+                        .button(egui::RichText::new("💾 Save Configuration").size(14.0))
+                        .clicked()
+                    {
                         let config = self.server_config_cache.clone();
                         let state_config = Arc::clone(&self.state.server_config);
                         let receiver = Arc::clone(&self.state.file_receiver);
-                        
+
                         self.rt.spawn(async move {
                             let mut config_guard = state_config.write().await;
                             *config_guard = config.clone();
-                            
+
                             let mut receiver_guard = receiver.write().await;
                             if let Err(e) = receiver_guard.update_config_and_restart(config).await {
                                 tracing::error!("Failed to update server config: {}", e);
                             }
                         });
-                        
+
                         self.server_status = "Server configuration saved and applied".to_string();
                     }
                 });
-            
+
             ui.add_space(16.0);
-            
+
             // Received files card
             egui::Frame::group(ui.style())
                 .inner_margin(egui::Margin::same(16.0))
                 .show(ui, |ui| {
                     ui.heading("📥 Received Files");
                     ui.add_space(12.0);
-                    
+
                     let received_files = self.get_received_files();
                     if received_files.is_empty() {
-                        ui.label(egui::RichText::new("No files received yet")
-                            .color(egui::Color32::GRAY)
-                            .italics());
+                        ui.label(
+                            egui::RichText::new("No files received yet")
+                                .color(egui::Color32::GRAY)
+                                .italics(),
+                        );
                     } else {
                         egui::Frame::none()
                             .fill(ui.style().visuals.extreme_bg_color)
@@ -828,7 +907,7 @@ impl EguiApp {
                                         ui.strong("Size");
                                         ui.strong("Received At");
                                         ui.end_row();
-                                        
+
                                         for (filename, size, time) in received_files {
                                             ui.label(&filename);
                                             ui.label(self.format_file_size(size));
@@ -841,18 +920,20 @@ impl EguiApp {
                 });
         });
     }
-    
+
     fn render_history_tab(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(100.0);
             ui.heading("📋 Transfer History");
             ui.add_space(16.0);
-            ui.label(egui::RichText::new("History feature coming soon...")
-                .color(egui::Color32::GRAY)
-                .italics());
+            ui.label(
+                egui::RichText::new("History feature coming soon...")
+                    .color(egui::Color32::GRAY)
+                    .italics(),
+            );
         });
     }
-    
+
     fn render_settings_window(&mut self, ctx: &egui::Context) {
         let mut close_settings = false;
         egui::Window::new("⚙️ Settings")
@@ -863,52 +944,63 @@ impl EguiApp {
                 ui.vertical(|ui| {
                     ui.heading("🔧 Transfer Configuration");
                     ui.add_space(12.0);
-                    
+
                     ui.horizontal(|ui| {
                         ui.label("Max concurrent transfers:");
-                        ui.add(egui::DragValue::new(&mut self.config_cache.max_concurrent_transfers)
-                            .clamp_range(1..=10)
-                            .speed(1.0));
+                        ui.add(
+                            egui::DragValue::new(&mut self.config_cache.max_concurrent_transfers)
+                                .clamp_range(1..=10)
+                                .speed(1.0),
+                        );
                     });
-                    
+
                     ui.horizontal(|ui| {
                         ui.label("Chunk size (KB):");
                         let mut chunk_kb = self.config_cache.chunk_size / 1024;
-                        ui.add(egui::DragValue::new(&mut chunk_kb)
-                            .clamp_range(64..=8192)
-                            .speed(64.0));
+                        ui.add(
+                            egui::DragValue::new(&mut chunk_kb)
+                                .clamp_range(64..=8192)
+                                .speed(64.0),
+                        );
                         self.config_cache.chunk_size = chunk_kb * 1024;
                     });
-                    
+
                     ui.horizontal(|ui| {
                         ui.label("Retry attempts:");
-                        ui.add(egui::DragValue::new(&mut self.config_cache.retry_attempts)
-                            .clamp_range(0..=10)
-                            .speed(1.0));
+                        ui.add(
+                            egui::DragValue::new(&mut self.config_cache.retry_attempts)
+                                .clamp_range(0..=10)
+                                .speed(1.0),
+                        );
                     });
-                    
+
                     ui.horizontal(|ui| {
                         ui.label("Timeout (seconds):");
-                        ui.add(egui::DragValue::new(&mut self.config_cache.timeout_seconds)
-                            .clamp_range(5..=300)
-                            .speed(5.0));
+                        ui.add(
+                            egui::DragValue::new(&mut self.config_cache.timeout_seconds)
+                                .clamp_range(5..=300)
+                                .speed(5.0),
+                        );
                     });
-                    
+
                     ui.checkbox(&mut self.config_cache.use_quic, "Use QUIC protocol");
-                    
+
                     ui.add_space(16.0);
                     ui.separator();
                     ui.add_space(8.0);
-                    
+
                     ui.label(egui::RichText::new("ℹ️ Information").strong());
                     ui.add_space(8.0);
                     ui.label("• QUIC provides better performance over high-latency networks");
                     ui.label("• HTTP is more compatible with existing infrastructure");
                     ui.label("• Larger chunk sizes may improve throughput for large files");
-                    
+
                     ui.add_space(16.0);
-                    
-                    if ui.button(egui::RichText::new("💾 Save Settings").size(14.0)).clicked() {
+
+                    if ui
+                        .button(egui::RichText::new("💾 Save Settings").size(14.0))
+                        .clicked()
+                    {
                         let config = self.config_cache.clone();
                         let state_config = Arc::clone(&self.state.config);
                         self.rt.spawn(async move {
@@ -920,7 +1012,7 @@ impl EguiApp {
                     }
                 });
             });
-        
+
         if close_settings {
             self.show_settings = false;
         }

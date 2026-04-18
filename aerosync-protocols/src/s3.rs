@@ -12,7 +12,7 @@
 //! - 三步流程：Initiate → Upload Part(s) → Complete
 //! - 上传 ID（UploadId）可通过 `ResumeState.metadata` 持久化以支持断点续传
 
-use crate::traits::{TransferProtocol, TransferProgress};
+use crate::traits::{TransferProgress, TransferProtocol};
 use crate::utils::send_progress;
 use aerosync_core::{AeroSyncError, Result, TransferTask};
 use async_trait::async_trait;
@@ -118,12 +118,7 @@ impl S3Transfer {
     fn build_put_url(&self, bucket: &str, key: &str) -> String {
         if let Some(ref endpoint) = self.config.endpoint {
             // MinIO 或自定义 endpoint：endpoint/bucket/key
-            format!(
-                "{}/{}/{}",
-                endpoint.trim_end_matches('/'),
-                bucket,
-                key
-            )
+            format!("{}/{}/{}", endpoint.trim_end_matches('/'), bucket, key)
         } else {
             // AWS S3 标准格式
             format!(
@@ -183,12 +178,7 @@ impl S3Transfer {
             sha256_hex(canonical_request.as_bytes())
         );
 
-        let signing_key = derive_signing_key(
-            &self.config.secret_key,
-            &date_stamp,
-            region,
-            service,
-        );
+        let signing_key = derive_signing_key(&self.config.secret_key, &date_stamp, region, service);
         let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
         format!(
@@ -239,7 +229,10 @@ impl S3Transfer {
             ))
         })?;
 
-        tracing::debug!("S3 Multipart initiated: upload_id={}", &upload_id[..upload_id.len().min(16)]);
+        tracing::debug!(
+            "S3 Multipart initiated: upload_id={}",
+            &upload_id[..upload_id.len().min(16)]
+        );
         Ok(upload_id)
     }
 
@@ -255,7 +248,10 @@ impl S3Transfer {
         data: Vec<u8>,
     ) -> Result<String> {
         let base_url = self.build_put_url(bucket, key);
-        let url = format!("{}?partNumber={}&uploadId={}", base_url, part_number, upload_id);
+        let url = format!(
+            "{}?partNumber={}&uploadId={}",
+            base_url, part_number, upload_id
+        );
         let auth = self.build_auth_header();
         let now_str = amz_date_string();
         let content_len = data.len();
@@ -272,10 +268,9 @@ impl S3Transfer {
             req = req.header("x-amz-date", now_str);
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| AeroSyncError::Network(format!("S3 Upload Part {} failed: {}", part_number, e)))?;
+        let resp = req.send().await.map_err(|e| {
+            AeroSyncError::Network(format!("S3 Upload Part {} failed: {}", part_number, e))
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -294,7 +289,11 @@ impl S3Transfer {
             .trim_matches('"')
             .to_string();
 
-        tracing::debug!("S3 Part {} uploaded, ETag={}", part_number, &etag[..etag.len().min(16)]);
+        tracing::debug!(
+            "S3 Part {} uploaded, ETag={}",
+            part_number,
+            &etag[..etag.len().min(16)]
+        );
         Ok(etag)
     }
 
@@ -354,12 +353,7 @@ impl S3Transfer {
     }
 
     /// Abort a Multipart Upload (cleanup on failure).
-    pub async fn abort_multipart(
-        &self,
-        bucket: &str,
-        key: &str,
-        upload_id: &str,
-    ) -> Result<()> {
+    pub async fn abort_multipart(&self, bucket: &str, key: &str, upload_id: &str) -> Result<()> {
         let base_url = self.build_put_url(bucket, key);
         let url = format!("{}?uploadId={}", base_url, upload_id);
         let auth = self.build_auth_header();
@@ -391,7 +385,8 @@ impl S3Transfer {
         url: &str,
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
-        self.upload_auto_with_resume(file_path, url, None, vec![], progress_tx).await
+        self.upload_auto_with_resume(file_path, url, None, vec![], progress_tx)
+            .await
     }
 
     /// Internal multipart upload with resume support.
@@ -406,9 +401,7 @@ impl S3Transfer {
         already_completed: Vec<(u32, String)>,
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
-        let file_size = tokio::fs::metadata(file_path)
-            .await?
-            .len();
+        let file_size = tokio::fs::metadata(file_path).await?.len();
 
         if file_size < self.config.multipart_threshold {
             return self.upload_to_s3(file_path, url, progress_tx).await;
@@ -452,13 +445,18 @@ impl S3Transfer {
                 continue;
             }
 
-            let etag = match self.upload_part(&bucket, &key, &upload_id, part_number, buf).await {
+            let etag = match self
+                .upload_part(&bucket, &key, &upload_id, part_number, buf)
+                .await
+            {
                 Ok(e) => e,
                 Err(e) => {
                     // Don't abort — preserve UploadId for future resume
                     tracing::warn!(
                         "S3 part {} upload failed (upload_id={}): {}",
-                        part_number, &upload_id[..upload_id.len().min(8)], e
+                        part_number,
+                        &upload_id[..upload_id.len().min(8)],
+                        e
                     );
                     return Err(e);
                 }
@@ -472,7 +470,8 @@ impl S3Transfer {
 
         // Sort parts by part_number before completing (required by S3 API)
         parts.sort_by_key(|(n, _)| *n);
-        self.complete_multipart(&bucket, &key, &upload_id, &parts).await
+        self.complete_multipart(&bucket, &key, &upload_id, &parts)
+            .await
     }
 
     /// Resume an in-progress Multipart Upload from saved state.
@@ -504,23 +503,24 @@ impl S3Transfer {
             let rest = url
                 .strip_prefix(prefix)
                 .and_then(|s| s.strip_prefix('/'))
-                .ok_or_else(|| AeroSyncError::InvalidConfig(format!("Cannot parse URL: {}", url)))?;
+                .ok_or_else(|| {
+                    AeroSyncError::InvalidConfig(format!("Cannot parse URL: {}", url))
+                })?;
             let (bucket, key) = rest.split_once('/').ok_or_else(|| {
                 AeroSyncError::InvalidConfig(format!("Cannot parse bucket/key from URL: {}", url))
             })?;
             Ok((bucket.to_string(), key.to_string()))
         } else {
             // AWS format: https://<bucket>.s3.<region>.amazonaws.com/<key>
-            let without_scheme = url
-                .strip_prefix("https://")
-                .ok_or_else(|| AeroSyncError::InvalidConfig(format!("Cannot parse URL: {}", url)))?;
+            let without_scheme = url.strip_prefix("https://").ok_or_else(|| {
+                AeroSyncError::InvalidConfig(format!("Cannot parse URL: {}", url))
+            })?;
             let (host, key) = without_scheme.split_once('/').ok_or_else(|| {
                 AeroSyncError::InvalidConfig(format!("Cannot parse key from URL: {}", url))
             })?;
-            let bucket = host
-                .split('.')
-                .next()
-                .ok_or_else(|| AeroSyncError::InvalidConfig(format!("Cannot parse bucket from host: {}", host)))?;
+            let bucket = host.split('.').next().ok_or_else(|| {
+                AeroSyncError::InvalidConfig(format!("Cannot parse bucket from host: {}", host))
+            })?;
             Ok((bucket.to_string(), key.to_string()))
         }
     }
@@ -583,10 +583,7 @@ impl S3Transfer {
         let auth = self.build_auth_header();
         let now_str = amz_date_string();
 
-        let mut req = self
-            .client
-            .get(url)
-            .header("Authorization", auth);
+        let mut req = self.client.get(url).header("Authorization", auth);
 
         if self.config.endpoint.is_none() {
             req = req.header("x-amz-date", now_str);
@@ -599,10 +596,7 @@ impl S3Transfer {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            return Err(AeroSyncError::Network(format!(
-                "S3 GET failed: {}",
-                status
-            )));
+            return Err(AeroSyncError::Network(format!("S3 GET failed: {}", status)));
         }
 
         let mut file = tokio::fs::File::create(dest_path).await?;
@@ -640,7 +634,8 @@ impl TransferProtocol for S3Transfer {
     ) -> Result<()> {
         let (bucket, key) = Self::parse_s3_url(&task.destination)?;
         let url = self.build_put_url(&bucket, &key);
-        self.download_from_s3(&url, &task.source_path, progress_tx).await
+        self.download_from_s3(&url, &task.source_path, progress_tx)
+            .await
     }
 
     async fn resume_transfer(
@@ -650,8 +645,7 @@ impl TransferProtocol for S3Transfer {
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
         // 通过文件系统查找保存的 S3 断点信息
-        let state_path = std::env::temp_dir()
-            .join(format!(".aerosync_s3_{}.json", task.id));
+        let state_path = std::env::temp_dir().join(format!(".aerosync_s3_{}.json", task.id));
         if let Ok(bytes) = tokio::fs::read(&state_path).await {
             if let Ok(saved) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                 let upload_id = saved["upload_id"].as_str().unwrap_or("").to_string();
@@ -714,7 +708,10 @@ fn aws_timestamps() -> (String, String) {
 
     let (year, month, day, hour, minute, second) = unix_to_datetime(total_secs);
     let date = format!("{:04}{:02}{:02}", year, month, day);
-    let datetime = format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", year, month, day, hour, minute, second);
+    let datetime = format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+        year, month, day, hour, minute, second
+    );
     (date, datetime)
 }
 
@@ -740,7 +737,18 @@ fn unix_to_datetime(ts: u64) -> (u32, u32, u32, u32, u32, u32) {
 
     let leap = is_leap(year);
     let days_per_month: [u64; 12] = [
-        31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
     let mut month = 1u32;
     for &dim in &days_per_month {
@@ -755,13 +763,12 @@ fn unix_to_datetime(ts: u64) -> (u32, u32, u32, u32, u32, u32) {
 }
 
 fn is_leap(year: u32) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 /// HMAC-SHA256: key × data → 32-byte digest
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
-        .expect("HMAC accepts any key length");
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
 }
@@ -872,7 +879,10 @@ mod tests {
         };
         let s3 = S3Transfer::new(cfg).unwrap();
         let url = s3.build_put_url("mybucket", "data/file.bin");
-        assert_eq!(url, "https://mybucket.s3.ap-east-1.amazonaws.com/data/file.bin");
+        assert_eq!(
+            url,
+            "https://mybucket.s3.ap-east-1.amazonaws.com/data/file.bin"
+        );
     }
 
     // ── 8. supports_resume is true (S3 Multipart supports resume) ─────────────
@@ -886,7 +896,10 @@ mod tests {
     #[test]
     fn test_parse_xml_tag() {
         let xml = "<InitiateMultipartUploadResult><Bucket>my-bucket</Bucket><Key>mykey</Key><UploadId>abc123xyz</UploadId></InitiateMultipartUploadResult>";
-        assert_eq!(parse_xml_tag(xml, "UploadId"), Some("abc123xyz".to_string()));
+        assert_eq!(
+            parse_xml_tag(xml, "UploadId"),
+            Some("abc123xyz".to_string())
+        );
         assert_eq!(parse_xml_tag(xml, "Bucket"), Some("my-bucket".to_string()));
         assert_eq!(parse_xml_tag(xml, "Missing"), None);
     }
@@ -935,8 +948,8 @@ mod tests {
     // ── 13. upload_auto uses simple PUT for small files (mock) ────────────────
     #[tokio::test]
     async fn test_upload_auto_small_file_uses_put() {
-        use tempfile::NamedTempFile;
         use std::io::Write;
+        use tempfile::NamedTempFile;
 
         // Create a small temp file
         let mut tmp = NamedTempFile::new().unwrap();
@@ -958,15 +971,19 @@ mod tests {
         // Expected: Network error (no server) from simple PUT path
         if let Err(AeroSyncError::Network(msg)) = result {
             // Should be a PUT error, not an "Initiate Multipart" error
-            assert!(!msg.contains("Initiate Multipart"), "Should use simple PUT for small files, got: {}", msg);
+            assert!(
+                !msg.contains("Initiate Multipart"),
+                "Should use simple PUT for small files, got: {}",
+                msg
+            );
         }
     }
 
     // ── 14. upload_auto uses multipart for large files (mock) ─────────────────
     #[tokio::test]
     async fn test_upload_auto_large_file_uses_multipart() {
-        use tempfile::NamedTempFile;
         use std::io::Write;
+        use tempfile::NamedTempFile;
 
         // Create a file larger than the (very small) threshold
         let mut tmp = NamedTempFile::new().unwrap();
@@ -986,11 +1003,12 @@ mod tests {
         // Expected: Network error from Initiate Multipart (no server), not from simple PUT
         if let Err(AeroSyncError::Network(msg)) = result {
             assert!(
-                msg.contains("Initiate Multipart") || msg.contains("connection refused") || msg.contains("failed"),
+                msg.contains("Initiate Multipart")
+                    || msg.contains("connection refused")
+                    || msg.contains("failed"),
                 "Expected multipart error, got: {}",
                 msg
             );
         }
     }
 }
-

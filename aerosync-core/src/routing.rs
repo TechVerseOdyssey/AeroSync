@@ -72,7 +72,10 @@ pub struct Router {
 
 impl Router {
     pub fn new(config: RouterConfig, default_dir: PathBuf) -> Self {
-        Self { config, default_dir }
+        Self {
+            config,
+            default_dir,
+        }
     }
 
     /// Resolve destination directory.
@@ -104,17 +107,17 @@ mod tests {
     use super::*;
 
     fn make_router(rules: Vec<RoutingRule>, default_dir: &str) -> Router {
-        Router::new(
-            RouterConfig { rules },
-            PathBuf::from(default_dir),
-        )
+        Router::new(RouterConfig { rules }, PathBuf::from(default_dir))
     }
 
     // ── 1. No rules → fallback to default ────────────────────────────────────
     #[test]
     fn test_no_rules_returns_default() {
         let r = make_router(vec![], "/default");
-        assert_eq!(r.resolve("1.2.3.4", None, "file.bin"), PathBuf::from("/default"));
+        assert_eq!(
+            r.resolve("1.2.3.4", None, "file.bin"),
+            PathBuf::from("/default")
+        );
     }
 
     // ── 2. IP rule matches ─────────────────────────────────────────────────────
@@ -128,9 +131,15 @@ mod tests {
             extension: None,
         };
         let r = make_router(vec![rule], "/default");
-        assert_eq!(r.resolve("192.168.1.100", None, "data.bin"), PathBuf::from("/internal"));
+        assert_eq!(
+            r.resolve("192.168.1.100", None, "data.bin"),
+            PathBuf::from("/internal")
+        );
         // Wrong IP → default
-        assert_eq!(r.resolve("10.0.0.1", None, "data.bin"), PathBuf::from("/default"));
+        assert_eq!(
+            r.resolve("10.0.0.1", None, "data.bin"),
+            PathBuf::from("/default")
+        );
     }
 
     // ── 3. Extension rule matches (case-insensitive) ───────────────────────────
@@ -144,10 +153,19 @@ mod tests {
             extension: Some("PNG".into()),
         };
         let r = make_router(vec![rule], "/default");
-        assert_eq!(r.resolve("1.2.3.4", None, "photo.png"), PathBuf::from("/images"));
-        assert_eq!(r.resolve("1.2.3.4", None, "photo.PNG"), PathBuf::from("/images"));
+        assert_eq!(
+            r.resolve("1.2.3.4", None, "photo.png"),
+            PathBuf::from("/images")
+        );
+        assert_eq!(
+            r.resolve("1.2.3.4", None, "photo.PNG"),
+            PathBuf::from("/images")
+        );
         // different extension → default
-        assert_eq!(r.resolve("1.2.3.4", None, "photo.jpg"), PathBuf::from("/default"));
+        assert_eq!(
+            r.resolve("1.2.3.4", None, "photo.jpg"),
+            PathBuf::from("/default")
+        );
     }
 
     // ── 4. Tag rule matches ────────────────────────────────────────────────────
@@ -161,9 +179,18 @@ mod tests {
             extension: None,
         };
         let r = make_router(vec![rule], "/default");
-        assert_eq!(r.resolve("1.2.3.4", Some("agent-a"), "file.bin"), PathBuf::from("/agent-a"));
-        assert_eq!(r.resolve("1.2.3.4", Some("agent-b"), "file.bin"), PathBuf::from("/default"));
-        assert_eq!(r.resolve("1.2.3.4", None, "file.bin"), PathBuf::from("/default"));
+        assert_eq!(
+            r.resolve("1.2.3.4", Some("agent-a"), "file.bin"),
+            PathBuf::from("/agent-a")
+        );
+        assert_eq!(
+            r.resolve("1.2.3.4", Some("agent-b"), "file.bin"),
+            PathBuf::from("/default")
+        );
+        assert_eq!(
+            r.resolve("1.2.3.4", None, "file.bin"),
+            PathBuf::from("/default")
+        );
     }
 
     // ── 5. First rule wins ────────────────────────────────────────────────────
@@ -186,7 +213,10 @@ mod tests {
             },
         ];
         let r = make_router(rules, "/default");
-        assert_eq!(r.resolve("1.2.3.4", None, "file.bin"), PathBuf::from("/first"));
+        assert_eq!(
+            r.resolve("1.2.3.4", None, "file.bin"),
+            PathBuf::from("/first")
+        );
     }
 
     // ── 6. Multi-criteria rule: all must match ─────────────────────────────────
@@ -201,10 +231,19 @@ mod tests {
         };
         let r = make_router(vec![rule], "/default");
         // All match
-        assert_eq!(r.resolve("10.0.0.1", Some("prod"), "app.log"), PathBuf::from("/strict"));
+        assert_eq!(
+            r.resolve("10.0.0.1", Some("prod"), "app.log"),
+            PathBuf::from("/strict")
+        );
         // Wrong tag
-        assert_eq!(r.resolve("10.0.0.1", Some("dev"), "app.log"), PathBuf::from("/default"));
+        assert_eq!(
+            r.resolve("10.0.0.1", Some("dev"), "app.log"),
+            PathBuf::from("/default")
+        );
         // Wrong IP
-        assert_eq!(r.resolve("10.0.0.2", Some("prod"), "app.log"), PathBuf::from("/default"));
+        assert_eq!(
+            r.resolve("10.0.0.2", Some("prod"), "app.log"),
+            PathBuf::from("/default")
+        );
     }
 }

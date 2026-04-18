@@ -141,7 +141,10 @@ impl AeroSyncConfig {
     /// 从 TOML 文件加载配置；文件不存在时返回默认值。
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         if !path.exists() {
-            tracing::debug!("Config file not found at {}, using defaults", path.display());
+            tracing::debug!(
+                "Config file not found at {}, using defaults",
+                path.display()
+            );
             return Ok(Self::default());
         }
         let content = std::fs::read_to_string(path)?;

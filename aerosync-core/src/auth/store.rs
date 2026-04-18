@@ -71,8 +71,7 @@ impl TokenStore {
         if !self.path.exists() {
             return Ok(TokenFile::default());
         }
-        let content = std::fs::read_to_string(&self.path)
-            .map_err(AeroSyncError::FileIo)?;
+        let content = std::fs::read_to_string(&self.path).map_err(AeroSyncError::FileIo)?;
         toml::from_str(&content)
             .map_err(|e| AeroSyncError::System(format!("tokens.toml parse error: {}", e)))
     }
@@ -109,7 +108,12 @@ impl TokenStore {
 
     /// 列出所有有效 Token
     pub fn list_valid(&self) -> Result<Vec<StoredToken>> {
-        Ok(self.load_file()?.tokens.into_iter().filter(|t| t.is_valid()).collect())
+        Ok(self
+            .load_file()?
+            .tokens
+            .into_iter()
+            .filter(|t| t.is_valid())
+            .collect())
     }
 
     /// 按前缀查找有效 Token（前 8 字符匹配即可，避免贴完整 token）
@@ -243,7 +247,9 @@ mod tests {
         let path = dir.path().join("tokens.toml");
 
         let store1 = TokenStore::new(&path);
-        store1.save("persist_me", Some("test"), future(3600)).unwrap();
+        store1
+            .save("persist_me", Some("test"), future(3600))
+            .unwrap();
 
         // 新实例读取同一个文件
         let store2 = TokenStore::new(&path);

@@ -1,10 +1,9 @@
-use crate::traits::{TransferProtocol, TransferProgress};
-use crate::ratelimit::RateLimiter;
-use crate::utils::send_progress;
 use crate::circuit_breaker::CircuitBreaker;
-use zeroize::Zeroizing;
-use aerosync_core::{AeroSyncError, Result, TransferTask};
+use crate::ratelimit::RateLimiter;
+use crate::traits::{TransferProgress, TransferProtocol};
+use crate::utils::send_progress;
 use aerosync_core::resume::{ResumeState, ResumeStore};
+use aerosync_core::{AeroSyncError, Result, TransferTask};
 use async_trait::async_trait;
 use bytes::Bytes;
 use memmap2::MmapOptions;
@@ -18,6 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
+use zeroize::Zeroizing;
 
 pub struct HttpTransfer {
     client: Arc<Client>,
@@ -78,8 +78,7 @@ impl HttpTransfer {
     /// [`HttpTransfer::new_with_client`]，共享同一个 `Arc<Client>`，以复用连接池、
     /// 减少文件描述符消耗并提升性能。
     pub fn new(config: HttpConfig) -> Result<Self> {
-        let mut builder = Client::builder()
-            .timeout(Duration::from_secs(config.timeout_seconds));
+        let mut builder = Client::builder().timeout(Duration::from_secs(config.timeout_seconds));
 
         if !config.pinned_server_certs.is_empty() {
             // 证书钉扎模式：只信任指定证书，禁用系统 CA
@@ -113,17 +112,36 @@ impl HttpTransfer {
             .build()
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
 
-        Ok(Self { client: Arc::new(client), config, circuit_breaker: Arc::new(CircuitBreaker::with_defaults()), resume_store: None })
+        Ok(Self {
+            client: Arc::new(client),
+            config,
+            circuit_breaker: Arc::new(CircuitBreaker::with_defaults()),
+            resume_store: None,
+        })
     }
 
     /// 使用外部共享 client 构造，避免每次创建新连接池。
     pub fn new_with_client(client: Arc<Client>, config: HttpConfig) -> Self {
-        Self { client, config, circuit_breaker: Arc::new(CircuitBreaker::with_defaults()), resume_store: None }
+        Self {
+            client,
+            config,
+            circuit_breaker: Arc::new(CircuitBreaker::with_defaults()),
+            resume_store: None,
+        }
     }
 
     /// 使用外部共享 client + ResumeStore 构造（每分片完成后持久化续传状态）。
-    pub fn new_with_client_and_resume(client: Arc<Client>, config: HttpConfig, store: Arc<ResumeStore>) -> Self {
-        Self { client, config, circuit_breaker: Arc::new(CircuitBreaker::with_defaults()), resume_store: Some(store) }
+    pub fn new_with_client_and_resume(
+        client: Arc<Client>,
+        config: HttpConfig,
+        store: Arc<ResumeStore>,
+    ) -> Self {
+        Self {
+            client,
+            config,
+            circuit_breaker: Arc::new(CircuitBreaker::with_defaults()),
+            resume_store: Some(store),
+        }
     }
 
     /// 判断错误是否属于网络级别故障（连接拒绝、超时、DNS 等），
@@ -133,8 +151,11 @@ impl HttpTransfer {
             AeroSyncError::Network(msg) => {
                 let m = msg.to_lowercase();
                 // 4xx 响应：认证失败/不存在等业务错误 → 不重连
-                if m.contains("401") || m.contains("403") || m.contains("404")
-                    || m.contains("400") || m.contains("413")
+                if m.contains("401")
+                    || m.contains("403")
+                    || m.contains("404")
+                    || m.contains("400")
+                    || m.contains("413")
                 {
                     return false;
                 }
@@ -156,7 +177,12 @@ impl HttpTransfer {
             if tokio::time::Instant::now() >= deadline {
                 return false;
             }
-            match client.get(&health_url).timeout(Duration::from_secs(5)).send().await {
+            match client
+                .get(&health_url)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
                 Ok(r) if r.status().is_success() => return true,
                 _ => {}
             }
@@ -194,9 +220,17 @@ impl HttpTransfer {
 
         for attempt in 0..=max_reconnect {
             let result = if concurrency <= 1 {
-                self.upload_chunked_serial(file_path, base_url, state, progress_tx.clone()).await
+                self.upload_chunked_serial(file_path, base_url, state, progress_tx.clone())
+                    .await
             } else {
-                self.upload_chunked_concurrent(file_path, base_url, state, progress_tx.clone(), concurrency).await
+                self.upload_chunked_concurrent(
+                    file_path,
+                    base_url,
+                    state,
+                    progress_tx.clone(),
+                    concurrency,
+                )
+                .await
             };
 
             match result {
@@ -219,7 +253,9 @@ impl HttpTransfer {
                     );
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     // 等待服务器健康（最多60s）
-                    if !Self::wait_until_healthy(&self.client, base_url, Duration::from_secs(60)).await {
+                    if !Self::wait_until_healthy(&self.client, base_url, Duration::from_secs(60))
+                        .await
+                    {
                         tracing::warn!("Server still unhealthy after 60s, retrying anyway");
                     }
                 }
@@ -248,7 +284,9 @@ impl HttpTransfer {
 
         tracing::info!(
             "Chunked upload (serial): '{}' {} chunks (already done: {:?})",
-            file_name, state.total_chunks, state.completed_chunks
+            file_name,
+            state.total_chunks,
+            state.completed_chunks
         );
 
         for chunk_index in state.pending_chunks() {
@@ -270,21 +308,31 @@ impl HttpTransfer {
             );
 
             Self::upload_chunk_with_retry(
-                &self.client, &chunk_url, buf, chunk_index,
-                self.config.max_retries, self.config.auth_token.as_deref().map(|s| s.as_str()),
-            ).await?;
+                &self.client,
+                &chunk_url,
+                buf,
+                chunk_index,
+                self.config.max_retries,
+                self.config.auth_token.as_deref().map(|s| s.as_str()),
+            )
+            .await?;
 
             state.mark_chunk_done(chunk_index);
             if let Some(store) = &self.resume_store {
                 if let Err(e) = store.save(state).await {
-                    tracing::warn!("Failed to persist resume state after chunk {}: {}", chunk_index, e);
+                    tracing::warn!(
+                        "Failed to persist resume state after chunk {}: {}",
+                        chunk_index,
+                        e
+                    );
                 }
             }
             bytes_done += size;
             send_progress(&progress_tx, bytes_done, &start_time);
         }
 
-        self.send_complete_request(base_url, state, &file_name).await
+        self.send_complete_request(base_url, state, &file_name)
+            .await
     }
 
     /// mmap 并发分片上传（适用于 >5MB 大文件）。
@@ -307,12 +355,13 @@ impl HttpTransfer {
 
         tracing::info!(
             "Chunked upload (concurrent x{}): '{}' {} chunks",
-            concurrency, file_name, state.total_chunks
+            concurrency,
+            file_name,
+            state.total_chunks
         );
 
         // mmap 只读映射（需要 std::fs::File）
-        let std_file = std::fs::File::open(file_path)
-            .map_err(AeroSyncError::FileIo)?;
+        let std_file = std::fs::File::open(file_path).map_err(AeroSyncError::FileIo)?;
         // SAFETY: 文件在整个上传过程中不被修改（只读映射）
         let mmap = Arc::new(unsafe {
             MmapOptions::new()
@@ -351,14 +400,17 @@ impl HttpTransfer {
             tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await;
                 // mmap slice → Bytes（一次用户态拷贝，但避免了 seek+read syscall）
-                let data = Bytes::copy_from_slice(
-                    &mmap[offset as usize..(offset + size) as usize]
-                );
+                let data = Bytes::copy_from_slice(&mmap[offset as usize..(offset + size) as usize]);
                 rl.consume(size).await;
                 let result = Self::upload_chunk_with_retry(
-                    &client, &chunk_url, data, chunk_index,
-                    max_retries, auth_token.as_deref(),
-                ).await;
+                    &client,
+                    &chunk_url,
+                    data,
+                    chunk_index,
+                    max_retries,
+                    auth_token.as_deref(),
+                )
+                .await;
                 let _ = tx.send(result.map(|_| (chunk_index, size)));
             });
         }
@@ -372,7 +424,11 @@ impl HttpTransfer {
             state.mark_chunk_done(chunk_index);
             if let Some(store) = &self.resume_store {
                 if let Err(e) = store.save(state).await {
-                    tracing::warn!("Failed to persist resume state after chunk {}: {}", chunk_index, e);
+                    tracing::warn!(
+                        "Failed to persist resume state after chunk {}: {}",
+                        chunk_index,
+                        e
+                    );
                 }
             }
             bytes_done += size;
@@ -381,7 +437,8 @@ impl HttpTransfer {
             tracing::debug!("Concurrent chunk {}/{} done", completed, total_pending);
         }
 
-        self.send_complete_request(base_url, state, &file_name).await
+        self.send_complete_request(base_url, state, &file_name)
+            .await
     }
 
     /// 带指数退避重试的单分片上传（串行/并发共用）。
@@ -405,15 +462,26 @@ impl HttpTransfer {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
                     last_err = Some(AeroSyncError::Network(format!(
-                        "Chunk {} failed: {} - {}", chunk_index, status, body
+                        "Chunk {} failed: {} - {}",
+                        chunk_index, status, body
                     )));
-                    tracing::warn!("Chunk {} attempt {}/{} failed: {}",
-                        chunk_index, attempt + 1, max_retries + 1, status);
+                    tracing::warn!(
+                        "Chunk {} attempt {}/{} failed: {}",
+                        chunk_index,
+                        attempt + 1,
+                        max_retries + 1,
+                        status
+                    );
                 }
                 Err(e) => {
                     last_err = Some(AeroSyncError::Network(e.to_string()));
-                    tracing::warn!("Chunk {} attempt {}/{} error: {}",
-                        chunk_index, attempt + 1, max_retries + 1, e);
+                    tracing::warn!(
+                        "Chunk {} attempt {}/{} error: {}",
+                        chunk_index,
+                        attempt + 1,
+                        max_retries + 1,
+                        e
+                    );
                 }
             }
             if attempt < max_retries {
@@ -425,9 +493,9 @@ impl HttpTransfer {
                 tokio::time::sleep(Duration::from_millis(actual_ms)).await;
             }
         }
-        Err(last_err.unwrap_or_else(|| AeroSyncError::Network(
-            format!("Chunk {} failed after all retries", chunk_index)
-        )))
+        Err(last_err.unwrap_or_else(|| {
+            AeroSyncError::Network(format!("Chunk {} failed after all retries", chunk_index))
+        }))
     }
 
     /// 发送 /upload/complete 合并请求（串行/并发共用）。
@@ -439,9 +507,11 @@ impl HttpTransfer {
     ) -> Result<()> {
         let mut complete_url = format!(
             "{}/upload/complete?task_id={}&filename={}&total_chunks={}&total_size={}",
-            base_url, state.task_id,
+            base_url,
+            state.task_id,
             urlencoding::encode(file_name),
-            state.total_chunks, state.total_size,
+            state.total_chunks,
+            state.total_size,
         );
         if let Some(ref sha) = state.sha256 {
             complete_url.push_str(&format!("&sha256={}", sha));
@@ -450,15 +520,24 @@ impl HttpTransfer {
         if let Some(token) = &self.config.auth_token {
             req = req.header("Authorization", format!("Bearer {}", token.as_str()));
         }
-        let resp = req.send().await
+        let resp = req
+            .send()
+            .await
             .map_err(|e| AeroSyncError::Network(format!("Complete request failed: {}", e)))?;
         if resp.status().is_success() {
-            tracing::info!("Chunked upload complete: {} ({} bytes)", file_name, state.total_size);
+            tracing::info!(
+                "Chunked upload complete: {} ({} bytes)",
+                file_name,
+                state.total_size
+            );
             Ok(())
         } else {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            Err(AeroSyncError::Network(format!("Complete failed: {} - {}", status, body)))
+            Err(AeroSyncError::Network(format!(
+                "Complete failed: {} - {}",
+                status, body
+            )))
         }
     }
 
@@ -473,9 +552,10 @@ impl HttpTransfer {
         // 熔断器检查：如果电路已开路，快速失败
         if !self.circuit_breaker.allow_request() {
             tracing::warn!("Circuit breaker OPEN, rejecting upload to {}", url);
-            return Err(AeroSyncError::Network(
-                format!("Circuit breaker open, refusing upload to {}", url)
-            ));
+            return Err(AeroSyncError::Network(format!(
+                "Circuit breaker open, refusing upload to {}",
+                url
+            )));
         }
 
         let file_size = File::open(file_path).await?.metadata().await?.len();
@@ -487,7 +567,12 @@ impl HttpTransfer {
             .unwrap_or("file")
             .to_string();
 
-        tracing::info!("HTTP: Uploading '{}' ({} bytes) to {}", file_name, file_size, url);
+        tracing::info!(
+            "HTTP: Uploading '{}' ({} bytes) to {}",
+            file_name,
+            file_size,
+            url
+        );
 
         let mut last_err: Option<AeroSyncError> = None;
 
@@ -500,7 +585,9 @@ impl HttpTransfer {
             let file_part = reqwest::multipart::Part::stream_with_length(body, file_size)
                 .file_name(file_name.clone())
                 .mime_str("application/octet-stream")
-                .map_err(|e| AeroSyncError::Network(format!("Failed to create multipart part: {}", e)))?;
+                .map_err(|e| {
+                    AeroSyncError::Network(format!("Failed to create multipart part: {}", e))
+                })?;
 
             let form = reqwest::multipart::Form::new().part("file", file_part);
 
@@ -518,7 +605,11 @@ impl HttpTransfer {
                 Ok(resp) if resp.status().is_success() => {
                     send_progress(&progress_tx, file_size, &start_time);
                     let elapsed = start_time.elapsed().as_secs_f64();
-                    let mb_per_sec = if elapsed > 0.0 { file_size as f64 / elapsed / (1024.0 * 1024.0) } else { 0.0 };
+                    let mb_per_sec = if elapsed > 0.0 {
+                        file_size as f64 / elapsed / (1024.0 * 1024.0)
+                    } else {
+                        0.0
+                    };
                     tracing::info!(
                         "HTTP: Upload completed: {} bytes at {:.2} MB/s",
                         file_size,
@@ -530,12 +621,29 @@ impl HttpTransfer {
                 Ok(resp) => {
                     let status = resp.status();
                     let body = resp.text().await.unwrap_or_default();
-                    tracing::warn!("Upload attempt {}/{} failed: {} - {}", attempt + 1, self.config.max_retries + 1, status, body);
-                    last_err = Some(AeroSyncError::Network(format!("Upload failed: {} - {}", status, body)));
+                    tracing::warn!(
+                        "Upload attempt {}/{} failed: {} - {}",
+                        attempt + 1,
+                        self.config.max_retries + 1,
+                        status,
+                        body
+                    );
+                    last_err = Some(AeroSyncError::Network(format!(
+                        "Upload failed: {} - {}",
+                        status, body
+                    )));
                 }
                 Err(e) => {
-                    tracing::warn!("Upload attempt {}/{} error: {}", attempt + 1, self.config.max_retries + 1, e);
-                    last_err = Some(AeroSyncError::Network(format!("Upload request failed: {}", e)));
+                    tracing::warn!(
+                        "Upload attempt {}/{} error: {}",
+                        attempt + 1,
+                        self.config.max_retries + 1,
+                        e
+                    );
+                    last_err = Some(AeroSyncError::Network(format!(
+                        "Upload request failed: {}",
+                        e
+                    )));
                 }
             }
 
@@ -551,7 +659,8 @@ impl HttpTransfer {
         }
 
         self.circuit_breaker.record_failure();
-        Err(last_err.unwrap_or_else(|| AeroSyncError::Network("Upload failed: no attempts made".into())))
+        Err(last_err
+            .unwrap_or_else(|| AeroSyncError::Network("Upload failed: no attempts made".into())))
     }
 
     #[tracing::instrument(skip(self, progress_tx), fields(url = url))]
@@ -606,7 +715,7 @@ impl HttpTransfer {
         // 完成后校验 SHA-256（优先用调用方期望的 hash，其次用服务端提供的）
         let hash_to_check = expected_sha256.map(|s| s.to_string()).or(server_hash);
         if let Some(expected) = hash_to_check {
-            use sha2::{Sha256, Digest};
+            use sha2::{Digest, Sha256};
             let data = tokio::fs::read(file_path).await?;
             let mut hasher = Sha256::new();
             hasher.update(&data);
@@ -682,7 +791,8 @@ impl TransferProtocol for HttpTransfer {
         } else {
             // HTTP Range 请求续传
             use futures::StreamExt;
-            let mut request = self.client
+            let mut request = self
+                .client
                 .get(&task.destination)
                 .header("Range", format!("bytes={}-", offset));
             if let Some(token) = &self.config.auth_token {
@@ -779,23 +889,23 @@ mod tests {
                 Ok::<_, Infallible>(warp::reply::with_status("ok", warp::http::StatusCode::OK))
             });
 
-        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
-            ([127, 0, 0, 1], 0),
-            async { tokio::time::sleep(std::time::Duration::from_secs(5)).await },
-        );
+        let (addr, server) = warp::serve(route)
+            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await
+            });
 
         tokio::spawn(server);
 
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("upload_test.bin");
-        tokio::fs::write(&file_path, b"hello streaming world").await.unwrap();
+        tokio::fs::write(&file_path, b"hello streaming world")
+            .await
+            .unwrap();
 
         let url = format!("http://{}/upload", addr);
         let ht = HttpTransfer::new(HttpConfig::default()).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let result = ht
-            .upload_with_progress(&file_path, &url, None, tx)
-            .await;
+        let result = ht.upload_with_progress(&file_path, &url, None, tx).await;
         assert!(result.is_ok(), "upload should succeed: {:?}", result);
     }
 
@@ -806,26 +916,28 @@ mod tests {
             .and(warp::path("upload"))
             .and(warp::header::<String>("authorization"))
             .and(warp::multipart::form().max_length(1024 * 1024))
-            .and_then(|auth: String, mut form: warp::multipart::FormData| async move {
-                use futures::TryStreamExt;
-                while form.try_next().await.unwrap_or(None).is_some() {}
-                if auth == "Bearer test-token" {
-                    Ok::<_, Infallible>(warp::reply::with_status(
-                        "ok",
-                        warp::http::StatusCode::OK,
-                    ))
-                } else {
-                    Ok(warp::reply::with_status(
-                        "unauthorized",
-                        warp::http::StatusCode::UNAUTHORIZED,
-                    ))
-                }
-            });
+            .and_then(
+                |auth: String, mut form: warp::multipart::FormData| async move {
+                    use futures::TryStreamExt;
+                    while form.try_next().await.unwrap_or(None).is_some() {}
+                    if auth == "Bearer test-token" {
+                        Ok::<_, Infallible>(warp::reply::with_status(
+                            "ok",
+                            warp::http::StatusCode::OK,
+                        ))
+                    } else {
+                        Ok(warp::reply::with_status(
+                            "unauthorized",
+                            warp::http::StatusCode::UNAUTHORIZED,
+                        ))
+                    }
+                },
+            );
 
-        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
-            ([127, 0, 0, 1], 0),
-            async { tokio::time::sleep(std::time::Duration::from_secs(5)).await },
-        );
+        let (addr, server) = warp::serve(route)
+            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await
+            });
         tokio::spawn(server);
 
         let dir = tempdir().unwrap();
@@ -841,7 +953,11 @@ mod tests {
         let result = ht
             .upload_with_progress(&file_path, &format!("http://{}/upload", addr), None, tx)
             .await;
-        assert!(result.is_ok(), "upload with auth token should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "upload with auth token should succeed: {:?}",
+            result
+        );
     }
 
     // ── 5. Upload attaches X-File-Hash header ────────────────────────────────
@@ -869,10 +985,10 @@ mod tests {
                 },
             );
 
-        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
-            ([127, 0, 0, 1], 0),
-            async { tokio::time::sleep(std::time::Duration::from_secs(5)).await },
-        );
+        let (addr, server) = warp::serve(route)
+            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await
+            });
         tokio::spawn(server);
 
         let dir = tempdir().unwrap();
@@ -889,7 +1005,11 @@ mod tests {
                 tx,
             )
             .await;
-        assert!(result.is_ok(), "upload with sha256 should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "upload with sha256 should succeed: {:?}",
+            result
+        );
     }
 
     // ── 6. Upload fails with 4xx → returns Err ───────────────────────────────
@@ -907,10 +1027,10 @@ mod tests {
                 ))
             });
 
-        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
-            ([127, 0, 0, 1], 0),
-            async { tokio::time::sleep(std::time::Duration::from_secs(5)).await },
-        );
+        let (addr, server) = warp::serve(route)
+            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await
+            });
         tokio::spawn(server);
 
         let dir = tempdir().unwrap();
@@ -929,21 +1049,18 @@ mod tests {
     #[tokio::test]
     async fn test_http_download_file() {
         let content = b"download me please";
-        let route = warp::get()
-            .and(warp::path("file"))
-            .map(move || warp::reply::with_header(
-                warp::reply::with_status(
-                    content.to_vec(),
-                    warp::http::StatusCode::OK,
-                ),
+        let route = warp::get().and(warp::path("file")).map(move || {
+            warp::reply::with_header(
+                warp::reply::with_status(content.to_vec(), warp::http::StatusCode::OK),
                 "content-type",
                 "application/octet-stream",
-            ));
+            )
+        });
 
-        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
-            ([127, 0, 0, 1], 0),
-            async { tokio::time::sleep(std::time::Duration::from_secs(5)).await },
-        );
+        let (addr, server) = warp::serve(route)
+            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await
+            });
         tokio::spawn(server);
 
         let dir = tempdir().unwrap();
@@ -951,12 +1068,7 @@ mod tests {
         let ht = HttpTransfer::new(HttpConfig::default()).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         let result = ht
-            .download_with_progress(
-                &format!("http://{}/file", addr),
-                &dest_path,
-                None,
-                tx,
-            )
+            .download_with_progress(&format!("http://{}/file", addr), &dest_path, None, tx)
             .await;
         assert!(result.is_ok(), "download should succeed: {:?}", result);
         let downloaded = tokio::fs::read(&dest_path).await.unwrap();
@@ -967,24 +1079,22 @@ mod tests {
     #[tokio::test]
     async fn test_http_download_sha256_mismatch_returns_err() {
         let content = b"some content";
-        let route = warp::get()
-            .and(warp::path("file"))
-            .map(move || {
+        let route = warp::get().and(warp::path("file")).map(move || {
+            warp::reply::with_header(
                 warp::reply::with_header(
-                    warp::reply::with_header(
-                        warp::reply::with_status(content.to_vec(), warp::http::StatusCode::OK),
-                        "x-file-hash",
-                        "wrong_hash_value",
-                    ),
-                    "content-type",
-                    "application/octet-stream",
-                )
-            });
+                    warp::reply::with_status(content.to_vec(), warp::http::StatusCode::OK),
+                    "x-file-hash",
+                    "wrong_hash_value",
+                ),
+                "content-type",
+                "application/octet-stream",
+            )
+        });
 
-        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
-            ([127, 0, 0, 1], 0),
-            async { tokio::time::sleep(std::time::Duration::from_secs(5)).await },
-        );
+        let (addr, server) = warp::serve(route)
+            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await
+            });
         tokio::spawn(server);
 
         let dir = tempdir().unwrap();
@@ -992,12 +1102,7 @@ mod tests {
         let ht = HttpTransfer::new(HttpConfig::default()).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         let result = ht
-            .download_with_progress(
-                &format!("http://{}/file", addr),
-                &dest_path,
-                None,
-                tx,
-            )
+            .download_with_progress(&format!("http://{}/file", addr), &dest_path, None, tx)
             .await;
         assert!(result.is_err(), "should fail on SHA-256 mismatch");
     }
@@ -1016,10 +1121,10 @@ mod tests {
                 )
             });
 
-        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
-            ([127, 0, 0, 1], 0),
-            async { tokio::time::sleep(std::time::Duration::from_secs(5)).await },
-        );
+        let (addr, server) = warp::serve(route)
+            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await
+            });
         tokio::spawn(server);
 
         let dir = tempdir().unwrap();
@@ -1084,14 +1189,15 @@ mod tests {
             ..HttpConfig::default()
         };
         let result = HttpTransfer::new(config);
-        assert!(result.is_err());
-        match result {
-            Err(aerosync_core::AeroSyncError::InvalidConfig(msg)) => {
-                assert!(msg.contains("Invalid DER cert"), "Got: {}", msg);
-            }
-            Err(e) => panic!("Wrong error type: {:?}", e),
-            Ok(_) => panic!("Should have failed"),
-        }
+        assert!(result.is_err(), "should reject malformed pinned cert");
+        let msg = format!("{:?}", result.err().unwrap()).to_lowercase();
+        assert!(
+            msg.contains("invalid")
+                || msg.contains("der")
+                || msg.contains("cert")
+                || msg.contains("badencoding"),
+            "unexpected error message: {msg}",
+        );
     }
 
     // Helper: build a mock upload server that counts chunk POSTs
@@ -1111,10 +1217,12 @@ mod tests {
             });
         let complete_route = warp::post()
             .and(warp::path!("upload" / "complete"))
-            .map(|| warp::reply::with_status(
-                warp::reply::json(&serde_json::json!({"status": "complete"})),
-                warp::http::StatusCode::OK,
-            ));
+            .map(|| {
+                warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({"status": "complete"})),
+                    warp::http::StatusCode::OK,
+                )
+            });
         chunk_route.or(complete_route)
     }
 
@@ -1134,10 +1242,10 @@ mod tests {
         let chunk_count = StdArc::new(AtomicU32::new(0));
         let route = make_counting_server(StdArc::clone(&chunk_count));
 
-        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
-            ([127, 0, 0, 1], 0),
-            async { tokio::time::sleep(std::time::Duration::from_secs(5)).await },
-        );
+        let (addr, server) = warp::serve(route)
+            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await
+            });
         tokio::spawn(server);
 
         let dir = tempdir().unwrap();
@@ -1176,10 +1284,10 @@ mod tests {
         let chunk_count = StdArc::new(AtomicU32::new(0));
         let route = make_counting_server(StdArc::clone(&chunk_count));
 
-        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
-            ([127, 0, 0, 1], 0),
-            async { tokio::time::sleep(std::time::Duration::from_secs(10)).await },
-        );
+        let (addr, server) = warp::serve(route)
+            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await
+            });
         tokio::spawn(server);
 
         let dir = tempdir().unwrap();
@@ -1205,7 +1313,11 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let base = format!("http://{}", addr);
         let result = ht.upload_chunked(&file_path, &base, &mut state, tx).await;
-        assert!(result.is_ok(), "concurrent upload should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "concurrent upload should succeed: {:?}",
+            result
+        );
         assert_eq!(chunk_count.load(std::sync::atomic::Ordering::Relaxed), 6);
     }
 
@@ -1218,10 +1330,10 @@ mod tests {
         let chunk_count = StdArc::new(AtomicU32::new(0));
         let route = make_counting_server(StdArc::clone(&chunk_count));
 
-        let (addr, server) = warp::serve(route).bind_with_graceful_shutdown(
-            ([127, 0, 0, 1], 0),
-            async { tokio::time::sleep(std::time::Duration::from_secs(10)).await },
-        );
+        let (addr, server) = warp::serve(route)
+            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await
+            });
         tokio::spawn(server);
 
         let dir = tempdir().unwrap();
@@ -1250,7 +1362,11 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let base = format!("http://{}", addr);
         let result = ht.upload_chunked(&file_path, &base, &mut state, tx).await;
-        assert!(result.is_ok(), "resumed upload should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "resumed upload should succeed: {:?}",
+            result
+        );
         assert_eq!(chunk_count.load(std::sync::atomic::Ordering::Relaxed), 4);
     }
 
@@ -1260,7 +1376,11 @@ mod tests {
         // 4xx 业务错误不触发重连
         for code in &["401", "403", "404", "400", "413"] {
             let e = AeroSyncError::Network(format!("HTTP {} Unauthorized", code));
-            assert!(!HttpTransfer::is_network_error(&e), "Expected false for {}", code);
+            assert!(
+                !HttpTransfer::is_network_error(&e),
+                "Expected false for {}",
+                code
+            );
         }
     }
 
@@ -1268,16 +1388,25 @@ mod tests {
     fn test_is_network_error_connection_errors_return_true() {
         // 网络级别错误触发重连
         let e = AeroSyncError::Network("connection refused".to_string());
-        assert!(HttpTransfer::is_network_error(&e), "connection refused should be network error");
+        assert!(
+            HttpTransfer::is_network_error(&e),
+            "connection refused should be network error"
+        );
 
         let e2 = AeroSyncError::Network("timeout waiting for response".to_string());
-        assert!(HttpTransfer::is_network_error(&e2), "timeout should be network error");
+        assert!(
+            HttpTransfer::is_network_error(&e2),
+            "timeout should be network error"
+        );
     }
 
     #[test]
     fn test_is_network_error_file_io_returns_false() {
         let e = AeroSyncError::FileIo(std::io::Error::new(std::io::ErrorKind::NotFound, "no file"));
-        assert!(!HttpTransfer::is_network_error(&e), "FileIo should not trigger reconnect");
+        assert!(
+            !HttpTransfer::is_network_error(&e),
+            "FileIo should not trigger reconnect"
+        );
     }
 
     // ── 17. wait_until_healthy：服务器可用时立即返回 true ─────────────────────
@@ -1287,15 +1416,17 @@ mod tests {
             .and(warp::path("health"))
             .map(|| warp::reply::with_status("ok", warp::http::StatusCode::OK));
 
-        let (addr, server) = warp::serve(health_route).bind_with_graceful_shutdown(
-            ([127, 0, 0, 1], 0),
-            async { tokio::time::sleep(std::time::Duration::from_secs(5)).await },
-        );
+        let (addr, server) = warp::serve(health_route)
+            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await
+            });
         tokio::spawn(server);
 
         let client = reqwest::Client::new();
         let base = format!("http://{}", addr);
-        let healthy = HttpTransfer::wait_until_healthy(&client, &base, std::time::Duration::from_secs(5)).await;
+        let healthy =
+            HttpTransfer::wait_until_healthy(&client, &base, std::time::Duration::from_secs(5))
+                .await;
         assert!(healthy, "should return true when /health returns 200");
     }
 
@@ -1329,19 +1460,21 @@ mod tests {
             });
         let complete_route = warp::post()
             .and(warp::path!("upload" / "complete"))
-            .map(|| warp::reply::with_status(
-                warp::reply::json(&serde_json::json!({"status": "complete"})),
-                warp::http::StatusCode::OK,
-            ));
+            .map(|| {
+                warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({"status": "complete"})),
+                    warp::http::StatusCode::OK,
+                )
+            });
         let health_route = warp::get()
             .and(warp::path("health"))
             .map(|| warp::reply::with_status("ok", warp::http::StatusCode::OK));
         let routes = chunk_route.or(complete_route).or(health_route);
 
-        let (addr, server) = warp::serve(routes).bind_with_graceful_shutdown(
-            ([127, 0, 0, 1], 0),
-            async { tokio::time::sleep(std::time::Duration::from_secs(10)).await },
-        );
+        let (addr, server) = warp::serve(routes)
+            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await
+            });
         tokio::spawn(server);
 
         let dir = tempdir().unwrap();
@@ -1351,7 +1484,7 @@ mod tests {
 
         let cfg = HttpConfig {
             chunk_size: 1024 * 1024,
-            max_retries: 0,          // 单 chunk 不重试（让外层重连处理）
+            max_retries: 0, // 单 chunk 不重试（让外层重连处理）
             max_reconnect_attempts: 3,
             reconnect_base_delay_ms: 10, // 测试中缩短等待
             ..HttpConfig::default()

@@ -67,7 +67,12 @@ impl TaskStore {
     }
 
     /// Persist a task entry with an optional断点续传 JSON path (upsert).
-    pub async fn upsert_with_resume(&self, id: Uuid, entry: &TaskEntry, resume_path: Option<&Path>) {
+    pub async fn upsert_with_resume(
+        &self,
+        id: Uuid,
+        entry: &TaskEntry,
+        resume_path: Option<&Path>,
+    ) {
         let (status, files, bytes, speed_mbs, error) = encode_status(&entry.status);
         let id_str = id.to_string();
         let description = entry.description.clone();
@@ -103,9 +108,9 @@ impl TaskStore {
     /// Failed("process restarted") — the process can no longer drive them.
     pub async fn load_all(&self) -> Vec<(Uuid, TaskEntry)> {
         let conn = self.conn.lock().await;
-        let mut stmt = match conn.prepare(
-            "SELECT id, description, status, files, bytes, speed_mbs, error FROM tasks",
-        ) {
+        let mut stmt = match conn
+            .prepare("SELECT id, description, status, files, bytes, speed_mbs, error FROM tasks")
+        {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("TaskStore: failed to prepare load query: {}", e);
@@ -115,12 +120,12 @@ impl TaskStore {
 
         let rows = stmt.query_map([], |row| {
             Ok((
-                row.get::<_, String>(0)?,   // id
-                row.get::<_, String>(1)?,   // description
-                row.get::<_, String>(2)?,   // status
-                row.get::<_, Option<i64>>(3)?,  // files
-                row.get::<_, Option<i64>>(4)?,  // bytes
-                row.get::<_, Option<f64>>(5)?,  // speed_mbs
+                row.get::<_, String>(0)?,         // id
+                row.get::<_, String>(1)?,         // description
+                row.get::<_, String>(2)?,         // status
+                row.get::<_, Option<i64>>(3)?,    // files
+                row.get::<_, Option<i64>>(4)?,    // bytes
+                row.get::<_, Option<f64>>(5)?,    // speed_mbs
                 row.get::<_, Option<String>>(6)?, // error
             ))
         });
@@ -166,7 +171,11 @@ impl TaskStore {
             ));
         }
 
-        tracing::info!("TaskStore: loaded {} tasks from {}", result.len(), self.path.display());
+        tracing::info!(
+            "TaskStore: loaded {} tasks from {}",
+            result.len(),
+            self.path.display()
+        );
         result
     }
 
@@ -191,10 +200,10 @@ impl TaskStore {
 
         let rows = stmt.query_map([], |row| {
             Ok((
-                row.get::<_, String>(0)?,  // id
-                row.get::<_, String>(1)?,  // description
-                row.get::<_, String>(2)?,  // status (ignored — always pending/running)
-                row.get::<_, String>(3)?,  // resume_json_path
+                row.get::<_, String>(0)?, // id
+                row.get::<_, String>(1)?, // description
+                row.get::<_, String>(2)?, // status (ignored — always pending/running)
+                row.get::<_, String>(3)?, // resume_json_path
             ))
         });
 
@@ -229,10 +238,7 @@ impl TaskStore {
             ));
         }
 
-        tracing::info!(
-            "TaskStore: {} resumable tasks found",
-            result.len()
-        );
+        tracing::info!("TaskStore: {} resumable tasks found", result.len());
         result
     }
 
@@ -245,10 +251,7 @@ impl TaskStore {
             - max_age_secs as i64;
 
         let conn = self.conn.lock().await;
-        if let Err(e) = conn.execute(
-            "DELETE FROM tasks WHERE updated_at < ?1",
-            params![cutoff],
-        ) {
+        if let Err(e) = conn.execute("DELETE FROM tasks WHERE updated_at < ?1", params![cutoff]) {
             tracing::warn!("TaskStore: evict_old failed: {}", e);
         }
     }
@@ -258,11 +261,21 @@ impl TaskStore {
 
 fn encode_status(
     s: &BackgroundTaskStatus,
-) -> (&'static str, Option<i64>, Option<i64>, Option<f64>, Option<String>) {
+) -> (
+    &'static str,
+    Option<i64>,
+    Option<i64>,
+    Option<f64>,
+    Option<String>,
+) {
     match s {
         BackgroundTaskStatus::Pending => ("pending", None, None, None, None),
         BackgroundTaskStatus::Running => ("running", None, None, None, None),
-        BackgroundTaskStatus::Completed { files, bytes, speed_mbs } => (
+        BackgroundTaskStatus::Completed {
+            files,
+            bytes,
+            speed_mbs,
+        } => (
             "completed",
             Some(*files as i64),
             Some(*bytes as i64),
@@ -307,7 +320,11 @@ mod tests {
         let (loaded_id, loaded_entry) = &all[0];
         assert_eq!(*loaded_id, id);
         match &loaded_entry.status {
-            BackgroundTaskStatus::Completed { files, bytes, speed_mbs } => {
+            BackgroundTaskStatus::Completed {
+                files,
+                bytes,
+                speed_mbs,
+            } => {
                 assert_eq!(*files, 3);
                 assert_eq!(*bytes, 1024);
                 assert!((speed_mbs - 12.5).abs() < 0.001);
@@ -323,8 +340,12 @@ mod tests {
         let store = TaskStore::open(&db_path).unwrap();
 
         let id = Uuid::new_v4();
-        store.upsert(id, &make_entry(BackgroundTaskStatus::Pending)).await;
-        store.upsert(Uuid::new_v4(), &make_entry(BackgroundTaskStatus::Running)).await;
+        store
+            .upsert(id, &make_entry(BackgroundTaskStatus::Pending))
+            .await;
+        store
+            .upsert(Uuid::new_v4(), &make_entry(BackgroundTaskStatus::Running))
+            .await;
 
         let all = store.load_all().await;
         assert_eq!(all.len(), 2);
@@ -340,14 +361,26 @@ mod tests {
         let store = TaskStore::open(&db_path).unwrap();
 
         let id = Uuid::new_v4();
-        store.upsert(id, &make_entry(BackgroundTaskStatus::Pending)).await;
-        store.upsert(id, &make_entry(BackgroundTaskStatus::Completed {
-            files: 1, bytes: 500, speed_mbs: 5.0,
-        })).await;
+        store
+            .upsert(id, &make_entry(BackgroundTaskStatus::Pending))
+            .await;
+        store
+            .upsert(
+                id,
+                &make_entry(BackgroundTaskStatus::Completed {
+                    files: 1,
+                    bytes: 500,
+                    speed_mbs: 5.0,
+                }),
+            )
+            .await;
 
         let all = store.load_all().await;
         assert_eq!(all.len(), 1);
-        assert!(matches!(all[0].1.status, BackgroundTaskStatus::Completed { .. }));
+        assert!(matches!(
+            all[0].1.status,
+            BackgroundTaskStatus::Completed { .. }
+        ));
     }
 
     #[tokio::test]
@@ -364,7 +397,8 @@ mod tests {
                     status TEXT NOT NULL, files INTEGER, bytes INTEGER,
                     speed_mbs REAL, error TEXT, updated_at INTEGER NOT NULL
                 );",
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO tasks VALUES ('old-id', 'old task', 'completed', 1, 100, 1.0, NULL, 0)",
                 [],
@@ -386,7 +420,12 @@ mod tests {
         let store = TaskStore::open(&db_path).unwrap();
 
         let id = Uuid::new_v4();
-        store.upsert(id, &make_entry(BackgroundTaskStatus::Failed("disk full".to_string()))).await;
+        store
+            .upsert(
+                id,
+                &make_entry(BackgroundTaskStatus::Failed("disk full".to_string())),
+            )
+            .await;
 
         let all = store.load_all().await;
         match &all[0].1.status {
@@ -408,7 +447,9 @@ mod tests {
 
         let id = Uuid::new_v4();
         let entry = make_entry(BackgroundTaskStatus::Running);
-        store.upsert_with_resume(id, &entry, Some(&resume_file)).await;
+        store
+            .upsert_with_resume(id, &entry, Some(&resume_file))
+            .await;
 
         // load_resumable 应返回这个任务
         let resumable = store.load_resumable().await;
@@ -418,12 +459,19 @@ mod tests {
         assert_eq!(loaded_path, &resume_file);
 
         // 完成后用 upsert_with_resume(None) 清除 resume 路径
-        let done_entry = make_entry(BackgroundTaskStatus::Completed { files: 1, bytes: 100, speed_mbs: 5.0 });
+        let done_entry = make_entry(BackgroundTaskStatus::Completed {
+            files: 1,
+            bytes: 100,
+            speed_mbs: 5.0,
+        });
         store.upsert_with_resume(id, &done_entry, None).await;
 
         // completed 状态不出现在 load_resumable 结果中
         let resumable2 = store.load_resumable().await;
-        assert!(resumable2.is_empty(), "completed task should not appear in resumable");
+        assert!(
+            resumable2.is_empty(),
+            "completed task should not appear in resumable"
+        );
     }
 
     #[tokio::test]
@@ -435,10 +483,19 @@ mod tests {
         // resume_json_path 指向不存在的文件
         let nonexistent = dir.path().join("ghost.json");
         let id = Uuid::new_v4();
-        store.upsert_with_resume(id, &make_entry(BackgroundTaskStatus::Pending), Some(&nonexistent)).await;
+        store
+            .upsert_with_resume(
+                id,
+                &make_entry(BackgroundTaskStatus::Pending),
+                Some(&nonexistent),
+            )
+            .await;
 
         // 文件不存在，load_resumable 应跳过
         let resumable = store.load_resumable().await;
-        assert!(resumable.is_empty(), "task with missing JSON should be skipped");
+        assert!(
+            resumable.is_empty(),
+            "task with missing JSON should be skipped"
+        );
     }
 }

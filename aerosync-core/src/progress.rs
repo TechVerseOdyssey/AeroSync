@@ -199,7 +199,11 @@ mod tests {
         let t = monitor.get_transfer(&id).unwrap();
         let eta = t.estimated_remaining.unwrap();
         // remaining = 768KB / 256KB/s = 3s, allow ±1s
-        assert!(eta.as_secs() >= 2 && eta.as_secs() <= 4, "ETA was {:?}", eta);
+        assert!(
+            eta.as_secs() >= 2 && eta.as_secs() <= 4,
+            "ETA was {:?}",
+            eta
+        );
     }
 
     #[test]
@@ -213,8 +217,7 @@ mod tests {
         let t = monitor.get_transfer(&id).unwrap();
         // When transferred >= total, no ETA is set
         assert!(
-            t.estimated_remaining.is_none()
-                || t.estimated_remaining.unwrap() == Duration::ZERO,
+            t.estimated_remaining.is_none() || t.estimated_remaining.unwrap() == Duration::ZERO,
             "expected no ETA, got {:?}",
             t.estimated_remaining
         );
@@ -276,7 +279,11 @@ mod tests {
     fn test_get_active_transfers_returns_all() {
         let mut monitor = ProgressMonitor::new();
         for i in 0..5 {
-            monitor.add_transfer(make_progress(Uuid::new_v4(), &format!("file{}.bin", i), 100));
+            monitor.add_transfer(make_progress(
+                Uuid::new_v4(),
+                &format!("file{}.bin", i),
+                100,
+            ));
         }
         assert_eq!(monitor.get_active_transfers().len(), 5);
     }

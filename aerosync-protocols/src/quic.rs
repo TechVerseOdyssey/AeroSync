@@ -1,10 +1,9 @@
-use crate::traits::{TransferProtocol, TransferProgress};
-use zeroize::Zeroizing;
+use crate::traits::{TransferProgress, TransferProtocol};
 use aerosync_core::{AeroSyncError, Result, TransferTask};
 use async_trait::async_trait;
 use quinn::{ClientConfig, Connection, Endpoint};
-use rustls::{ClientConfig as TlsClientConfig, Certificate, ServerName};
-use rustls::client::{ServerCertVerifier, ServerCertVerified};
+use rustls::client::{ServerCertVerified, ServerCertVerifier};
+use rustls::{Certificate, ClientConfig as TlsClientConfig, ServerName};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +12,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
+use zeroize::Zeroizing;
 
 /// 证书固定验证器：只接受指定指纹的证书，而非完全跳过验证。
 /// 用于开发/自签名场景。生产环境应使用系统证书库。
@@ -59,7 +59,11 @@ impl ServerCertVerifier for PinnedCertVerifier {
             return Ok(ServerCertVerified::assertion());
         }
         // 生产模式：检查证书是否在固定列表中
-        if self.accepted_certs.iter().any(|c| c == end_entity.0.as_slice()) {
+        if self
+            .accepted_certs
+            .iter()
+            .any(|c| c == end_entity.0.as_slice())
+        {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::General(
@@ -106,11 +110,17 @@ impl QuicTransfer {
     pub fn new(config: QuicConfig) -> Result<Self> {
         let verifier = if !config.pinned_server_certs.is_empty() {
             // 生产钉扎模式：加载 DER 文件
-            let certs: Result<Vec<Vec<u8>>> = config.pinned_server_certs.iter()
+            let certs: Result<Vec<Vec<u8>>> = config
+                .pinned_server_certs
+                .iter()
                 .map(|p| {
-                    std::fs::read(p).map_err(|e| AeroSyncError::InvalidConfig(
-                        format!("Cannot read pinned cert {}: {}", p.display(), e)
-                    ))
+                    std::fs::read(p).map_err(|e| {
+                        AeroSyncError::InvalidConfig(format!(
+                            "Cannot read pinned cert {}: {}",
+                            p.display(),
+                            e
+                        ))
+                    })
                 })
                 .collect();
             PinnedCertVerifier::with_pinned(certs?)
@@ -212,7 +222,11 @@ impl QuicTransfer {
                 .map_err(|e| AeroSyncError::Network(e.to_string()))?;
             transferred += n as u64;
             let elapsed = start.elapsed().as_secs_f64();
-            let speed = if elapsed > 0.0 { transferred as f64 / elapsed } else { 0.0 };
+            let speed = if elapsed > 0.0 {
+                transferred as f64 / elapsed
+            } else {
+                0.0
+            };
             let _ = progress_tx.send(TransferProgress {
                 bytes_transferred: transferred,
                 transfer_speed: speed,
@@ -263,7 +277,11 @@ impl QuicTransfer {
                     file.write_all(&buf[..n]).await?;
                     transferred += n as u64;
                     let elapsed = start.elapsed().as_secs_f64();
-                    let speed = if elapsed > 0.0 { transferred as f64 / elapsed } else { 0.0 };
+                    let speed = if elapsed > 0.0 {
+                        transferred as f64 / elapsed
+                    } else {
+                        0.0
+                    };
                     let _ = progress_tx.send(TransferProgress {
                         bytes_transferred: transferred,
                         transfer_speed: speed,
@@ -286,8 +304,13 @@ impl TransferProtocol for QuicTransfer {
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
         let connection = self.establish_connection().await?;
-        self.upload_with_progress(&connection, &task.source_path, task.sha256.as_deref(), progress_tx)
-            .await
+        self.upload_with_progress(
+            &connection,
+            &task.source_path,
+            task.sha256.as_deref(),
+            progress_tx,
+        )
+        .await
     }
 
     async fn download_file(

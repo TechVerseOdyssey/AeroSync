@@ -9,13 +9,13 @@ use serde::{Deserialize, Serialize};
 pub struct AuthConfig {
     /// 是否启用认证
     pub enable_auth: bool,
-    
+
     /// 密钥，用于签名 Token
     pub secret_key: String,
-    
+
     /// Token 生命周期（小时）
     pub token_lifetime_hours: u64,
-    
+
     /// 允许访问的 IP 列表（CIDR 格式）
     /// 例如：["192.168.1.0/24", "10.0.0.0/8"]
     /// 空列表表示允许所有 IP
@@ -170,13 +170,13 @@ mod tests {
         let config = AuthConfig::new()
             .enable_auth()
             .with_secret_key("short".to_string());
-        
+
         assert!(config.validate().is_err());
 
         let config = AuthConfig::new()
             .enable_auth()
             .with_secret_key("valid-secret-key-16-chars".to_string());
-        
+
         assert!(config.validate().is_ok());
     }
 
@@ -196,4 +196,3 @@ mod tests {
         assert_eq!(loaded_config.secret_key, config.secret_key);
     }
 }
-
