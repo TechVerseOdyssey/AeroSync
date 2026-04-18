@@ -18,18 +18,23 @@ jobs:
           - os: macos-latest
             target: x86_64-apple-darwin
             archive: tar.gz
+            use-cross: false
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
+            use-cross: false
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             archive: tar.gz
+            use-cross: true
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             archive: tar.gz
+            use-cross: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
+            use-cross: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -39,19 +44,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl + cross tools (Linux)
-        if: contains(matrix.target, 'linux-musl')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-            mkdir -p .cargo
-            cat >> .cargo/config.toml <<'EOF'
-          [target.aarch64-unknown-linux-musl]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
-          fi
+      # `cross` spins up a Docker image with the correct musl C toolchain
+      # (aarch64-linux-musl-gcc / x86_64-linux-musl-gcc) so that `cc`-based
+      # crates like `libsqlite3-sys` and `ring` compile & link cleanly for
+      # fully-static musl targets. This replaces the old manual install of
+      # `gcc-aarch64-linux-gnu` (glibc), which produced undefined refs to
+      # `open64`, `__memcpy_chk`, etc. against musl libc.
+      - name: Install cross
+        if: matrix.use-cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@v2
@@ -59,9 +62,15 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build release binaries
+        shell: bash
         run: |
-          cargo build --release --target ${{ matrix.target }} -p aerosync
-          cargo build --release --target ${{ matrix.target }} -p aerosync-mcp
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            BUILD=cross
+          else
+            BUILD=cargo
+          fi
+          $BUILD build --release --target ${{ matrix.target }} -p aerosync
+          $BUILD build --release --target ${{ matrix.target }} -p aerosync-mcp
 
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
