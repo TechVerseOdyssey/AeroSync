@@ -53,52 +53,49 @@ fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Async factory: `await aerosync.client()` returns an async context
-/// manager yielding a [`Client`].
+/// Sync factory: `aerosync.client()` returns an [`AsyncContextManager`]
+/// (the [`Client`] itself, whose `__aenter__` performs any async
+/// init). Per RFC-001 §5.1 the user writes
+/// `async with aerosync.client() as c:` — no `await` before the call.
 ///
 /// Group A signature is config-less; the `config=` parameter lands in
 /// w6 task #11.
 #[pyfunction(name = "client")]
-fn make_client(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-    runtime::future_into_py(py, async { Ok(PyClient::new_default()) })
+fn make_client() -> PyClient {
+    PyClient::new_default()
 }
 
-/// Async factory: `await aerosync.receiver(name=..., listen=..., save_dir=...)`
-/// returns an async context manager yielding a [`Receiver`].
-///
-/// Group A returns a `Receiver` whose `FileReceiver` has been
-/// constructed but not started — `start()` lives on the engine and is
-/// called by the Group C `__aenter__`. The factory is exposed now so
-/// the `_native` module's public surface is stable from the first
-/// commit.
+/// Sync factory: `aerosync.receiver(name=..., listen=..., save_dir=...)`
+/// returns an [`AsyncContextManager`]. Same shape as `client()`: the
+/// returned [`Receiver`]'s `__aenter__` is what actually binds the
+/// socket. The factory is exposed now so the `_native` public
+/// surface is stable from this commit forward; Group C wires up
+/// `__aenter__` / `__aexit__` and the async iterator.
 #[pyfunction(name = "receiver")]
 #[pyo3(signature = (name=None, listen=None, save_dir=None))]
 fn make_receiver(
-    py: Python<'_>,
     name: Option<String>,
     listen: Option<String>,
     save_dir: Option<std::path::PathBuf>,
-) -> PyResult<Bound<'_, PyAny>> {
+) -> PyResult<PyReceiver> {
     use aerosync::core::FileReceiver;
-    runtime::future_into_py(py, async move {
-        let mut cfg = receiver::server_config_for(save_dir);
-        if let Some(addr) = listen.as_deref() {
-            // RFC-001 §5.1 documents `listen` as "host:port"; we
-            // split here because ServerConfig keeps host and port
-            // separate. Group C's `__aenter__` will actually bind
-            // the socket and surface the resolved address back to
-            // the caller via the `address` getter.
-            if let Some((host, port)) = addr.rsplit_once(':') {
-                cfg.bind_address = host.to_string();
-                if let Ok(p) = port.parse::<u16>() {
-                    cfg.http_port = p;
-                }
+    let mut cfg = receiver::server_config_for(save_dir);
+    if let Some(addr) = listen.as_deref() {
+        // RFC-001 §5.1 documents `listen` as "host:port"; we
+        // split here because ServerConfig keeps host and port
+        // separate. Group C's `__aenter__` will actually bind
+        // the socket and surface the resolved address back to
+        // the caller via the `address` getter.
+        if let Some((host, port)) = addr.rsplit_once(':') {
+            cfg.bind_address = host.to_string();
+            if let Ok(p) = port.parse::<u16>() {
+                cfg.http_port = p;
             }
         }
-        let address = format!("{}:{}", cfg.bind_address, cfg.http_port);
-        let inner = FileReceiver::new(cfg);
-        Ok(PyReceiver::new(inner, name, address))
-    })
+    }
+    let address = format!("{}:{}", cfg.bind_address, cfg.http_port);
+    let inner = FileReceiver::new(cfg);
+    Ok(PyReceiver::new(inner, name, address))
 }
 
 /// Async iterator factory: `aerosync.discover(timeout=5.0)`.
