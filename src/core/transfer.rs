@@ -1198,11 +1198,8 @@ mod tests {
         let (adapter, up_count, _) = SuccessAdapter::new();
         engine.start(adapter).await.unwrap();
 
-        let task = TransferTask::new_upload(
-            PathBuf::from("/some.bin"),
-            "http://h/upload".to_string(),
-            0,
-        );
+        let task =
+            TransferTask::new_upload(PathBuf::from("/some.bin"), "http://h/upload".to_string(), 0);
         let receipt = engine.send(task).await.unwrap();
 
         wait_for_receipt(
@@ -1227,11 +1224,8 @@ mod tests {
         let engine = TransferEngine::new(TransferConfig::default());
         engine.start(Arc::new(FailAdapter)).await.unwrap();
 
-        let task = TransferTask::new_upload(
-            PathBuf::from("/no.bin"),
-            "http://h/upload".to_string(),
-            0,
-        );
+        let task =
+            TransferTask::new_upload(PathBuf::from("/no.bin"), "http://h/upload".to_string(), 0);
         let receipt = engine.send(task).await.unwrap();
 
         let terminal = wait_for_receipt(
@@ -1259,11 +1253,8 @@ mod tests {
         let (adapter, _, _) = SlowAdapter::new(500);
         engine.start(adapter).await.unwrap();
 
-        let task = TransferTask::new_upload(
-            PathBuf::from("/slow.bin"),
-            "http://h/upload".to_string(),
-            0,
-        );
+        let task =
+            TransferTask::new_upload(PathBuf::from("/slow.bin"), "http://h/upload".to_string(), 0);
         let task_id = task.id;
         let receipt = engine.send(task).await.unwrap();
         // Cancel before the slow upload completes.
@@ -1293,15 +1284,13 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let engine = TransferEngine::new(TransferConfig::default()).with_history_store(history.clone());
+        let engine =
+            TransferEngine::new(TransferConfig::default()).with_history_store(history.clone());
         let (adapter, _, _) = SuccessAdapter::new();
         engine.start(adapter).await.unwrap();
 
-        let task = TransferTask::new_upload(
-            PathBuf::from("/h.bin"),
-            "http://h/upload".to_string(),
-            0,
-        );
+        let task =
+            TransferTask::new_upload(PathBuf::from("/h.bin"), "http://h/upload".to_string(), 0);
         let receipt = engine.send(task).await.unwrap();
         wait_for_receipt(
             &receipt,

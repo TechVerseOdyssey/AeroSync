@@ -345,6 +345,7 @@ fn parse_uuid(raw: &str) -> Result<Uuid, Box<Response>> {
     })
 }
 
+#[tracing::instrument(level = "debug", skip(state), fields(receipt_id = %id_str))]
 async fn handle_events_sse(
     AxPath(id_str): AxPath<String>,
     AxState(state): AxState<ReceiptHttpState>,
@@ -459,6 +460,7 @@ fn build_sse_event(id: Uuid, state: &State, counter: u64) -> Result<SseEvent, In
         .data(json))
 }
 
+#[tracing::instrument(level = "debug", skip(state, body), fields(receipt_id = %id_str))]
 async fn handle_ack(
     AxPath(id_str): AxPath<String>,
     AxState(state): AxState<ReceiptHttpState>,
@@ -471,6 +473,7 @@ async fn handle_ack(
     apply_to_receiver(&state, id, Intent::Ack, &body.idempotency_key, Event::Ack)
 }
 
+#[tracing::instrument(level = "debug", skip(state, body), fields(receipt_id = %id_str))]
 async fn handle_nack(
     AxPath(id_str): AxPath<String>,
     AxState(state): AxState<ReceiptHttpState>,
@@ -491,6 +494,7 @@ async fn handle_nack(
     )
 }
 
+#[tracing::instrument(level = "debug", skip(state, body), fields(receipt_id = %id_str))]
 async fn handle_cancel(
     AxPath(id_str): AxPath<String>,
     AxState(state): AxState<ReceiptHttpState>,

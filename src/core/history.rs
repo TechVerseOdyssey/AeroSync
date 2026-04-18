@@ -659,8 +659,8 @@ mod tests {
     /// it; returns the receipt id used.
     async fn append_with_receipt(store: &HistoryStore, name: &str) -> Uuid {
         let rid = Uuid::new_v4();
-        let entry =
-            HistoryEntry::success(name, None, 1, None, None, "quic", "send", 1).with_receipt_id(rid);
+        let entry = HistoryEntry::success(name, None, 1, None, None, "quic", "send", 1)
+            .with_receipt_id(rid);
         store.append(entry).await.unwrap();
         rid
     }

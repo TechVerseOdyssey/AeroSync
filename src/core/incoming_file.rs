@@ -145,9 +145,7 @@ impl IncomingFile {
 
     async fn ack_inner(&self, metadata: Option<Value>) -> Result<()> {
         let Some(receipt) = &self.receipt else {
-            tracing::debug!(
-                "ack(): no receipt attached (legacy sender), silently no-op"
-            );
+            tracing::debug!("ack(): no receipt attached (legacy sender), silently no-op");
             return Ok(());
         };
 
@@ -267,11 +265,19 @@ mod tests {
         }
     }
 
-    fn fresh_incoming() -> (IncomingFile, Arc<Receipt<Receiver>>, Arc<ReceiptRegistry<Receiver>>) {
+    fn fresh_incoming() -> (
+        IncomingFile,
+        Arc<Receipt<Receiver>>,
+        Arc<ReceiptRegistry<Receiver>>,
+    ) {
         let receipt = Arc::new(Receipt::<Receiver>::new(Uuid::new_v4()));
         let registry = Arc::new(ReceiptRegistry::<Receiver>::new());
         registry.insert(Arc::clone(&receipt));
-        let f = IncomingFile::new(dummy_received(), Arc::clone(&receipt), Arc::clone(&registry));
+        let f = IncomingFile::new(
+            dummy_received(),
+            Arc::clone(&receipt),
+            Arc::clone(&registry),
+        );
         (f, receipt, registry)
     }
 
@@ -279,7 +285,10 @@ mod tests {
     async fn test_ack_drives_receipt_to_acked() {
         let (f, r, reg) = fresh_incoming();
         f.ack().await.unwrap();
-        assert!(matches!(r.state(), State::Completed(CompletedTerminal::Acked)));
+        assert!(matches!(
+            r.state(),
+            State::Completed(CompletedTerminal::Acked)
+        ));
         // Registry GC: terminal entry was removed.
         assert!(reg.get(r.id()).is_none());
     }
@@ -301,7 +310,10 @@ mod tests {
         let (f, r, _reg) = fresh_incoming();
         let meta = serde_json::json!({"file_id": "abc", "checked": true});
         f.ack_with_metadata(meta).await.unwrap();
-        assert!(matches!(r.state(), State::Completed(CompletedTerminal::Acked)));
+        assert!(matches!(
+            r.state(),
+            State::Completed(CompletedTerminal::Acked)
+        ));
     }
 
     #[tokio::test]
@@ -310,7 +322,10 @@ mod tests {
         f.ack().await.unwrap();
         // Second call must succeed with no error and no state change.
         f.ack().await.unwrap();
-        assert!(matches!(r.state(), State::Completed(CompletedTerminal::Acked)));
+        assert!(matches!(
+            r.state(),
+            State::Completed(CompletedTerminal::Acked)
+        ));
     }
 
     #[tokio::test]

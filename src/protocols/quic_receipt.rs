@@ -158,6 +158,7 @@ pub fn decode_frame(mut buf: &[u8]) -> Result<ReceiptFrame, CodecError> {
 /// because `prost::decode_length_delimited` needs the entire
 /// frame in memory; QUIC delivers bytes asynchronously so we have to
 /// collect them ourselves.
+#[tracing::instrument(level = "trace", skip(stream))]
 pub async fn read_frame_from_stream(
     stream: &mut quinn::RecvStream,
 ) -> Result<ReceiptFrame, CodecError> {
@@ -225,6 +226,7 @@ pub async fn read_frame_from_stream(
 }
 
 /// Encode and write a single [`ReceiptFrame`] to a `quinn::SendStream`.
+#[tracing::instrument(level = "trace", skip(stream, frame))]
 pub async fn write_frame_to_stream(
     stream: &mut quinn::SendStream,
     frame: &ReceiptFrame,
@@ -359,6 +361,7 @@ fn now_timestamp() -> aerosync_proto::Timestamp {
 /// already terminal at the moment of close (e.g. a local cancel
 /// raced with the FIN), the resulting `apply_event` is a no-op and
 /// silently swallowed — the local terminal state wins.
+#[tracing::instrument(level = "debug", skip(recv, receipt), fields(receipt_id = %receipt.id()))]
 pub async fn run_sender_loop(
     mut recv: quinn::RecvStream,
     receipt: Arc<Receipt<Sender>>,
@@ -443,6 +446,11 @@ pub enum ReceiverVerdict {
 /// surfaces its `ack()`/`nack()` decision. The loop blocks on it
 /// until either a verdict arrives or the receipt's local state goes
 /// terminal (via cancel/error from another path).
+#[tracing::instrument(
+    level = "debug",
+    skip(send, recv, receipt, verdict_rx),
+    fields(receipt_id = %receipt.id())
+)]
 pub async fn run_receiver_loop(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,

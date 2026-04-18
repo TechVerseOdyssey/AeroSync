@@ -279,17 +279,35 @@ impl<Side> Receipt<Side> {
     /// Apply a protocol event. Returns `Ok` when the transition is
     /// legal, [`StateError::InvalidTransition`] otherwise. On error
     /// the state is unchanged.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self),
+        fields(receipt_id = %self.id)
+    )]
     pub fn apply_event(&self, event: Event) -> Result<(), StateError> {
         let current = self.state();
         match next_state(&current, &event) {
             Some(next) => {
+                tracing::debug!(
+                    from = ?current,
+                    to = ?next,
+                    event = ?event,
+                    "receipt state transition",
+                );
                 self.state_tx.send_replace(next);
                 Ok(())
             }
-            None => Err(StateError::InvalidTransition {
-                from: current,
-                event,
-            }),
+            None => {
+                tracing::debug!(
+                    from = ?current,
+                    event = ?event,
+                    "receipt rejected event (invalid transition)",
+                );
+                Err(StateError::InvalidTransition {
+                    from: current,
+                    event,
+                })
+            }
         }
     }
 
