@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: ["master"]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -67,6 +70,10 @@ jobs:
   audit:
     name: cargo-audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2.0.0
