@@ -3,44 +3,55 @@
 //! 验证 AutoAdapter + TransferEngine 在并发上传 100 个小文件时的完整传输链路：
 //! - MultiProgress-style 并发（最多 16 个文件同时传输）
 //! - 每个文件独立校验成功
-//! - 服务端 warp 接收并记录所有文件
+//! - 服务端 axum 接收并记录所有文件
 
 use aerosync::core::transfer::{TransferConfig, TransferEngine, TransferTask};
 use aerosync::protocols::{http::HttpConfig, quic::QuicConfig, AutoAdapter};
+use axum::extract::{Multipart, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::post;
+use axum::Router;
 use std::collections::HashSet;
-use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
-use warp::Filter;
 
-/// 启动一个 warp 测试服务器，接受 POST /upload 的 multipart 请求。
+/// 启动一个 axum 测试服务器，接受 POST /upload 的 multipart 请求。
 /// 返回 (addr, received_names Arc) 用于后续断言。
 async fn start_test_server() -> (std::net::SocketAddr, Arc<Mutex<Vec<String>>>) {
     let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let received_clone = Arc::clone(&received);
 
-    let route = warp::post()
-        .and(warp::path("upload"))
-        .and(warp::multipart::form().max_length(10 * 1024 * 1024))
-        .and_then(move |mut form: warp::multipart::FormData| {
-            let recv = Arc::clone(&received_clone);
-            async move {
-                use futures::TryStreamExt;
-                while let Some(part) = form.try_next().await.unwrap_or(None) {
-                    let name = part.filename().unwrap_or("unknown").to_string();
-                    recv.lock().await.push(name);
-                }
-                Ok::<_, Infallible>(warp::reply::with_status("ok", warp::http::StatusCode::OK))
-            }
-        });
+    async fn upload(
+        State(recv): State<Arc<Mutex<Vec<String>>>>,
+        mut form: Multipart,
+    ) -> impl IntoResponse {
+        while let Ok(Some(mut field)) = form.next_field().await {
+            let name = field
+                .file_name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            // Drain the chunk stream before pushing the name to mirror warp's
+            // behavior of consuming each part fully.
+            while let Ok(Some(_chunk)) = field.chunk().await {}
+            recv.lock().await.push(name);
+        }
+        (StatusCode::OK, "ok")
+    }
 
-    let (addr, server) =
-        warp::serve(route).bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-        });
-    tokio::spawn(server);
+    let app = Router::new()
+        .route("/upload", post(upload))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            10 * 1024 * 1024,
+        ))
+        .with_state(Arc::clone(&received));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
 
     (addr, received)
 }

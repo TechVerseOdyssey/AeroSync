@@ -30,14 +30,21 @@ shellexpand = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Core engine deps (formerly aerosync-core)
-# NOTE: warp 0.3 stays in v0.2.0 prep; the warp→axum migration is a dedicated
-# follow-up task (see RFC-002 #5 HTTP SSE). Keeping warp means the
-# warp-transitive RUSTSECs (webpki, ring AES, rand) remain suppressed in
-# deny.toml with documented reasons.
-warp = { version = "0.3", features = ["websocket", "tls"] }
+# HTTP/HTTPS/WebSocket server stack — migrated from warp 0.3 to axum 0.7
+# (see commit "refactor(server): migrate warp 0.3 → axum 0.7"). axum-server
+# uses the `tls-rustls-no-provider` feature so we keep our explicitly
+# installed `ring` crypto provider (see ensure_crypto_provider_installed).
+axum = { version = "0.7", features = ["ws", "multipart", "macros"] }
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "limit"] }
 rcgen = { version = "0.13", features = ["pem"] }
 bytes = "1.0"
-rustls-pemfile = "2"
+# PEM parsing comes from rustls-pki-types::pem (PemObject trait) — we no
+# longer pull rustls-pemfile as a direct dep (the crate is unmaintained per
+# RUSTSEC-2025-0134; it survives only as a transitive dep of axum-server's
+# tls-rustls-no-provider feature, which is filtered out by our
+# `unmaintained = "workspace"` policy in deny.toml).
 rustls-pki-types = "1"
 sha2 = "0.10"
 hex = "0.4"

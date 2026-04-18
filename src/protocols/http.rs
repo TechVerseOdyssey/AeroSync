@@ -853,10 +853,34 @@ fn extract_base_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::convert::Infallible;
+    use axum::extract::{Multipart, State};
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::routing::{get, post};
+    use axum::Router;
+    use std::net::SocketAddr;
+    use std::sync::Arc as StdArc;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
-    use warp::Filter;
+
+    /// Bind an axum app on an ephemeral port and spawn it. Returns the bound address.
+    /// The server keeps running until the test process exits (sufficient for tests).
+    async fn spawn_app(app: Router) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        addr
+    }
+
+    /// Drain all multipart fields without storing them — preserves warp behavior of
+    /// reading the body fully before responding.
+    async fn drain_multipart(mut form: Multipart) {
+        while let Ok(Some(mut field)) = form.next_field().await {
+            while let Ok(Some(_chunk)) = field.chunk().await {}
+        }
+    }
 
     // ── 1. HttpConfig defaults ────────────────────────────────────────────────
     #[test]
@@ -875,25 +899,16 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // ── 3. Upload to a real warp server (streaming) ───────────────────────────
+    // ── 3. Upload to a real axum server (streaming) ───────────────────────────
     #[tokio::test]
     async fn test_http_upload_streaming() {
-        // Minimal warp endpoint that accepts multipart and returns 200
-        let route = warp::post()
-            .and(warp::path("upload"))
-            .and(warp::multipart::form().max_length(100 * 1024 * 1024))
-            .and_then(|mut form: warp::multipart::FormData| async move {
-                use futures::TryStreamExt;
-                while let Some(_part) = form.try_next().await.unwrap_or(None) {}
-                Ok::<_, Infallible>(warp::reply::with_status("ok", warp::http::StatusCode::OK))
-            });
+        async fn upload(form: Multipart) -> impl IntoResponse {
+            drain_multipart(form).await;
+            (StatusCode::OK, "ok")
+        }
 
-        let (addr, server) = warp::serve(route)
-            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await
-            });
-
-        tokio::spawn(server);
+        let app = Router::new().route("/upload", post(upload));
+        let addr = spawn_app(app).await;
 
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("upload_test.bin");
@@ -911,33 +926,22 @@ mod tests {
     // ── 4. Upload attaches Authorization header ───────────────────────────────
     #[tokio::test]
     async fn test_http_upload_attaches_auth_header() {
-        let route = warp::post()
-            .and(warp::path("upload"))
-            .and(warp::header::<String>("authorization"))
-            .and(warp::multipart::form().max_length(1024 * 1024))
-            .and_then(
-                |auth: String, mut form: warp::multipart::FormData| async move {
-                    use futures::TryStreamExt;
-                    while form.try_next().await.unwrap_or(None).is_some() {}
-                    if auth == "Bearer test-token" {
-                        Ok::<_, Infallible>(warp::reply::with_status(
-                            "ok",
-                            warp::http::StatusCode::OK,
-                        ))
-                    } else {
-                        Ok(warp::reply::with_status(
-                            "unauthorized",
-                            warp::http::StatusCode::UNAUTHORIZED,
-                        ))
-                    }
-                },
-            );
+        async fn upload(headers: HeaderMap, form: Multipart) -> impl IntoResponse {
+            let auth = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            drain_multipart(form).await;
+            if auth == "Bearer test-token" {
+                (StatusCode::OK, "ok")
+            } else {
+                (StatusCode::UNAUTHORIZED, "unauthorized")
+            }
+        }
 
-        let (addr, server) = warp::serve(route)
-            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await
-            });
-        tokio::spawn(server);
+        let app = Router::new().route("/upload", post(upload));
+        let addr = spawn_app(app).await;
 
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("auth_test.txt");
@@ -962,33 +966,18 @@ mod tests {
     // ── 5. Upload attaches X-File-Hash header ────────────────────────────────
     #[tokio::test]
     async fn test_http_upload_attaches_sha256_header() {
-        let route = warp::post()
-            .and(warp::path("upload"))
-            .and(warp::header::optional::<String>("x-file-hash"))
-            .and(warp::multipart::form().max_length(1024 * 1024))
-            .and_then(
-                |hash: Option<String>, mut form: warp::multipart::FormData| async move {
-                    use futures::TryStreamExt;
-                    while form.try_next().await.unwrap_or(None).is_some() {}
-                    if hash.is_some() {
-                        Ok::<_, Infallible>(warp::reply::with_status(
-                            "ok",
-                            warp::http::StatusCode::OK,
-                        ))
-                    } else {
-                        Ok(warp::reply::with_status(
-                            "no hash",
-                            warp::http::StatusCode::BAD_REQUEST,
-                        ))
-                    }
-                },
-            );
+        async fn upload(headers: HeaderMap, form: Multipart) -> impl IntoResponse {
+            let has_hash = headers.get("x-file-hash").is_some();
+            drain_multipart(form).await;
+            if has_hash {
+                (StatusCode::OK, "ok")
+            } else {
+                (StatusCode::BAD_REQUEST, "no hash")
+            }
+        }
 
-        let (addr, server) = warp::serve(route)
-            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await
-            });
-        tokio::spawn(server);
+        let app = Router::new().route("/upload", post(upload));
+        let addr = spawn_app(app).await;
 
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("hash_test.txt");
@@ -1014,23 +1003,13 @@ mod tests {
     // ── 6. Upload fails with 4xx → returns Err ───────────────────────────────
     #[tokio::test]
     async fn test_http_upload_server_error_returns_err() {
-        let route = warp::post()
-            .and(warp::path("upload"))
-            .and(warp::multipart::form().max_length(1024 * 1024))
-            .and_then(|mut form: warp::multipart::FormData| async move {
-                use futures::TryStreamExt;
-                while form.try_next().await.unwrap_or(None).is_some() {}
-                Ok::<_, Infallible>(warp::reply::with_status(
-                    "rejected",
-                    warp::http::StatusCode::FORBIDDEN,
-                ))
-            });
+        async fn upload(form: Multipart) -> impl IntoResponse {
+            drain_multipart(form).await;
+            (StatusCode::FORBIDDEN, "rejected")
+        }
 
-        let (addr, server) = warp::serve(route)
-            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await
-            });
-        tokio::spawn(server);
+        let app = Router::new().route("/upload", post(upload));
+        let addr = spawn_app(app).await;
 
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("fail_test.txt");
@@ -1044,23 +1023,21 @@ mod tests {
         assert!(result.is_err(), "upload should fail on 403");
     }
 
-    // ── 7. Download from a real warp server ──────────────────────────────────
+    // ── 7. Download from a real axum server ──────────────────────────────────
     #[tokio::test]
     async fn test_http_download_file() {
-        let content = b"download me please";
-        let route = warp::get().and(warp::path("file")).map(move || {
-            warp::reply::with_header(
-                warp::reply::with_status(content.to_vec(), warp::http::StatusCode::OK),
-                "content-type",
-                "application/octet-stream",
+        let content: &'static [u8] = b"download me please";
+        async fn file_handler(State(content): State<&'static [u8]>) -> impl IntoResponse {
+            (
+                StatusCode::OK,
+                [("content-type", "application/octet-stream")],
+                content.to_vec(),
             )
-        });
-
-        let (addr, server) = warp::serve(route)
-            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await
-            });
-        tokio::spawn(server);
+        }
+        let app = Router::new()
+            .route("/file", get(file_handler))
+            .with_state(content);
+        let addr = spawn_app(app).await;
 
         let dir = tempdir().unwrap();
         let dest_path = dir.path().join("downloaded.bin");
@@ -1077,24 +1054,21 @@ mod tests {
     // ── 8. Download verifies SHA-256 when header present ─────────────────────
     #[tokio::test]
     async fn test_http_download_sha256_mismatch_returns_err() {
-        let content = b"some content";
-        let route = warp::get().and(warp::path("file")).map(move || {
-            warp::reply::with_header(
-                warp::reply::with_header(
-                    warp::reply::with_status(content.to_vec(), warp::http::StatusCode::OK),
-                    "x-file-hash",
-                    "wrong_hash_value",
-                ),
-                "content-type",
-                "application/octet-stream",
+        let content: &'static [u8] = b"some content";
+        async fn file_handler(State(content): State<&'static [u8]>) -> impl IntoResponse {
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/octet-stream"),
+                    ("x-file-hash", "wrong_hash_value"),
+                ],
+                content.to_vec(),
             )
-        });
-
-        let (addr, server) = warp::serve(route)
-            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await
-            });
-        tokio::spawn(server);
+        }
+        let app = Router::new()
+            .route("/file", get(file_handler))
+            .with_state(content);
+        let addr = spawn_app(app).await;
 
         let dir = tempdir().unwrap();
         let dest_path = dir.path().join("mismatch.bin");
@@ -1109,26 +1083,19 @@ mod tests {
     // ── 9. Range request for resume ───────────────────────────────────────────
     #[tokio::test]
     async fn test_http_resume_sends_range_header() {
-        let route = warp::get()
-            .and(warp::path("file"))
-            .and(warp::header::<String>("range"))
-            .map(|range: String| {
-                assert!(range.starts_with("bytes="), "Range header format wrong");
-                warp::reply::with_status(
-                    b"partial".to_vec(),
-                    warp::http::StatusCode::PARTIAL_CONTENT,
-                )
-            });
-
-        let (addr, server) = warp::serve(route)
-            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await
-            });
-        tokio::spawn(server);
+        async fn file_handler(headers: HeaderMap) -> impl IntoResponse {
+            let range = headers
+                .get("range")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert!(range.starts_with("bytes="), "Range header format wrong");
+            (StatusCode::PARTIAL_CONTENT, b"partial".to_vec())
+        }
+        let app = Router::new().route("/file", get(file_handler));
+        let addr = spawn_app(app).await;
 
         let dir = tempdir().unwrap();
         let local_path = dir.path().join("partial.bin");
-        // Pre-write some bytes to simulate existing partial file
         tokio::fs::write(&local_path, b"existing").await.unwrap();
 
         let task = TransferTask {
@@ -1199,30 +1166,26 @@ mod tests {
         );
     }
 
-    // Helper: build a mock upload server that counts chunk POSTs
-    fn make_counting_server(
-        chunk_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
-    ) -> impl warp::Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    // Helper: build a mock upload server router that counts chunk POSTs
+    fn make_counting_router(chunk_count: StdArc<std::sync::atomic::AtomicU32>) -> Router {
         use std::sync::atomic::Ordering;
-        let chunk_route = warp::post()
-            .and(warp::path!("upload" / "chunk"))
-            .and(warp::body::bytes())
-            .map(move |_b: bytes::Bytes| {
-                chunk_count.fetch_add(1, Ordering::Relaxed);
-                warp::reply::with_status(
-                    warp::reply::json(&serde_json::json!({"ok": true})),
-                    warp::http::StatusCode::OK,
-                )
-            });
-        let complete_route = warp::post()
-            .and(warp::path!("upload" / "complete"))
-            .map(|| {
-                warp::reply::with_status(
-                    warp::reply::json(&serde_json::json!({"status": "complete"})),
-                    warp::http::StatusCode::OK,
-                )
-            });
-        chunk_route.or(complete_route)
+        async fn chunk_handler(
+            State(counter): State<StdArc<std::sync::atomic::AtomicU32>>,
+            _body: axum::body::Bytes,
+        ) -> impl IntoResponse {
+            counter.fetch_add(1, Ordering::Relaxed);
+            (StatusCode::OK, axum::Json(serde_json::json!({"ok": true})))
+        }
+        async fn complete_handler() -> impl IntoResponse {
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"status": "complete"})),
+            )
+        }
+        Router::new()
+            .route("/upload/chunk", post(chunk_handler))
+            .route("/upload/complete", post(complete_handler))
+            .with_state(chunk_count)
     }
 
     // ── 13. concurrent_chunks field default ─────────────────────────────────
@@ -1236,16 +1199,10 @@ mod tests {
     #[tokio::test]
     async fn test_upload_small_file_uses_serial_path() {
         use std::sync::atomic::AtomicU32;
-        use std::sync::Arc as StdArc;
 
         let chunk_count = StdArc::new(AtomicU32::new(0));
-        let route = make_counting_server(StdArc::clone(&chunk_count));
-
-        let (addr, server) = warp::serve(route)
-            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await
-            });
-        tokio::spawn(server);
+        let app = make_counting_router(StdArc::clone(&chunk_count));
+        let addr = spawn_app(app).await;
 
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("small.bin");
@@ -1278,16 +1235,10 @@ mod tests {
     #[tokio::test]
     async fn test_upload_large_file_uses_concurrent_path() {
         use std::sync::atomic::AtomicU32;
-        use std::sync::Arc as StdArc;
 
         let chunk_count = StdArc::new(AtomicU32::new(0));
-        let route = make_counting_server(StdArc::clone(&chunk_count));
-
-        let (addr, server) = warp::serve(route)
-            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await
-            });
-        tokio::spawn(server);
+        let app = make_counting_router(StdArc::clone(&chunk_count));
+        let addr = spawn_app(app).await;
 
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("large.bin");
@@ -1324,16 +1275,10 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_upload_resumes_partial() {
         use std::sync::atomic::AtomicU32;
-        use std::sync::Arc as StdArc;
 
         let chunk_count = StdArc::new(AtomicU32::new(0));
-        let route = make_counting_server(StdArc::clone(&chunk_count));
-
-        let (addr, server) = warp::serve(route)
-            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await
-            });
-        tokio::spawn(server);
+        let app = make_counting_router(StdArc::clone(&chunk_count));
+        let addr = spawn_app(app).await;
 
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("resume.bin");
@@ -1411,15 +1356,11 @@ mod tests {
     // ── 17. wait_until_healthy：服务器可用时立即返回 true ─────────────────────
     #[tokio::test]
     async fn test_wait_until_healthy_returns_true_when_server_ok() {
-        let health_route = warp::get()
-            .and(warp::path("health"))
-            .map(|| warp::reply::with_status("ok", warp::http::StatusCode::OK));
-
-        let (addr, server) = warp::serve(health_route)
-            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await
-            });
-        tokio::spawn(server);
+        async fn health() -> impl IntoResponse {
+            (StatusCode::OK, "ok")
+        }
+        let app = Router::new().route("/health", get(health));
+        let addr = spawn_app(app).await;
 
         let client = reqwest::Client::new();
         let base = format!("http://{}", addr);
@@ -1433,48 +1374,39 @@ mod tests {
     #[tokio::test]
     async fn test_upload_chunked_reconnects_on_network_error() {
         use std::sync::atomic::{AtomicU32, Ordering};
-        use std::sync::Arc as StdArc;
 
-        // 服务器：前 N 个 chunk 请求返回 503（触发重连），之后正常
         let fail_count = StdArc::new(AtomicU32::new(0));
-        let fail_count2 = StdArc::clone(&fail_count);
 
-        let chunk_route = warp::post()
-            .and(warp::path!("upload" / "chunk"))
-            .and(warp::body::bytes())
-            .map(move |_b: bytes::Bytes| {
-                let n = fail_count2.fetch_add(1, Ordering::Relaxed);
-                // 第一次返回 503，后续正常
-                if n == 0 {
-                    warp::reply::with_status(
-                        warp::reply::json(&serde_json::json!({"error": "service unavailable"})),
-                        warp::http::StatusCode::SERVICE_UNAVAILABLE,
-                    )
-                } else {
-                    warp::reply::with_status(
-                        warp::reply::json(&serde_json::json!({"ok": true})),
-                        warp::http::StatusCode::OK,
-                    )
-                }
-            });
-        let complete_route = warp::post()
-            .and(warp::path!("upload" / "complete"))
-            .map(|| {
-                warp::reply::with_status(
-                    warp::reply::json(&serde_json::json!({"status": "complete"})),
-                    warp::http::StatusCode::OK,
+        async fn chunk_handler(
+            State(counter): State<StdArc<AtomicU32>>,
+            _body: axum::body::Bytes,
+        ) -> axum::response::Response {
+            let n = counter.fetch_add(1, Ordering::Relaxed);
+            if n == 0 {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(serde_json::json!({"error": "service unavailable"})),
                 )
-            });
-        let health_route = warp::get()
-            .and(warp::path("health"))
-            .map(|| warp::reply::with_status("ok", warp::http::StatusCode::OK));
-        let routes = chunk_route.or(complete_route).or(health_route);
-
-        let (addr, server) = warp::serve(routes)
-            .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await
-            });
-        tokio::spawn(server);
+                    .into_response()
+            } else {
+                (StatusCode::OK, axum::Json(serde_json::json!({"ok": true}))).into_response()
+            }
+        }
+        async fn complete_handler() -> impl IntoResponse {
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({"status": "complete"})),
+            )
+        }
+        async fn health_handler() -> impl IntoResponse {
+            (StatusCode::OK, "ok")
+        }
+        let app = Router::new()
+            .route("/upload/chunk", post(chunk_handler))
+            .route("/upload/complete", post(complete_handler))
+            .route("/health", get(health_handler))
+            .with_state(StdArc::clone(&fail_count));
+        let addr = spawn_app(app).await;
 
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("reconnect_test.bin");

@@ -15,51 +15,29 @@ version = 2
 #   - quinn 0.10 → 0.11  .......... DONE (kills RUSTSEC-2026-0037)
 #   - rustls 0.21 → 0.23 .......... DONE (kills RUSTSEC-2025-0009)
 #   - rcgen 0.11 → 0.13 ........... DONE
-#   - rustls-pemfile 1 → 2 ........ DONE (but warp still pulls pemfile 2.x)
-#   - warp 0.3 → axum ............. PENDING (blocks the 5 ignores below)
+#   - rustls-pemfile 1 → 2 ........ DONE (and we now parse PEM via
+#                                          rustls-pki-types directly, so
+#                                          RUSTSEC-2025-0134 is unreachable)
+#   - warp 0.3 → axum 0.7 ......... DONE (kills 4 warp-chain ignores:
+#                                          RUSTSEC-2026-0098/0099/0049,
+#                                          2025-0134)
 #
-# The remaining 5 advisories are all in the warp 0.3.7 transitive tree.
-# They disappear the moment we rewrite src/core/server.rs from warp filters
-# onto axum (planned as part of RFC-002 #5 HTTP SSE fallback work).
+# Only one advisory remains, and it is not exploitable in our setup:
 # ─────────────────────────────────────────────────────────────────────
 ignore = [
-  # ── rustls-webpki: name-constraint parsing bugs ──
-  # Advisory text: "reachable only after signature verification and
-  # requires misissuance to exploit." AeroSync uses self-signed certs
-  # (HTTPS receiver) and pinned certs (QUIC); neither walks a CA chain
-  # that could be misissued. We never assert URI / wildcard name
-  # constraints. Reaches us only via warp's internal rustls 0.21 chain.
-  { id = "RUSTSEC-2026-0098", reason = "name-constraint URI parsing; not on any AeroSync code path; blocked on warp 0.3 → axum (RFC-002 #5)" },
-  { id = "RUSTSEC-2026-0099", reason = "name-constraint wildcard parsing; not on any AeroSync code path; blocked on warp 0.3 → axum (RFC-002 #5)" },
-  # ── rustls-webpki: CRL distribution point matching ──
-  # AeroSync does not consult Certificate Revocation Lists in either
-  # the HTTPS or QUIC path. Self-signed / pinned cert verification
-  # bypasses CRL checking entirely.
-  { id = "RUSTSEC-2026-0049", reason = "CRL distribution point matching; AeroSync does not use CRLs; blocked on warp 0.3 → axum (RFC-002 #5)" },
-  # ── rustls-pemfile: unmaintained ──
-  # Our own code no longer depends on rustls-pemfile directly (we use
-  # rustls-pki-types parsers), but warp 0.3.7's HTTPS stack still pulls
-  # rustls-pemfile 2.x for its internal PEM loading. The crate is
-  # feature-frozen but not vulnerable; the ignore disappears when warp
-  # leaves the tree.
-  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; only reaches us via warp 0.3's HTTPS stack; blocked on warp 0.3 → axum (RFC-002 #5)" },
   # ── rand 0.8.5: unsound with custom logger calling rand::rng() ──
   # Advisory: triggers ONLY when a custom log::Log implementation calls
   # rand::thread_rng() at trace/warn level with a 64-KB-aligned reseed
   # event. AeroSync uses `tracing` (not `log`), has no custom logger,
-  # and never calls rand from inside any logging code. rand is pulled
-  # transitively via warp's tungstenite WebSocket stack.
-  { id = "RUSTSEC-2026-0097", reason = "rand unsound only with custom log::Log calling rng(); AeroSync uses tracing with no such logger; blocked on warp 0.3 → axum (RFC-002 #5)" },
-  # ── number_prefix 0.4.0: unmaintained ──
-  # Pulled transitively by indicatif 0.17 for human-readable byte
-  # formatting in the CLI progress bars. The crate is 30 lines of
-  # utility code, has no network / crypto surface, and is not
-  # vulnerable. Waits on indicatif upstream to drop the dep.
-  { id = "RUSTSEC-2025-0119", reason = "number_prefix unmaintained; utility crate with no security surface; reaches us only via indicatif CLI progress bars; blocked on indicatif dropping the dep upstream" },
+  # and never calls rand from inside any logging code. rand 0.8.5
+  # reaches us via `tokio-tungstenite` 0.20 (CLI watch) and via
+  # `axum 0.7` → `tungstenite 0.24`'s WebSocket masking.
+  # Removable once tokio-tungstenite + axum upgrade past rand 0.8.
+  { id = "RUSTSEC-2026-0097", reason = "rand unsound only with custom log::Log calling rng(); AeroSync uses tracing with no such logger; reaches us via tungstenite WebSocket masking only" },
 ]
 # Default severity policy: error on real vulnerabilities, warn on
 # unmaintained / unsound (these are informational and pervasive in
-# the GUI/Tauri/warp ecosystems we transitively depend on).
+# the GUI/Tauri ecosystems we transitively depend on).
 unmaintained = "workspace"   # warn for workspace deps only
 yanked = "warn"
 
