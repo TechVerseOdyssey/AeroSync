@@ -1146,3 +1146,111 @@ fn collect_files_recursive_boxed(
         collect_files_recursive(&base, &dir).await
     })
 }
+
+// ──────────────────────── 单元测试 ────────────────────────────────────────────
+//
+// 这里集中测试 negotiate_protocol 的协议路由逻辑，
+// 包括不同 scheme 前缀的透传、对端不可达的 HTTP fallback、以及
+// 探针发现 x-aerosync 头时升级到 QUIC 的行为。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // ── 1. 已知 scheme 前缀必须原样返回，不发探针 ────────────────────────────
+
+    #[tokio::test]
+    async fn test_negotiate_passes_http_through() {
+        let result = negotiate_protocol("http://example.com:8080/upload").await;
+        assert_eq!(result, "http://example.com:8080/upload");
+    }
+
+    #[tokio::test]
+    async fn test_negotiate_passes_https_through() {
+        let result = negotiate_protocol("https://example.com:8443/upload").await;
+        assert_eq!(result, "https://example.com:8443/upload");
+    }
+
+    #[tokio::test]
+    async fn test_negotiate_passes_quic_through() {
+        let result = negotiate_protocol("quic://host:7789/upload").await;
+        assert_eq!(result, "quic://host:7789/upload");
+    }
+
+    #[tokio::test]
+    async fn test_negotiate_passes_s3_through() {
+        let result = negotiate_protocol("s3://my-bucket/path/key").await;
+        assert_eq!(result, "s3://my-bucket/path/key");
+    }
+
+    #[tokio::test]
+    async fn test_negotiate_passes_ftp_through() {
+        let result = negotiate_protocol("ftp://host:21/file.bin").await;
+        assert_eq!(result, "ftp://host:21/file.bin");
+    }
+
+    // ── 2. 对端不可达 → 降级为 HTTP 上传地址 ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_negotiate_falls_back_to_http_when_unreachable() {
+        // 端口 1 几乎肯定无监听者；探针超时（2s）后必须走 HTTP fallback
+        let result = negotiate_protocol("127.0.0.1:1").await;
+        assert_eq!(result, "http://127.0.0.1:1/upload");
+    }
+
+    // ── 3. 探针命中 AeroSync → 升级 QUIC ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_negotiate_upgrades_to_quic_when_aerosync_header_present() {
+        let port = spawn_fake_health_server(true).await;
+        let dest = format!("127.0.0.1:{}", port);
+        let result = negotiate_protocol(&dest).await;
+        // QUIC 端口惯例为 HTTP 端口 + 1
+        let expected = format!("quic://127.0.0.1:{}/upload", port + 1);
+        assert_eq!(result, expected);
+    }
+
+    /// 普通 HTTP 服务器（无 x-aerosync 头）→ 不升级，返回 http://...//upload。
+    #[tokio::test]
+    async fn test_negotiate_stays_http_when_aerosync_header_absent() {
+        let port = spawn_fake_health_server(false).await;
+        let dest = format!("127.0.0.1:{}", port);
+        let result = negotiate_protocol(&dest).await;
+        let expected = format!("http://127.0.0.1:{}/upload", port);
+        assert_eq!(result, expected);
+    }
+
+    // ── 测试辅助：最小 HTTP/1.1 服务器 ─────────────────────────────────────────
+    //
+    // 不引入额外依赖（hyper/wiremock），手写 TCP 应答即可满足 reqwest 的解析需求。
+    // 服务器只接受 1 个连接并对 GET /health 返回 200，按需附带 x-aerosync 头。
+    async fn spawn_fake_health_server(with_aerosync_header: bool) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            // 接受多个连接以应对 reqwest 可能的连接复用/重试
+            for _ in 0..4 {
+                match listener.accept().await {
+                    Ok((mut stream, _)) => {
+                        let mut buf = vec![0u8; 1024];
+                        let _ = stream.read(&mut buf).await;
+                        let extra = if with_aerosync_header {
+                            "x-aerosync: true\r\n"
+                        } else {
+                            ""
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n{}\r\n",
+                            extra
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                        let _ = stream.shutdown().await;
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        port
+    }
+}
