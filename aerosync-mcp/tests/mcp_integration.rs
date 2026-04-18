@@ -4,7 +4,7 @@
 //! 5. TaskStore round-trip — persist → reload → states survive simulated restart
 
 use aerosync_mcp::{
-    server::{AeroSyncMcpServer, BackgroundTaskStatus, SendFileParams, TaskEntry},
+    server::{AeroSyncMcpServer, BackgroundTaskStatus, McpConfig, SendFileParams, TaskEntry},
     task_store::TaskStore,
 };
 use std::{sync::Arc, time::Instant};
@@ -444,6 +444,51 @@ async fn test_send_file_keeps_resume_path_after_failure() {
         resume_path.is_some(),
         "失败状态下 resume_json_path 必须保留，便于下次启动续传"
     );
+}
+
+// ── P3a 配置统一：超时/TTL 默认值与环境变量覆盖 ──────────────────────────────
+
+/// 默认 transfer_timeout=1h、task_ttl=24h；TTL 必须 ≥ transfer_timeout，
+/// 否则会出现"任务还在跑就被 evict"的不一致。
+#[test]
+fn test_mcp_config_defaults_are_consistent() {
+    let cfg = McpConfig::default();
+    assert_eq!(cfg.transfer_timeout.as_secs(), 3600, "默认传输超时应为 1h");
+    assert_eq!(cfg.task_ttl.as_secs(), 86400, "默认任务 TTL 应为 24h");
+    assert!(
+        cfg.task_ttl >= cfg.transfer_timeout,
+        "task_ttl({:?}) 必须 ≥ transfer_timeout({:?})，否则进行中任务可能被误清",
+        cfg.task_ttl, cfg.transfer_timeout
+    );
+}
+
+/// 配置 from_env 必须能正确解析环境变量。这里通过 Server::with_config
+/// 来间接验证字段链路（避免 env 全局污染影响并发测试）。
+#[test]
+fn test_mcp_config_with_config_overrides_defaults() {
+    let custom = McpConfig {
+        transfer_timeout: std::time::Duration::from_secs(120),
+        task_ttl: std::time::Duration::from_secs(600),
+    };
+    let server = AeroSyncMcpServer::new().with_config(custom.clone());
+    assert_eq!(server.config().transfer_timeout, custom.transfer_timeout);
+    assert_eq!(server.config().task_ttl, custom.task_ttl);
+}
+
+/// 内存 registry TTL 与 SQLite evict_old 必须使用相同的 task_ttl_secs，
+/// 避免出现"内存里查不到、磁盘里还在"的不一致。
+/// 当前 main.rs 直接使用 mcp_config.task_ttl 派生 evict_old 参数，本测试
+/// 锁死该值在 McpConfig 中以秒为单位可被序列化。
+#[test]
+fn test_mcp_config_task_ttl_is_in_seconds() {
+    let cfg = McpConfig::default();
+    let secs = cfg.task_ttl.as_secs();
+    assert_eq!(secs, 86400);
+    let cfg = McpConfig {
+        task_ttl: std::time::Duration::from_secs(7200),
+        ..McpConfig::default()
+    };
+    assert_eq!(cfg.task_ttl.as_secs(), 7200);
 }
 
 // ── 7. P2 改名向后兼容：_auth_token alias 必须仍然可解析 ──────────────────────

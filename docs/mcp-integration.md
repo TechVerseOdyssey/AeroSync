@@ -192,6 +192,23 @@ aerosync-mcp 2>mcp.log
 RUST_LOG=debug aerosync-mcp
 ```
 
+## 运行时配置
+
+可通过环境变量覆盖默认值（无需重新编译）：
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `AEROSYNC_MCP_TRANSFER_TIMEOUT_SECS` | `3600` | 单次 send_file/send_directory 的最大允许时长，超时返回 `Failed("Transfer timed out after Ns")` |
+| `AEROSYNC_MCP_TASK_TTL_SECS` | `86400` | 任务在内存与 SQLite 中的保留时长；建议 ≥ transfer_timeout，否则进行中任务可能被误清 |
+| `AEROSYNC_MCP_SECRET` | 未设置 | 启用本地认证（详见上方"两种 Token 的区别"） |
+
+```bash
+# 例：长时大文件场景，把超时拉到 6h，TTL 拉到 7 天
+AEROSYNC_MCP_TRANSFER_TIMEOUT_SECS=21600 \
+AEROSYNC_MCP_TASK_TTL_SECS=604800 \
+aerosync-mcp
+```
+
 ## 安全注意事项
 
 ### 两种 Token 的区别（务必区分）

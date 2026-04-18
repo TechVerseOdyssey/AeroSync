@@ -52,9 +52,55 @@ pub struct TaskEntry {
 /// 任务注册表，task_id → TaskEntry
 type TaskRegistry = Arc<Mutex<HashMap<Uuid, TaskEntry>>>;
 
-/// 清理超过 1 小时未更新的任务条目
-fn evict_expired(registry: &mut HashMap<Uuid, TaskEntry>) {
-    let cutoff = Instant::now() - Duration::from_secs(3600);
+// ───────────────────────── MCP 配置 ─────────────────────────────────────────
+
+/// MCP Server 运行时配置：超时、TTL、并发上限等。
+///
+/// 所有字段均可通过环境变量覆盖（见 `from_env`），便于运维场景快速调参
+/// 而不必重新编译。
+#[derive(Debug, Clone)]
+pub struct McpConfig {
+    /// 单次 send_file/send_directory 后台传输的最大允许时长。
+    /// 超时后任务被标记为 Failed("Transfer timed out after Ns")。
+    /// 默认 3600s（1h）。环境变量：`AEROSYNC_MCP_TRANSFER_TIMEOUT_SECS`
+    pub transfer_timeout: Duration,
+    /// 任务在内存 registry 与 SQLite 中保留的最长时间。
+    /// 超过该时长未更新的任务会被 evict（避免 get_transfer_status 出现
+    /// "内存里查不到、磁盘里还有"的不一致）。默认 86400s（24h）。
+    /// 环境变量：`AEROSYNC_MCP_TASK_TTL_SECS`
+    pub task_ttl: Duration,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            transfer_timeout: Duration::from_secs(3600),
+            task_ttl: Duration::from_secs(86400),
+        }
+    }
+}
+
+impl McpConfig {
+    /// 读取环境变量构造配置。未设置或解析失败的字段保留默认值。
+    pub fn from_env() -> Self {
+        let mut cfg = Self::default();
+        if let Some(secs) = parse_secs_env("AEROSYNC_MCP_TRANSFER_TIMEOUT_SECS") {
+            cfg.transfer_timeout = Duration::from_secs(secs);
+        }
+        if let Some(secs) = parse_secs_env("AEROSYNC_MCP_TASK_TTL_SECS") {
+            cfg.task_ttl = Duration::from_secs(secs);
+        }
+        cfg
+    }
+}
+
+fn parse_secs_env(name: &str) -> Option<u64> {
+    std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+/// 清理超过 `ttl` 未更新的任务条目（内存 registry）
+fn evict_expired(registry: &mut HashMap<Uuid, TaskEntry>, ttl: Duration) {
+    let cutoff = Instant::now() - ttl;
     registry.retain(|_, entry| entry.last_updated > cutoff);
 }
 
@@ -180,6 +226,8 @@ pub struct AeroSyncMcpServer {
     /// 续传 JSON 文件存放于 `aerosync_dir/.aerosync/{task_id}.json`
     /// （由 `ResumeStore::new(aerosync_dir)` 决定的二级目录）。
     aerosync_dir: std::path::PathBuf,
+    /// 运行时配置（超时、TTL 等）
+    config: McpConfig,
 }
 
 impl Default for AeroSyncMcpServer {
@@ -203,6 +251,7 @@ impl AeroSyncMcpServer {
             task_store: None,
             secret,
             aerosync_dir,
+            config: McpConfig::from_env(),
         }
     }
 
@@ -221,6 +270,17 @@ impl AeroSyncMcpServer {
     pub fn with_aerosync_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.aerosync_dir = dir;
         self
+    }
+
+    /// 覆盖运行时配置（超时、TTL）。未调用时默认从环境变量读取。
+    pub fn with_config(mut self, config: McpConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// 获取当前生效的配置（供测试和诊断使用）
+    pub fn config(&self) -> &McpConfig {
+        &self.config
     }
 
     /// 计算指定 task 的 ResumeState JSON 路径（与 `ResumeStore::new(aerosync_dir)` 内部一致）
@@ -292,6 +352,8 @@ impl AeroSyncMcpServer {
         let description = format!("send_file: {} → {}", params.source, params.destination);
         let aerosync_dir = self.aerosync_dir.clone();
         let resume_json_path = self.resume_json_path_for(task_id);
+        let task_ttl = self.config.task_ttl;
+        let transfer_timeout = self.config.transfer_timeout;
         {
             let pending_entry = TaskEntry {
                 status: BackgroundTaskStatus::Pending,
@@ -303,7 +365,7 @@ impl AeroSyncMcpServer {
                 store.upsert_with_resume(task_id, &pending_entry, Some(&resume_json_path)).await;
             }
             let mut tasks = self.tasks.lock().await;
-            evict_expired(&mut tasks);
+            evict_expired(&mut tasks, task_ttl);
             tasks.insert(task_id, pending_entry);
         }
 
@@ -370,7 +432,7 @@ impl AeroSyncMcpServer {
                 engine.add_transfer(transfer_task).await.map_err(|e| format!("Failed to add transfer: {}", e))?;
 
                 let monitor = engine.get_progress_monitor().await;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(3600);
+                let deadline = tokio::time::Instant::now() + transfer_timeout;
                 loop {
                     let (done, failed) = {
                         let m = monitor.read().await;
@@ -392,7 +454,7 @@ impl AeroSyncMcpServer {
                         return Ok((stats.completed_files, file_size, stats.overall_speed / 1_048_576.0));
                     }
                     if tokio::time::Instant::now() >= deadline {
-                        return Err("Transfer timed out after 1 hour".to_string());
+                        return Err(format!("Transfer timed out after {}s", transfer_timeout.as_secs()));
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
@@ -481,6 +543,8 @@ impl AeroSyncMcpServer {
         // 生成唯一任务 ID，立即注册为 Pending
         let task_id = Uuid::new_v4();
         let description = format!("send_directory: {} → {} ({} files)", params.source, params.destination, files.len());
+        let task_ttl = self.config.task_ttl;
+        let transfer_timeout = self.config.transfer_timeout;
         {
             let pending_entry = TaskEntry {
                 status: BackgroundTaskStatus::Pending,
@@ -491,7 +555,7 @@ impl AeroSyncMcpServer {
                 store.upsert(task_id, &pending_entry).await;
             }
             let mut tasks = self.tasks.lock().await;
-            evict_expired(&mut tasks);
+            evict_expired(&mut tasks, task_ttl);
             tasks.insert(task_id, pending_entry);
         }
 
@@ -558,7 +622,7 @@ impl AeroSyncMcpServer {
                 }
 
                 let monitor = engine.get_progress_monitor().await;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(3600);
+                let deadline = tokio::time::Instant::now() + transfer_timeout;
                 loop {
                     let done = {
                         let m = monitor.read().await;
@@ -572,7 +636,7 @@ impl AeroSyncMcpServer {
                         return Ok((stats.completed_files, total_size, speed_mbs));
                     }
                     if tokio::time::Instant::now() >= deadline {
-                        return Err("Transfer timed out after 1 hour".to_string());
+                        return Err(format!("Transfer timed out after {}s", transfer_timeout.as_secs()));
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }

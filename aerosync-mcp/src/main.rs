@@ -1,4 +1,8 @@
-use aerosync_mcp::{recovery::recover_pending_transfers, server, task_store::TaskStore};
+use aerosync_mcp::{
+    recovery::recover_pending_transfers,
+    server::{self, McpConfig},
+    task_store::TaskStore,
+};
 use rmcp::{ServiceExt, transport::stdio};
 use std::sync::Arc;
 
@@ -25,8 +29,18 @@ async fn main() -> anyhow::Result<()> {
     // 初始化 SQLite 任务持久化（~/.aerosync/tasks.db）
     let db_path = aerosync_dir.join("tasks.db");
 
+    // 加载运行时配置（透明从环境变量读取）
+    let mcp_config = McpConfig::from_env();
+    tracing::info!(
+        "MCP config: transfer_timeout={}s, task_ttl={}s",
+        mcp_config.transfer_timeout.as_secs(),
+        mcp_config.task_ttl.as_secs()
+    );
+    let task_ttl_secs = mcp_config.task_ttl.as_secs();
+
     let mut builder = server::AeroSyncMcpServer::new()
-        .with_aerosync_dir(aerosync_dir.clone());
+        .with_aerosync_dir(aerosync_dir.clone())
+        .with_config(mcp_config);
 
     if let Ok(logger) = aerosync_core::audit::AuditLogger::new(&audit_path).await {
         builder = builder.with_audit(Arc::new(logger));
@@ -40,8 +54,8 @@ async fn main() -> anyhow::Result<()> {
             let store = Arc::new(store);
             // Restore previous tasks into memory (pending/running → failed)
             let restored = store.load_all().await;
-            // Remove old completed/failed entries (>24 h)
-            store.evict_old(86400).await;
+            // Remove old completed/failed entries (TTL 与内存 registry 一致，避免不一致)
+            store.evict_old(task_ttl_secs).await;
             let count = restored.len();
             builder = builder.with_task_store(Arc::clone(&store));
             builder.restore_tasks(restored).await;
