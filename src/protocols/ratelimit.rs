@@ -5,7 +5,7 @@
 ///
 /// 使用方式：
 /// ```no_run
-/// # use aerosync_protocols::ratelimit::RateLimiter;
+/// # use aerosync::protocols::ratelimit::RateLimiter;
 /// # async fn example(chunk_len: u64) {
 /// let limiter = RateLimiter::new(1024 * 1024); // 1 MB/s
 /// limiter.consume(chunk_len).await;

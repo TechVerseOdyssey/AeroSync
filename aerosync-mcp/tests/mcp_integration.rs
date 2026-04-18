@@ -618,7 +618,7 @@ async fn test_recover_empty_store_returns_zero() {
 /// 并删除 JSON 文件，避免重复传输。
 #[tokio::test]
 async fn test_recover_marks_already_complete_state_as_completed() {
-    use aerosync_core::resume::{ResumeState, ResumeStore};
+    use aerosync::core::resume::{ResumeState, ResumeStore};
 
     let dir = tempdir().unwrap();
     let aerosync_dir = dir.path().to_path_buf();

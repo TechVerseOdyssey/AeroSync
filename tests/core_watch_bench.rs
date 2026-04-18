@@ -9,7 +9,7 @@
 //!   bench_concurrent_connect_time        — 100 客户端并发建连总耗时
 //!   bench_broadcast_with_slow_consumer   — 慢消费者不阻塞其他客户端
 
-use aerosync_core::server::{FileReceiver, ServerConfig, WsEvent};
+use aerosync::core::server::{FileReceiver, ServerConfig, WsEvent};
 use futures::StreamExt;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;

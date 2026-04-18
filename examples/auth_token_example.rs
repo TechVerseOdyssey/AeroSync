@@ -2,8 +2,8 @@
 //!
 //! 演示如何在 AeroSync 中使用 Token 认证功能
 
-use aerosync_core::auth::{AuthConfig, AuthManager, AuthMiddleware, TokenManager};
-use aerosync_core::Result;
+use aerosync::core::auth::{AuthConfig, AuthManager, AuthMiddleware, TokenManager};
+use aerosync::core::Result;
 use std::sync::Arc;
 
 /// 示例 1: 基础 Token 生成和验证

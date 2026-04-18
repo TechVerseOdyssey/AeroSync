@@ -6,7 +6,7 @@
 //! 3. 广播 WsEvent，验证客户端收到
 //! 4. 模拟断连 / 服务停止，验证重连行为
 
-use aerosync_core::server::{FileReceiver, ServerConfig, WsEvent};
+use aerosync::core::server::{FileReceiver, ServerConfig, WsEvent};
 use futures::StreamExt;
 use std::time::Duration;
 use tempfile::tempdir;

@@ -14,7 +14,7 @@
 //! # 使用示例
 //!
 //! ```no_run
-//! use aerosync_core::audit::{AuditLogger, AuditEntry, AuditEvent, Direction, AuditResult};
+//! use aerosync::core::audit::{AuditLogger, AuditEntry, AuditEvent, Direction, AuditResult};
 //! use std::path::Path;
 //!
 //! # async fn example() -> anyhow::Result<()> {
@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-use crate::error::Result;
+use crate::core::error::Result;
 use crate::AeroSyncError;
 
 // ──────────────────────────────── types ─────────────────────────────────────

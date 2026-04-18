@@ -3,7 +3,7 @@
 //! 为 HTTP 和 QUIC 协议提供认证中间件。
 
 use super::AuthManager;
-use crate::error::Result;
+use crate::core::error::Result;
 use std::sync::Arc;
 
 /// 认证中间件
@@ -97,7 +97,7 @@ pub struct UnauthorizedResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{AuthConfig, AuthManager};
+    use crate::core::auth::{AuthConfig, AuthManager};
 
     fn create_test_middleware() -> (AuthMiddleware, AuthManager) {
         let config = AuthConfig::new()

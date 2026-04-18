@@ -1,20 +1,20 @@
 //! AutoAdapter: 根据 destination URL 自动选择 HTTP 或 QUIC 协议，
 //! 实现 aerosync-core 的 ProtocolAdapter trait，由 main.rs 注入。
 
-use aerosync_core::resume::{ResumeState, ResumeStore};
-use aerosync_core::transfer::{ProtocolAdapter, ProtocolProgress, TransferTask};
-use aerosync_core::{AeroSyncError, Result};
+use crate::core::resume::{ResumeState, ResumeStore};
+use crate::core::transfer::{ProtocolAdapter, ProtocolProgress, TransferTask};
+use crate::core::{AeroSyncError, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::ftp::{FtpConfig, FtpTransfer};
-use crate::http::{HttpConfig, HttpTransfer};
-use crate::quic::{QuicConfig, QuicTransfer};
-use crate::s3::{S3Config, S3Transfer};
-use crate::traits::{TransferProgress as ProtoProgress, TransferProtocol};
+use crate::protocols::ftp::{FtpConfig, FtpTransfer};
+use crate::protocols::http::{HttpConfig, HttpTransfer};
+use crate::protocols::quic::{QuicConfig, QuicTransfer};
+use crate::protocols::s3::{S3Config, S3Transfer};
+use crate::protocols::traits::{TransferProgress as ProtoProgress, TransferProtocol};
 
 pub struct AutoAdapter {
     http_config: HttpConfig,
@@ -320,7 +320,7 @@ fn resolve_quic_config(destination: &str, base: &QuicConfig) -> Result<QuicConfi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aerosync_core::transfer::TransferTask;
+    use crate::core::transfer::TransferTask;
 
     fn default_quic_config() -> QuicConfig {
         QuicConfig::default()
@@ -402,7 +402,7 @@ mod tests {
         let result = adapter.upload(&task, tx).await;
         // Should fail with a Network error (connection refused), not a config/parse error
         match result {
-            Err(aerosync_core::AeroSyncError::Network(_)) => {} // expected
+            Err(crate::core::AeroSyncError::Network(_)) => {} // expected
             Err(e) => panic!("Unexpected error type: {:?}", e),
             Ok(_) => panic!("Should not succeed without a real server"),
         }
@@ -440,7 +440,7 @@ mod tests {
 
         let result = adapter.download(&task, tx).await;
         match result {
-            Err(aerosync_core::AeroSyncError::Network(_)) => {}
+            Err(crate::core::AeroSyncError::Network(_)) => {}
             Err(e) => panic!("Unexpected error: {:?}", e),
             Ok(_) => panic!("Should not succeed without server"),
         }

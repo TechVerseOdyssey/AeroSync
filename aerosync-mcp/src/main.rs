@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         .with_aerosync_dir(aerosync_dir.clone())
         .with_config(mcp_config);
 
-    if let Ok(logger) = aerosync_core::audit::AuditLogger::new(&audit_path).await {
+    if let Ok(logger) = aerosync::core::audit::AuditLogger::new(&audit_path).await {
         builder = builder.with_audit(Arc::new(logger));
         tracing::info!("MCP audit log: {}", audit_path.display());
     } else {

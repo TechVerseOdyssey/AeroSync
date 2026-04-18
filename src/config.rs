@@ -1,4 +1,4 @@
-pub use aerosync_core::routing::RouterConfig;
+pub use aerosync::core::routing::RouterConfig;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 

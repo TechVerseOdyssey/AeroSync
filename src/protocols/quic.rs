@@ -1,5 +1,5 @@
-use crate::traits::{TransferProgress, TransferProtocol};
-use aerosync_core::{AeroSyncError, Result, TransferTask};
+use crate::protocols::traits::{TransferProgress, TransferProtocol};
+use crate::core::{AeroSyncError, Result, TransferTask};
 use async_trait::async_trait;
 use quinn::{ClientConfig, Connection, Endpoint};
 use rustls::client::{ServerCertVerified, ServerCertVerifier};

@@ -21,42 +21,22 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "aerosync"
 version = "0.1.0"
 dependencies = [
- "aerosync-core",
- "aerosync-protocols",
- "anyhow",
- "clap",
- "futures",
- "indicatif",
- "mdns-sd",
- "reqwest",
- "serde",
- "serde_json",
- "shellexpand",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.20.1",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "aerosync-core"
-version = "0.1.0"
-dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "clap",
  "crossbeam-channel",
  "dirs-next",
  "futures",
  "hex",
+ "hmac",
  "hostname",
+ "indicatif",
  "libc",
  "mdns-sd",
+ "memmap2",
  "quinn",
+ "rand",
  "rcgen",
  "reqwest",
  "rustls 0.21.12",
@@ -65,12 +45,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shellexpand",
+ "suppaftp",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.20.1",
+ "tokio-util",
  "toml",
  "tracing",
+ "tracing-subscriber",
+ "url",
+ "urlencoding",
  "uuid",
  "warp",
  "zeroize",
@@ -80,8 +66,7 @@ dependencies = [
 name = "aerosync-mcp"
 version = "0.1.0"
 dependencies = [
- "aerosync-core",
- "aerosync-protocols",
+ "aerosync",
  "anyhow",
  "futures",
  "reqwest",
@@ -94,39 +79,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "aerosync-protocols"
-version = "0.1.0"
-dependencies = [
- "aerosync-core",
- "anyhow",
- "async-trait",
- "bytes",
- "futures",
- "hex",
- "hmac",
- "memmap2",
- "quinn",
- "rand",
- "rcgen",
- "reqwest",
- "rustls 0.21.12",
- "serde",
- "serde_json",
- "sha2",
- "suppaftp",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "urlencoding",
- "uuid",
- "warp",
  "zeroize",
 ]
 

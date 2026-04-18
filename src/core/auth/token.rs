@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use crate::error::{AeroSyncError, Result};
+use crate::core::error::{AeroSyncError, Result};
 
 /// Token 信息
 #[derive(Debug, Clone)]

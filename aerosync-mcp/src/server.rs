@@ -5,16 +5,17 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use aerosync_core::{
+use aerosync::core::{
     audit::AuditLogger,
     auth::AuthConfig,
     discovery::AeroSyncMdns,
+    history::HistoryQuery,
     resume::ResumeStore,
     server::{FileReceiver, ServerConfig},
     transfer::{TransferConfig, TransferEngine, TransferTask},
-    FileManager, HistoryQuery, HistoryStore,
+    FileManager, HistoryStore,
 };
-use aerosync_protocols::{http::HttpConfig, quic::QuicConfig, AutoAdapter};
+use aerosync::protocols::{http::HttpConfig, quic::QuicConfig, AutoAdapter};
 use rmcp::{model::*, schemars, tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 use serde_json::json;
@@ -370,7 +371,7 @@ impl AeroSyncMcpServer {
         let upload_limit_bps = params
             .limit
             .as_deref()
-            .and_then(aerosync_protocols::ratelimit::parse_limit)
+            .and_then(aerosync::protocols::ratelimit::parse_limit)
             .unwrap_or(0);
 
         // 生成唯一任务 ID，立即注册为 Pending
@@ -488,7 +489,7 @@ impl AeroSyncMcpServer {
                                 .get_active_transfers()
                                 .iter()
                                 .find_map(|t| match &t.status {
-                                    aerosync_core::progress::TransferStatus::Failed(e) => {
+                                    aerosync::core::progress::TransferStatus::Failed(e) => {
                                         Some(e.clone())
                                     }
                                     _ => None,

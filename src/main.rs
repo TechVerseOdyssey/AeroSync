@@ -2,7 +2,7 @@ mod config;
 use config::AeroSyncConfig;
 use zeroize::Zeroizing;
 
-use aerosync_core::{
+use aerosync::core::{
     auth::{AuthConfig, AuthManager},
     discovery::AeroSyncMdns,
     preflight::preflight_check,
@@ -11,7 +11,7 @@ use aerosync_core::{
     transfer::{TransferConfig, TransferEngine, TransferTask},
     FileManager,
 };
-use aerosync_protocols::{http::HttpConfig, quic::QuicConfig, ratelimit::parse_limit, AutoAdapter};
+use aerosync::protocols::{http::HttpConfig, quic::QuicConfig, ratelimit::parse_limit, AutoAdapter};
 use clap::{Parser, Subcommand};
 use futures::stream::{self, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -628,12 +628,12 @@ async fn cmd_send(
                     pb.set_position(tp.bytes_transferred.min(tp.total_bytes));
                     if matches!(
                         tp.status,
-                        aerosync_core::progress::TransferStatus::Completed
+                        aerosync::core::progress::TransferStatus::Completed
                     ) {
                         pb.finish_with_message(format!("{} ✓", pb.message()));
                     } else if matches!(
                         tp.status,
-                        aerosync_core::progress::TransferStatus::Failed(_)
+                        aerosync::core::progress::TransferStatus::Failed(_)
                     ) {
                         pb.abandon_with_message(format!("{} ✗", pb.message()));
                     }
@@ -674,9 +674,9 @@ async fn cmd_send(
     if stats.failed_files > 0 {
         let transfers = m.get_active_transfers();
         for t in &transfers {
-            if let aerosync_core::progress::TransferStatus::Failed(ref err_msg) = t.status {
-                let fake_err = aerosync_core::AeroSyncError::Network(err_msg.clone());
-                if let Some(adv) = aerosync_core::error_advice::advice_for(&fake_err) {
+            if let aerosync::core::progress::TransferStatus::Failed(ref err_msg) = t.status {
+                let fake_err = aerosync::core::AeroSyncError::Network(err_msg.clone());
+                if let Some(adv) = aerosync::core::error_advice::advice_for(&fake_err) {
                     eprintln!("\n  {}", adv.summary);
                     eprintln!("  Suggestions:");
                     for (i, s) in adv.suggestions.iter().enumerate() {
@@ -975,8 +975,8 @@ async fn cmd_token(action: TokenAction) -> anyhow::Result<()> {
             println!("Expires: {} hours", hours);
 
             if save {
-                let store_path = aerosync_core::auth::TokenStore::default_path();
-                let store = aerosync_core::auth::TokenStore::new(&store_path);
+                let store_path = aerosync::core::auth::TokenStore::default_path();
+                let store = aerosync::core::auth::TokenStore::new(&store_path);
                 let expires_at = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -1009,8 +1009,8 @@ async fn cmd_token(action: TokenAction) -> anyhow::Result<()> {
         }
 
         TokenAction::List => {
-            let store_path = aerosync_core::auth::TokenStore::default_path();
-            let store = aerosync_core::auth::TokenStore::new(&store_path);
+            let store_path = aerosync::core::auth::TokenStore::default_path();
+            let store = aerosync::core::auth::TokenStore::new(&store_path);
             let tokens = store.list_all()?;
             if tokens.is_empty() {
                 println!("No saved tokens. Use: aerosync token generate --save");
@@ -1036,8 +1036,8 @@ async fn cmd_token(action: TokenAction) -> anyhow::Result<()> {
         }
 
         TokenAction::Revoke { token_prefix } => {
-            let store_path = aerosync_core::auth::TokenStore::default_path();
-            let store = aerosync_core::auth::TokenStore::new(&store_path);
+            let store_path = aerosync::core::auth::TokenStore::default_path();
+            let store = aerosync::core::auth::TokenStore::new(&store_path);
 
             // 先按前缀查找
             if let Some(found) = store.find_by_prefix(&token_prefix)? {
@@ -1100,7 +1100,7 @@ async fn cmd_history(
     received: bool,
     success_only: bool,
 ) -> anyhow::Result<()> {
-    use aerosync_core::{HistoryQuery, HistoryStore};
+    use aerosync::core::{HistoryQuery, HistoryStore};
 
     let store_path = HistoryStore::default_path();
     if !store_path.exists() {

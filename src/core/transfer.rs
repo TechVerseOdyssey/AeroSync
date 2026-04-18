@@ -1,7 +1,7 @@
-use crate::audit::{AuditLogger, Direction};
-use crate::progress::TransferStatus;
-use crate::resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
-use crate::{AeroSyncError, ProgressMonitor, Result, TransferProgress};
+use crate::core::audit::{AuditLogger, Direction};
+use crate::core::progress::TransferStatus;
+use crate::core::resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
+use crate::core::{AeroSyncError, ProgressMonitor, Result, TransferProgress};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

@@ -16,19 +16,18 @@ The MSRV is **Rust 1.89**. CI verifies this on every PR.
 
 ## Project layout
 
-| Crate                | Purpose                                                  |
-| -------------------- | -------------------------------------------------------- |
-| `aerosync`           | The user-facing CLI binary.                              |
-| `aerosync-core`      | Transfer engine, resume store, mDNS discovery, receiver. |
-| `aerosync-protocols` | HTTP / QUIC / S3 / FTP transports + auto-negotiation.    |
-| `aerosync-mcp`       | MCP server exposing AeroSync as 8 tools for AI agents.   |
+| Crate          | Purpose                                                                                                                                                                                                                            |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `aerosync`     | Library + `aerosync` CLI binary. The library is split into two sub-modules: `aerosync::core` (transfer engine, resume store, mDNS, auth, file receiver) and `aerosync::protocols` (HTTP / QUIC / S3 / FTP + the auto-adapter).     |
+| `aerosync-mcp` | Thin binary wrapping the `aerosync` library and exposing it as an MCP server (8 tools) over stdio. Depends on `aerosync` only.                                                                                                     |
 
 ## Running the test suite
 
 ```bash
-cargo test --workspace --all-targets    # everything
-cargo test -p aerosync-core             # one crate
-cargo test -p aerosync-protocols --test pipeline   # one integration test
+cargo test --workspace --all-targets             # everything
+cargo test -p aerosync                           # the lib + CLI crate
+cargo test -p aerosync --test protocols_pipeline # one integration test
+cargo test -p aerosync-mcp                       # the MCP server crate
 ```
 
 There are 41+ tests in `aerosync-mcp` alone — please add coverage when

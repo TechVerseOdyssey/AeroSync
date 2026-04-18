@@ -12,7 +12,7 @@ pub use middleware::AuthMiddleware;
 pub use store::{StoredToken, TokenStore};
 pub use token::{TokenError, TokenInfo, TokenManager};
 
-use crate::error::Result;
+use crate::core::error::Result;
 
 /// 认证管理器
 ///
@@ -66,7 +66,7 @@ impl AuthManager {
         }
 
         let client_addr: std::net::IpAddr = client_ip.parse().map_err(|_| {
-            crate::error::AeroSyncError::Auth(format!("Invalid client IP: {}", client_ip))
+            crate::core::error::AeroSyncError::Auth(format!("Invalid client IP: {}", client_ip))
         })?;
 
         for cidr in &self.config.allowed_ips {

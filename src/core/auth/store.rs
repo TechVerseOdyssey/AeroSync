@@ -2,7 +2,7 @@
 ///
 /// 将生成的 Token 持久化到 `~/.config/aerosync/tokens.toml`，
 /// 支持跨进程复用 Token（接收端重启后无需重新生成）。
-use crate::error::{AeroSyncError, Result};
+use crate::core::error::{AeroSyncError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

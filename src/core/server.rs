@@ -1,8 +1,8 @@
-use crate::audit::{AuditLogger, Direction};
-use crate::auth::{AuthConfig, AuthManager, AuthMiddleware};
-use crate::discovery::{AeroSyncMdns, MdnsHandle};
-use crate::metrics::Metrics;
-use crate::routing::{Router, RouterConfig};
+use crate::core::audit::{AuditLogger, Direction};
+use crate::core::auth::{AuthConfig, AuthManager, AuthMiddleware};
+use crate::core::discovery::{AeroSyncMdns, MdnsHandle};
+use crate::core::metrics::Metrics;
+use crate::core::routing::{Router, RouterConfig};
 use crate::{AeroSyncError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1275,7 +1275,7 @@ async fn handle_batch_upload(
                 });
                 if let Some(ref al) = audit_logger {
                     al.log_completed(
-                        crate::audit::Direction::Receive,
+                        crate::core::audit::Direction::Receive,
                         "http",
                         &filename,
                         size,

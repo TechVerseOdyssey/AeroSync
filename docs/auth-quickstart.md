@@ -120,7 +120,7 @@ aerosync auth verify-token <TOKEN>
 ### Rust 代码
 
 ```rust
-use aerosync_core::auth::{AuthConfig, AuthManager};
+use aerosync::core::auth::{AuthConfig, AuthManager};
 
 // 创建认证管理器
 let config = AuthConfig::new()

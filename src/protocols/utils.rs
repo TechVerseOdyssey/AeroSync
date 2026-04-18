@@ -1,4 +1,4 @@
-use crate::traits::TransferProgress;
+use crate::protocols::traits::TransferProgress;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 

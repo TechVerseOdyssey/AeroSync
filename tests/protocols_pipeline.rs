@@ -5,8 +5,8 @@
 //! - 每个文件独立校验成功
 //! - 服务端 warp 接收并记录所有文件
 
-use aerosync_core::transfer::{TransferConfig, TransferEngine, TransferTask};
-use aerosync_protocols::{http::HttpConfig, quic::QuicConfig, AutoAdapter};
+use aerosync::core::transfer::{TransferConfig, TransferEngine, TransferTask};
+use aerosync::protocols::{http::HttpConfig, quic::QuicConfig, AutoAdapter};
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -243,7 +243,7 @@ async fn test_pipeline_mixed_file_sizes() {
 /// 验证 AutoAdapter 对连接失败返回 Network 错误（非 panic）
 #[tokio::test]
 async fn test_auto_adapter_connection_refused_returns_network_error() {
-    use aerosync_core::transfer::{ProtocolAdapter, TransferTask};
+    use aerosync::core::transfer::{ProtocolAdapter, TransferTask};
     use tempfile::tempdir;
 
     let dir = tempdir().unwrap();
@@ -266,7 +266,7 @@ async fn test_auto_adapter_connection_refused_returns_network_error() {
     let result = adapter.upload(&task, tx).await;
     assert!(result.is_err(), "should fail without server");
     match result {
-        Err(aerosync_core::AeroSyncError::Network(_)) => {}
+        Err(aerosync::core::AeroSyncError::Network(_)) => {}
         Err(e) => panic!("Wrong error type: {:?}", e),
         Ok(_) => panic!("Should not succeed"),
     }

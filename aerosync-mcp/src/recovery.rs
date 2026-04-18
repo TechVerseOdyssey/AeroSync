@@ -6,11 +6,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use aerosync_core::resume::{ResumeState, ResumeStore};
-use aerosync_core::transfer::{ProtocolAdapter, TransferTask};
-use aerosync_protocols::adapter::AutoAdapter;
-use aerosync_protocols::http::HttpConfig;
-use aerosync_protocols::quic::QuicConfig;
+use aerosync::core::resume::{ResumeState, ResumeStore};
+use aerosync::core::transfer::{ProtocolAdapter, TransferTask};
+use aerosync::protocols::adapter::AutoAdapter;
+use aerosync::protocols::http::HttpConfig;
+use aerosync::protocols::quic::QuicConfig;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 

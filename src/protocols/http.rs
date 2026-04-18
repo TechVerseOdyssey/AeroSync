@@ -1,9 +1,9 @@
-use crate::circuit_breaker::CircuitBreaker;
-use crate::ratelimit::RateLimiter;
-use crate::traits::{TransferProgress, TransferProtocol};
-use crate::utils::send_progress;
-use aerosync_core::resume::{ResumeState, ResumeStore};
-use aerosync_core::{AeroSyncError, Result, TransferTask};
+use crate::protocols::circuit_breaker::CircuitBreaker;
+use crate::protocols::ratelimit::RateLimiter;
+use crate::protocols::traits::{TransferProgress, TransferProtocol};
+use crate::protocols::utils::send_progress;
+use crate::core::resume::{ResumeState, ResumeStore};
+use crate::core::{AeroSyncError, Result, TransferTask};
 use async_trait::async_trait;
 use bytes::Bytes;
 use memmap2::MmapOptions;
@@ -775,7 +775,7 @@ impl TransferProtocol for HttpTransfer {
                 .map(|n| (0..(n as u32)).collect())
                 .unwrap_or_default();
 
-            let mut state = aerosync_core::resume::ResumeState::new(
+            let mut state = crate::core::resume::ResumeState::new(
                 task.id,
                 task.source_path.clone(),
                 task.destination.clone(),
@@ -1170,7 +1170,7 @@ mod tests {
         let result = HttpTransfer::new(config);
         assert!(result.is_err());
         match result {
-            Err(aerosync_core::AeroSyncError::InvalidConfig(msg)) => {
+            Err(crate::core::AeroSyncError::InvalidConfig(msg)) => {
                 assert!(msg.contains("Cannot read pinned cert"), "Got: {}", msg);
             }
             Err(e) => panic!("Wrong error type: {:?}", e),
@@ -1259,7 +1259,7 @@ mod tests {
             ..HttpConfig::default()
         };
         let ht = HttpTransfer::new(cfg).unwrap();
-        let mut state = aerosync_core::resume::ResumeState::new(
+        let mut state = crate::core::resume::ResumeState::new(
             uuid::Uuid::new_v4(),
             file_path.clone(),
             format!("http://{}", addr),
@@ -1301,7 +1301,7 @@ mod tests {
             ..HttpConfig::default()
         };
         let ht = HttpTransfer::new(cfg).unwrap();
-        let mut state = aerosync_core::resume::ResumeState::new(
+        let mut state = crate::core::resume::ResumeState::new(
             uuid::Uuid::new_v4(),
             file_path.clone(),
             format!("http://{}", addr),
@@ -1347,7 +1347,7 @@ mod tests {
             ..HttpConfig::default()
         };
         let ht = HttpTransfer::new(cfg).unwrap();
-        let mut state = aerosync_core::resume::ResumeState::new(
+        let mut state = crate::core::resume::ResumeState::new(
             uuid::Uuid::new_v4(),
             file_path.clone(),
             format!("http://{}", addr),
@@ -1489,7 +1489,7 @@ mod tests {
             ..HttpConfig::default()
         };
         let ht = HttpTransfer::new(cfg).unwrap();
-        let mut state = aerosync_core::resume::ResumeState::new(
+        let mut state = crate::core::resume::ResumeState::new(
             uuid::Uuid::new_v4(),
             file_path.clone(),
             format!("http://{}", addr),

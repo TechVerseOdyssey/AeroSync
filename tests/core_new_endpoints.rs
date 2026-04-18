@@ -4,7 +4,7 @@
 //! 2. POST /upload/batch — multipart batch, multi-file save, correct response shape
 //! 3. POST /upload Content-Length precheck — 413 on oversized Content-Length header
 
-use aerosync_core::server::{FileReceiver, ServerConfig};
+use aerosync::core::server::{FileReceiver, ServerConfig};
 use std::time::Duration;
 use tempfile::TempDir;
 
