@@ -22,7 +22,6 @@ The MSRV is **Rust 1.89**. CI verifies this on every PR.
 | `aerosync-core`      | Transfer engine, resume store, mDNS discovery, receiver. |
 | `aerosync-protocols` | HTTP / QUIC / S3 / FTP transports + auto-negotiation.    |
 | `aerosync-mcp`       | MCP server exposing AeroSync as 8 tools for AI agents.   |
-| `aerosync-ui`        | (Scaffold) GUI module — currently a placeholder.         |
 
 ## Running the test suite
 

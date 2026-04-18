@@ -22,8 +22,8 @@ name = "aerosync-mcp"
 path = "src/main.rs"
 
 [dependencies]
-aerosync-core = { path = "../aerosync-core" }
-aerosync-protocols = { path = "../aerosync-protocols" }
+aerosync-core = { workspace = true }
+aerosync-protocols = { workspace = true }
 rmcp = { version = "1.4.0", features = ["server", "macros", "transport-io"] }
 tokio = { workspace = true }
 serde = { workspace = true }

@@ -14,7 +14,7 @@ documentation.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-aerosync-core = { path = "../aerosync-core" }
+aerosync-core = { workspace = true }
 tokio = { workspace = true }
 quinn = { workspace = true }
 reqwest = { workspace = true }
