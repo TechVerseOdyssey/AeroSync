@@ -877,6 +877,9 @@ mod e2e {
     /// 这是 #[tool_router] 宏注册链路的核心契约。
     #[tokio::test]
     async fn test_e2e_lists_all_8_tools() {
+        // Historical name kept for git-blame continuity; the count
+        // is now 10 after RFC-002 §14 #10 added wait_receipt and
+        // cancel_receipt.
         let dir = tempdir().unwrap();
         let server = AeroSyncMcpServer::new().with_aerosync_dir(dir.path().to_path_buf());
         let (client, _h) = spawn_pair(server).await;
@@ -896,6 +899,8 @@ mod e2e {
             "list_history",
             "discover_receivers",
             "get_transfer_status",
+            "wait_receipt",
+            "cancel_receipt",
         ];
         for name in expected {
             assert!(
@@ -905,7 +910,12 @@ mod e2e {
                 names
             );
         }
-        assert_eq!(names.len(), 8, "只能有 8 个工具，实际：{:?}", names);
+        assert_eq!(
+            names.len(),
+            expected.len(),
+            "工具数量不匹配，实际：{:?}",
+            names
+        );
 
         client.cancel().await.unwrap();
     }

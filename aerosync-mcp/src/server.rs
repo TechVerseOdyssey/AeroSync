@@ -10,10 +10,12 @@ use aerosync::core::{
     auth::AuthConfig,
     discovery::AeroSyncMdns,
     history::HistoryQuery,
+    receipt::{Event as ReceiptEvent, State as ReceiptState},
+    receipt_registry::ReceiptRegistry,
     resume::ResumeStore,
     server::{FileReceiver, ServerConfig},
     transfer::{TransferConfig, TransferEngine, TransferTask},
-    FileManager, HistoryStore,
+    FileManager, HistoryStore, ReceiptSender,
 };
 use aerosync::protocols::{http::HttpConfig, quic::QuicConfig, AutoAdapter};
 use rmcp::{model::*, schemars, tool, tool_handler, tool_router, ServerHandler};
@@ -207,6 +209,32 @@ pub struct GetTransferStatusParams {
     pub mcp_auth_token: Option<String>,
 }
 
+/// Parameters for the `wait_receipt` MCP tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WaitReceiptParams {
+    /// Receipt id (UUID) returned by a previous `send_file` or via
+    /// `TransferEngine::send`.
+    pub receipt_id: String,
+    /// Maximum wait in milliseconds. Defaults to 30000 (30 s).
+    /// A value of 0 means "return immediately with the current state".
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, alias = "_auth_token")]
+    pub mcp_auth_token: Option<String>,
+}
+
+/// Parameters for the `cancel_receipt` MCP tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CancelReceiptParams {
+    /// Receipt id (UUID) of the in-flight transfer to cancel.
+    pub receipt_id: String,
+    /// Free-form reason recorded in the resulting Cancelled terminal.
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default, alias = "_auth_token")]
+    pub mcp_auth_token: Option<String>,
+}
+
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct NoParams {
     /// Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.
@@ -232,6 +260,12 @@ pub struct AeroSyncMcpServer {
     aerosync_dir: std::path::PathBuf,
     /// 运行时配置（超时、TTL 等）
     config: McpConfig,
+    /// RFC-002 §14 #10: sender-side receipt registry shared with the
+    /// MCP `wait_receipt` / `cancel_receipt` tools. The registry is
+    /// always created so the tools can be called even before any
+    /// receipt has been issued; tests and downstream callers can also
+    /// pre-populate it via [`Self::receipt_registry`].
+    receipt_registry: Arc<ReceiptRegistry<ReceiptSender>>,
 }
 
 impl Default for AeroSyncMcpServer {
@@ -258,7 +292,18 @@ impl AeroSyncMcpServer {
             secret,
             aerosync_dir,
             config: McpConfig::from_env(),
+            receipt_registry: Arc::new(ReceiptRegistry::new()),
         }
+    }
+
+    /// Borrow the shared sender-side [`ReceiptRegistry`]. MCP tools
+    /// `wait_receipt` and `cancel_receipt` resolve their `receipt_id`
+    /// argument against this registry. Downstream code wiring a
+    /// `TransferEngine` into the same process should clone this Arc
+    /// and pass it to [`TransferEngine::with_receipt_registry`] (TBD)
+    /// so issued receipts are visible to the MCP control surface.
+    pub fn receipt_registry(&self) -> Arc<ReceiptRegistry<ReceiptSender>> {
+        Arc::clone(&self.receipt_registry)
     }
 
     pub fn with_audit(mut self, logger: Arc<AuditLogger>) -> Self {
@@ -1129,6 +1174,204 @@ impl AeroSyncMcpServer {
             }
         }
     }
+
+    // ── RFC-002 §14 Task #10: receipt control surface ────────────────
+
+    /// Block until the named receipt reaches a terminal state, or
+    /// `timeout_ms` elapses. Returns the receipt's current state in
+    /// either case so callers can distinguish "timed out while still
+    /// in Processing" from "Acked".
+    #[tool(
+        description = "Block until the named receipt reaches a terminal (Acked / Nacked / Cancelled / Errored) state, or until timeout_ms elapses. Returns the receipt's current state under either outcome."
+    )]
+    pub async fn wait_receipt(
+        &self,
+        rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<WaitReceiptParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(audit) = &self.audit {
+            audit
+                .log_tool_call(
+                    "wait_receipt",
+                    &format!(
+                        "receipt_id={} timeout_ms={:?}",
+                        params.receipt_id, params.timeout_ms
+                    ),
+                )
+                .await;
+        }
+        if !self.check_auth(params.mcp_auth_token.as_deref()) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Unauthorized: invalid or missing mcp_auth_token"}).to_string()
+            )]));
+        }
+        let id = match Uuid::parse_str(&params.receipt_id) {
+            Ok(id) => id,
+            Err(_) => {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    json!({"success": false, "error": "Invalid receipt_id format"}).to_string(),
+                )]));
+            }
+        };
+
+        let Some(receipt) = self.receipt_registry.get(id) else {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Receipt not found"}).to_string(),
+            )]));
+        };
+
+        let timeout = Duration::from_millis(params.timeout_ms.unwrap_or(30_000));
+        let mut rx = receipt.watch();
+        let final_state = if timeout.is_zero() {
+            receipt.state()
+        } else {
+            tokio::select! {
+                _ = async {
+                    loop {
+                        if rx.borrow_and_update().is_terminal() {
+                            break;
+                        }
+                        if rx.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                } => receipt.state(),
+                _ = tokio::time::sleep(timeout) => receipt.state(),
+            }
+        };
+
+        let timed_out = !final_state.is_terminal();
+        Ok(CallToolResult::success(vec![Content::text(
+            json!({
+                "success": true,
+                "data": {
+                    "receipt_id": id.to_string(),
+                    "state": describe_receipt_state(&final_state),
+                    "terminal": final_state.is_terminal(),
+                    "timed_out": timed_out
+                }
+            })
+            .to_string(),
+        )]))
+    }
+
+    /// Sender-initiated cancel. Routes a `Cancel{reason}` event into
+    /// the receipt's state machine. Returns the resulting terminal
+    /// state (or an error if the receipt is unknown).
+    #[tool(
+        description = "Cancel an in-flight transfer by receipt id. Records a Cancelled terminal with the supplied reason. No-op (success) if the receipt is already terminal."
+    )]
+    pub async fn cancel_receipt(
+        &self,
+        rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<CancelReceiptParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(audit) = &self.audit {
+            audit
+                .log_tool_call(
+                    "cancel_receipt",
+                    &format!(
+                        "receipt_id={} reason={:?}",
+                        params.receipt_id, params.reason
+                    ),
+                )
+                .await;
+        }
+        if !self.check_auth(params.mcp_auth_token.as_deref()) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Unauthorized: invalid or missing mcp_auth_token"}).to_string()
+            )]));
+        }
+        let id = match Uuid::parse_str(&params.receipt_id) {
+            Ok(id) => id,
+            Err(_) => {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    json!({"success": false, "error": "Invalid receipt_id format"}).to_string(),
+                )]));
+            }
+        };
+        let Some(receipt) = self.receipt_registry.get(id) else {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Receipt not found"}).to_string(),
+            )]));
+        };
+
+        let reason = params
+            .reason
+            .unwrap_or_else(|| "cancelled via MCP cancel_receipt".to_string());
+
+        if receipt.state().is_terminal() {
+            // Idempotent: surface the existing terminal without
+            // attempting another transition.
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({
+                    "success": true,
+                    "data": {
+                        "receipt_id": id.to_string(),
+                        "state": describe_receipt_state(&receipt.state()),
+                        "already_terminal": true
+                    }
+                })
+                .to_string(),
+            )]));
+        }
+
+        match receipt.apply_event(ReceiptEvent::Cancel {
+            reason: reason.clone(),
+        }) {
+            Ok(_) => Ok(CallToolResult::success(vec![Content::text(
+                json!({
+                    "success": true,
+                    "data": {
+                        "receipt_id": id.to_string(),
+                        "state": describe_receipt_state(&receipt.state()),
+                        "already_terminal": false,
+                        "reason": reason
+                    }
+                })
+                .to_string(),
+            )])),
+            Err(e) => Ok(CallToolResult::success(vec![Content::text(
+                json!({
+                    "success": false,
+                    "error": format!("Cancel rejected: {e}"),
+                    "data": {
+                        "receipt_id": id.to_string(),
+                        "state": describe_receipt_state(&receipt.state())
+                    }
+                })
+                .to_string(),
+            )])),
+        }
+    }
+}
+
+/// Render a [`ReceiptState`] as a stable kebab-case label suitable
+/// for JSON emission. Mirrors the wire spelling used by
+/// [`aerosync::core::ReceiptStateLabel`] but flattens the terminal
+/// payloads into auxiliary fields when present.
+fn describe_receipt_state(state: &ReceiptState) -> serde_json::Value {
+    use aerosync::core::receipt::{CompletedTerminal, FailedTerminal};
+    match state {
+        ReceiptState::Initiated => json!({"label": "initiated"}),
+        ReceiptState::StreamOpened => json!({"label": "stream-opened"}),
+        ReceiptState::DataTransferred => json!({"label": "data-transferred"}),
+        ReceiptState::StreamClosed => json!({"label": "stream-closed"}),
+        ReceiptState::Processing => json!({"label": "processing"}),
+        ReceiptState::Completed(CompletedTerminal::Acked) => json!({"label": "acked"}),
+        ReceiptState::Failed(FailedTerminal::Nacked { reason }) => {
+            json!({"label": "nacked", "reason": reason})
+        }
+        ReceiptState::Failed(FailedTerminal::Cancelled { reason }) => {
+            json!({"label": "cancelled", "reason": reason})
+        }
+        ReceiptState::Failed(FailedTerminal::Errored { code, detail }) => {
+            json!({"label": "errored", "code": code, "detail": detail})
+        }
+        // `CompletedTerminal` and `FailedTerminal` are #[non_exhaustive];
+        // a wildcard arm keeps this match forward-compatible if RFC-002
+        // grows new terminal variants.
+        ReceiptState::Completed(_) => json!({"label": "completed-other"}),
+        ReceiptState::Failed(_) => json!({"label": "failed-other"}),
+    }
 }
 
 #[tool_handler(
@@ -1367,6 +1610,204 @@ mod tests {
         // QUIC 端口惯例为 HTTP 端口 + 1
         let expected = format!("quic://127.0.0.1:{}/upload", port + 1);
         assert_eq!(result, expected);
+    }
+
+    // ── RFC-002 §14 Task #10: wait_receipt / cancel_receipt ─────────
+
+    use aerosync::core::receipt::{Event, Receipt};
+    use aerosync::core::ReceiptSender;
+    use rmcp::handler::server::wrapper::Parameters;
+    use std::sync::Arc;
+
+    fn make_server() -> AeroSyncMcpServer {
+        AeroSyncMcpServer::new()
+    }
+
+    fn extract_text_payload(result: &CallToolResult) -> serde_json::Value {
+        // Normalise `Content::Text` → JSON for assertion ergonomics.
+        let raw = result
+            .content
+            .iter()
+            .find_map(|c| match &c.raw {
+                rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .expect("expected text content");
+        serde_json::from_str(&raw).expect("text content should be JSON")
+    }
+
+    #[tokio::test]
+    async fn test_wait_receipt_returns_terminal_state_immediately() {
+        let server = make_server();
+        let receipt: Arc<Receipt<ReceiptSender>> =
+            Arc::new(Receipt::<ReceiptSender>::new(Uuid::new_v4()));
+        let id = receipt.id();
+        // Drive to terminal before calling wait_receipt.
+        receipt
+            .apply_event(Event::Cancel {
+                reason: "test".into(),
+            })
+            .unwrap();
+        server.receipt_registry().insert(Arc::clone(&receipt));
+
+        let result = server
+            .wait_receipt(Parameters(WaitReceiptParams {
+                receipt_id: id.to_string(),
+                timeout_ms: Some(100),
+                mcp_auth_token: None,
+            }))
+            .await
+            .unwrap();
+        let payload = extract_text_payload(&result);
+        assert_eq!(payload["success"], serde_json::Value::Bool(true));
+        assert_eq!(payload["data"]["terminal"], serde_json::Value::Bool(true));
+        assert_eq!(payload["data"]["timed_out"], serde_json::Value::Bool(false));
+        assert_eq!(payload["data"]["state"]["label"], "cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_wait_receipt_times_out_when_non_terminal() {
+        let server = make_server();
+        let receipt: Arc<Receipt<ReceiptSender>> =
+            Arc::new(Receipt::<ReceiptSender>::new(Uuid::new_v4()));
+        let id = receipt.id();
+        server.receipt_registry().insert(Arc::clone(&receipt));
+
+        let result = server
+            .wait_receipt(Parameters(WaitReceiptParams {
+                receipt_id: id.to_string(),
+                timeout_ms: Some(50),
+                mcp_auth_token: None,
+            }))
+            .await
+            .unwrap();
+        let payload = extract_text_payload(&result);
+        assert_eq!(payload["data"]["terminal"], serde_json::Value::Bool(false));
+        assert_eq!(payload["data"]["timed_out"], serde_json::Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn test_wait_receipt_unknown_id_returns_error() {
+        let server = make_server();
+        let result = server
+            .wait_receipt(Parameters(WaitReceiptParams {
+                receipt_id: Uuid::new_v4().to_string(),
+                timeout_ms: Some(0),
+                mcp_auth_token: None,
+            }))
+            .await
+            .unwrap();
+        let payload = extract_text_payload(&result);
+        assert_eq!(payload["success"], serde_json::Value::Bool(false));
+        assert!(
+            payload["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Receipt not found"),
+            "got: {payload}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_receipt_transitions_state() {
+        let server = make_server();
+        let receipt: Arc<Receipt<ReceiptSender>> =
+            Arc::new(Receipt::<ReceiptSender>::new(Uuid::new_v4()));
+        let id = receipt.id();
+        server.receipt_registry().insert(Arc::clone(&receipt));
+
+        let result = server
+            .cancel_receipt(Parameters(CancelReceiptParams {
+                receipt_id: id.to_string(),
+                reason: Some("user abort".to_string()),
+                mcp_auth_token: None,
+            }))
+            .await
+            .unwrap();
+        let payload = extract_text_payload(&result);
+        assert_eq!(payload["success"], serde_json::Value::Bool(true));
+        assert_eq!(payload["data"]["state"]["label"], "cancelled");
+        assert_eq!(payload["data"]["state"]["reason"], "user abort");
+        assert_eq!(payload["data"]["already_terminal"], serde_json::Value::Bool(false));
+        assert!(receipt.state().is_terminal());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_receipt_not_found_returns_error() {
+        let server = make_server();
+        let result = server
+            .cancel_receipt(Parameters(CancelReceiptParams {
+                receipt_id: Uuid::new_v4().to_string(),
+                reason: None,
+                mcp_auth_token: None,
+            }))
+            .await
+            .unwrap();
+        let payload = extract_text_payload(&result);
+        assert_eq!(payload["success"], serde_json::Value::Bool(false));
+        assert!(payload["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_receipt_already_terminal_is_idempotent() {
+        let server = make_server();
+        let receipt: Arc<Receipt<ReceiptSender>> =
+            Arc::new(Receipt::<ReceiptSender>::new(Uuid::new_v4()));
+        let id = receipt.id();
+        receipt
+            .apply_event(Event::Cancel {
+                reason: "first".into(),
+            })
+            .unwrap();
+        server.receipt_registry().insert(Arc::clone(&receipt));
+
+        let result = server
+            .cancel_receipt(Parameters(CancelReceiptParams {
+                receipt_id: id.to_string(),
+                reason: Some("second".into()),
+                mcp_auth_token: None,
+            }))
+            .await
+            .unwrap();
+        let payload = extract_text_payload(&result);
+        assert_eq!(payload["success"], serde_json::Value::Bool(true));
+        assert_eq!(payload["data"]["already_terminal"], serde_json::Value::Bool(true));
+        // Reason from the FIRST cancel must still be in place.
+        assert_eq!(payload["data"]["state"]["reason"], "first");
+    }
+
+    #[tokio::test]
+    async fn test_wait_receipt_observes_terminal_within_timeout() {
+        let server = make_server();
+        let receipt: Arc<Receipt<ReceiptSender>> =
+            Arc::new(Receipt::<ReceiptSender>::new(Uuid::new_v4()));
+        let id = receipt.id();
+        server.receipt_registry().insert(Arc::clone(&receipt));
+
+        // Fire a terminal event 30ms in.
+        let r2 = Arc::clone(&receipt);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let _ = r2.apply_event(Event::Cancel {
+                reason: "delayed".into(),
+            });
+        });
+
+        let result = server
+            .wait_receipt(Parameters(WaitReceiptParams {
+                receipt_id: id.to_string(),
+                timeout_ms: Some(2000),
+                mcp_auth_token: None,
+            }))
+            .await
+            .unwrap();
+        let payload = extract_text_payload(&result);
+        assert_eq!(payload["data"]["terminal"], serde_json::Value::Bool(true));
+        assert_eq!(payload["data"]["timed_out"], serde_json::Value::Bool(false));
+        assert_eq!(payload["data"]["state"]["label"], "cancelled");
     }
 
     /// 普通 HTTP 服务器（无 x-aerosync 头）→ 不升级，返回 http://...//upload。
