@@ -119,7 +119,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["TechVerseOdyssey <tiancheng-liu@qq.com>"]
 license = "MIT"
@@ -130,8 +130,8 @@ rust-version = "1.89"
 
 [workspace.dependencies]
 # Inter-crate deps within this workspace.
-aerosync = { path = ".", version = "0.1.0" }
-aerosync-proto = { path = "aerosync-proto", version = "0.1.0" }
+aerosync = { path = ".", version = "0.2.0" }
+aerosync-proto = { path = "aerosync-proto", version = "0.2.0" }
 # Wire-protocol stack (RFC-002). prost / prost-build are pinned at the
 # workspace level so aerosync-proto and any future consumer (e.g. the
 # Python binding crate) reference the same versions.

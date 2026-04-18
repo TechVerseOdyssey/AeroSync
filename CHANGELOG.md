@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet — see the v0.2.0 section below.
 
-## [v0.2.0] - 2026-04-XX
+## [v0.2.0] - 2026-04-18
 
 > v0.2.0 turns AeroSync from a single-language CLI into a multi-tenant
 > file bus for AI agents: a first-class **Python SDK** on PyPI, a
