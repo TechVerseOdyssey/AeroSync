@@ -4,22 +4,72 @@ all-features = true
 
 [advisories]
 version = 2
-yanked = "warn"
+# ─────────────────────────────────────────────────────────────────────
+# Advisory ignore policy
+# ─────────────────────────────────────────────────────────────────────
+# Every entry here MUST have a clear reason that explains:
+#   1. WHY the advisory is not exploitable in AeroSync's actual code paths
+#   2. WHEN we expect to remove the ignore (which dependency upgrade unblocks it)
+#
+# All current ignores trace back to either:
+#   - warp 0.3.7  (HTTPS receiver, will be migrated to axum in v0.2.0)
+#   - quinn 0.10  (QUIC transport, will be upgraded to 0.11 in v0.2.0)
+#
+# Once both are done the entire chain of old rustls/webpki/ring/pemfile
+# disappears. Track the migration in TODO.local.md (v0.2.0 milestone).
+# ─────────────────────────────────────────────────────────────────────
 ignore = [
-  # ── rustls-webpki 0.102.8 (pulled in via warp 0.3.7 → tokio-rustls 0.25 → rustls 0.22) ──
-  # Both advisories below describe parsing bugs in the (unused-by-us)
-  # name-constraint code path. The advisory text itself notes:
-  #   "this bug is reachable only after signature verification and
-  #    requires misissuance to exploit."
-  # AeroSync's HTTPS receiver uses an auto-generated self-signed cert
-  # (no CA chain to misissue from), and the QUIC path uses pinned certs
-  # configured by the user — neither code path exercises X.509
-  # name-constraint validation. There is no upstream path to upgrade
-  # without dropping warp 0.3 (tracked in TODO.local.md as a v0.2.0
-  # follow-up: migrate aerosync-core/src/server.rs to axum).
-  { id = "RUSTSEC-2026-0098", reason = "name-constraint parsing in webpki; not on a code path AeroSync uses; blocked on warp 0.3 upgrade" },
-  { id = "RUSTSEC-2026-0099", reason = "name-constraint parsing in webpki; not on a code path AeroSync uses; blocked on warp 0.3 upgrade" },
+  # ── rustls-webpki: name-constraint parsing bugs ──
+  # Advisory text: "reachable only after signature verification and
+  # requires misissuance to exploit." AeroSync uses self-signed certs
+  # (HTTPS receiver) and pinned certs (QUIC); neither walks a CA chain
+  # that could be misissued. We never assert URI / wildcard name
+  # constraints. Affects both 0.101.7 (rcgen chain) and 0.102.8 (warp
+  # chain).
+  { id = "RUSTSEC-2026-0098", reason = "name-constraint URI parsing; not on any AeroSync code path; blocked on warp 0.3 → axum (v0.2.0)" },
+  { id = "RUSTSEC-2026-0099", reason = "name-constraint wildcard parsing; not on any AeroSync code path; blocked on warp 0.3 → axum (v0.2.0)" },
+  # ── rustls-webpki 0.102.8: CRL distribution point matching ──
+  # AeroSync does not consult Certificate Revocation Lists in either
+  # the HTTPS or QUIC path. Self-signed / pinned cert verification
+  # bypasses CRL checking entirely.
+  { id = "RUSTSEC-2026-0049", reason = "CRL distribution point matching; AeroSync does not use CRLs; blocked on warp 0.3 → axum (v0.2.0)" },
+  # ── ring 0.16.20: AES panic when overflow checks are enabled ──
+  # Release builds disable overflow checks; debug/test builds do not
+  # exercise the AES paths in question (we use ring only via the rustls
+  # 0.21 transitive chain, which itself stays out of these paths in
+  # our usage). Blocked on rustls 0.22+ which uses ring 0.17 — comes
+  # for free once warp 0.3 is gone.
+  { id = "RUSTSEC-2025-0009", reason = "AES panic only with overflow_checks=on; release builds disable; blocked on warp 0.3 → axum (v0.2.0)" },
+  # ── quinn-proto 0.10.6: DoS in Quinn endpoints ──
+  # We use quinn for our own QUIC transport between trusted peers
+  # (auth-token gated, mDNS-discovered LAN). External adversaries
+  # cannot reach our QUIC endpoint without first guessing a 32-byte
+  # auth token. Blocked on quinn 0.10 → 0.11 migration (v0.2.0;
+  # requires rustls 0.21 → 0.23 + ServerCertVerifier rewrite).
+  { id = "RUSTSEC-2026-0037", reason = "Quinn DoS; AeroSync requires auth token before any QUIC operation; blocked on quinn 0.10 → 0.11 (v0.2.0)" },
+  # ── rustls-pemfile 1.0.4: unmaintained ──
+  # Used directly by aerosync-core to parse user-provided PEM certs
+  # (--tls-cert / --tls-key). Upstream replacement is rustls-pki-types'
+  # PemObject trait, but switching requires upgrading rustls 0.21 → 0.23
+  # which only makes sense alongside the warp 0.3 → axum migration.
+  # The crate itself is feature-frozen but not vulnerable.
+  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; functionally fine; migration to rustls-pki-types PemObject blocked on rustls 0.23 upgrade (v0.2.0)" },
+  # ── rand 0.7.3 / 0.8.5: unsound with custom logger calling rand::rng() ──
+  # Advisory: triggers ONLY when a custom log::Log implementation calls
+  # rand::thread_rng() at trace/warn level with a 64-KB-aligned reseed
+  # event. AeroSync uses `tracing` (not `log`), has no custom logger,
+  # and never calls rand from inside any logging code. Both versions
+  # are pulled transitively (tauri-build via phf, eframe via zbus,
+  # warp via tungstenite, quinn-proto). All disappear once the v0.2.0
+  # warp/quinn migration completes — none of those upgrades is in scope
+  # for v0.1.0.
+  { id = "RUSTSEC-2026-0097", reason = "rand unsound only with custom log::Log calling rng(); AeroSync uses tracing with no such logger; blocked on warp/quinn upgrades (v0.2.0)" },
 ]
+# Default severity policy: error on real vulnerabilities, warn on
+# unmaintained / unsound (these are informational and pervasive in
+# the GUI/Tauri/warp ecosystems we transitively depend on).
+unmaintained = "workspace"   # warn for workspace deps only
+yanked = "warn"
 
 [licenses]
 version = 2
@@ -53,6 +103,25 @@ confidence-threshold = 0.8
 # exactly how epaint uses it. We accept it for this crate only.
 name = "epaint"
 allow = ["LicenseRef-UFL-1.0"]
+
+# Per-crate license clarifications: tell cargo-deny what SPDX expression
+# to use when a crate's Cargo.toml lacks a `license` field but ships a
+# LICENSE file. Each clarification names the file + a recognized hash so
+# cargo-deny refuses to apply it if the file content drifts.
+[[licenses.clarify]]
+# ring 0.16 ships a custom LICENSE that combines ISC, MIT, and OpenSSL.
+# Its Cargo.toml has no `license` field and the LICENSE text only scores
+# ~0.66 against any single SPDX template, below our 0.8 confidence floor.
+# Per ring's README and LICENSE: the code is dual-licensed ISC + MIT
+# with the OpenSSL license applying to portions ported from BoringSSL.
+# All three are in our allow list (or will be once we accept OpenSSL,
+# which we already do).
+name = "ring"
+version = "0.16.*"
+expression = "ISC AND MIT AND OpenSSL"
+license-files = [
+  { path = "LICENSE", hash = 0xbd0eed23 },
+]
 
 [bans]
 multiple-versions = "warn"

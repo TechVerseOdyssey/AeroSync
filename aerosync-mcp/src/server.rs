@@ -100,8 +100,11 @@ fn parse_secs_env(name: &str) -> Option<u64> {
 
 /// 清理超过 `ttl` 未更新的任务条目（内存 registry）
 fn evict_expired(registry: &mut HashMap<Uuid, TaskEntry>, ttl: Duration) {
-    let cutoff = Instant::now() - ttl;
-    registry.retain(|_, entry| entry.last_updated > cutoff);
+    // 通过比较"年龄"而非计算 cutoff = now - ttl，避免在 Windows 上
+    // 进程刚启动时 Instant::now() 小于 ttl 导致的 Instant - Duration 下溢 panic。
+    // saturating_duration_since 同时兜底潜在的时钟跳变。
+    let now = Instant::now();
+    registry.retain(|_, entry| now.saturating_duration_since(entry.last_updated) < ttl);
 }
 
 // ─────────────────────── 工具参数结构体 ────────────────────────────────────

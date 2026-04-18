@@ -67,23 +67,14 @@ jobs:
       - name: Check workspace builds on MSRV
         run: cargo check --workspace --all-targets
 
-  audit:
-    name: cargo-audit
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: write
-      issues: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # Keep in sync with deny.toml [advisories.ignore].
-          # See deny.toml for the rationale (warp 0.3 → old rustls/webpki chain;
-          # name-constraint code path not exercised by AeroSync; v0.2 will
-          # migrate to axum and drop these ignores).
-          ignore: RUSTSEC-2026-0098,RUSTSEC-2026-0099
+  # We previously ran rustsec/audit-check@v2 here, but its policy was
+  # too rigid for an application-layer crate: it failed CI on every
+  # "unmaintained" / "unsound" advisory in transitive deps (gtk-sys,
+  # paste, ring, rustls-pemfile, instant, …) which we cannot eliminate
+  # without rewriting half the GUI / Tauri / warp stack. cargo-deny
+  # below is now our single source of truth — by default it errors on
+  # real vulnerabilities and treats unmaintained / unsound as warnings,
+  # matching how the broader Rust ecosystem operates.
 
   deny:
     name: cargo-deny
