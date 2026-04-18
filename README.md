@@ -46,13 +46,13 @@ cargo build --release
 # binaries: target/release/aerosync, target/release/aerosync-mcp
 ```
 
-### One-line install (macOS / Linux)
+### One-line install (macOS / Linux, x86_64 + arm64)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/TechVerseOdyssey/AeroSync/master/install.sh | bash
 ```
 
-> Other channels (Homebrew, Cargo, prebuilt GitHub Releases, npm wrapper) are tracked in [`docs/install.md`](docs/install.md).
+The script verifies SHA-256, installs into `~/.local/bin` (no sudo) and prints next steps. Other channels — **Homebrew**, **`cargo install`**, **prebuilt archives** — are documented in [`docs/install.md`](docs/install.md).
 
 ## Quick start
 
