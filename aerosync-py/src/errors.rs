@@ -10,6 +10,7 @@
 //! call below with a registry of `PyType` handles cached at module
 //! init time.
 
+use aerosync::core::metadata::MetadataError;
 use aerosync::core::AeroSyncError;
 use pyo3::exceptions::{
     PyConnectionError, PyOSError, PyRuntimeError, PyTimeoutError, PyValueError,
@@ -50,6 +51,13 @@ pub fn anyhow_to_py(err: anyhow::Error) -> PyErr {
 /// so callers can `except TimeoutError` consistently.
 pub fn timeout_to_py(_err: tokio::time::error::Elapsed) -> PyErr {
     PyTimeoutError::new_err("operation timed out")
+}
+
+/// Map a [`MetadataError`] (RFC-003 §6 builder validation) into a
+/// Python `ValueError`. w6 task #10 will graduate this to a typed
+/// `MetadataError` exception subclass.
+pub fn metadata_err_to_py(err: MetadataError) -> PyErr {
+    PyValueError::new_err(err.to_string())
 }
 
 #[cfg(test)]

@@ -23,13 +23,14 @@ from aerosync._native import (
     receiver,
     version,
 )
-from aerosync._types import HistoryEntry, Lifecycle, Peer, Progress
+from aerosync._types import HistoryEntry, Lifecycle, Outcome, Peer, Progress
 
 __all__ = [
     "Client",
     "HistoryEntry",
     "IncomingFile",
     "Lifecycle",
+    "Outcome",
     "Peer",
     "Progress",
     "Receipt",

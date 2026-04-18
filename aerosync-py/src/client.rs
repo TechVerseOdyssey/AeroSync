@@ -1,16 +1,19 @@
 //! `Client` — outbound transfer handle.
 //!
-//! Group B implements `Client.send` and `Client.send_directory` per
-//! RFC-001 §5.2 + tasks #3, #4. Optional args (`metadata`,
-//! `on_progress`, `Config`, bytes / `BinaryIO` sources) are
-//! explicitly deferred — they belong to w6 tasks #11, #12, #13, #16.
+//! Implements RFC-001 §5.2 `Client.send` / `Client.send_directory` /
+//! `Client.history` plus w6's metadata pass-through (#16).
 
-use crate::errors::{engine_err_to_py, timeout_to_py};
+use crate::errors::{engine_err_to_py, metadata_err_to_py, timeout_to_py};
+use crate::receipt::PyReceipt;
 use crate::runtime::future_into_py;
+use aerosync::core::history::HistoryStore;
+use aerosync::core::metadata::MetadataBuilder;
 use aerosync::core::transfer::{TransferConfig, TransferEngine, TransferTask};
+use aerosync_proto::Lifecycle;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyType;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -29,6 +32,63 @@ impl PyClient {
             engine: Arc::new(TransferEngine::new(TransferConfig::default())),
         }
     }
+}
+
+/// Translate the user-facing `metadata={...}` dict into a sealed
+/// `aerosync_proto::Metadata`. Well-known keys are routed to the
+/// typed `MetadataBuilder` setters per RFC-003 §5; everything else
+/// lands in `user_metadata`.
+///
+/// Recognised well-known keys (lowercase, snake_case):
+/// - `trace_id` / `conversation_id` / `correlation_id` → string
+/// - `lifecycle` → one of `unspecified` / `transient` / `durable` /
+///   `ephemeral` (case-insensitive); unknown values raise `ValueError`
+/// - any other key → `user_metadata[k] = v`
+///
+/// The Python contract is "metadata is a `Mapping[str, str]`"; we
+/// preserve that for `user_metadata` keys but transparently lift the
+/// well-known shortcuts. RFC-001 §5.2 documents this.
+pub(crate) fn build_metadata(
+    user_supplied: HashMap<String, String>,
+) -> PyResult<aerosync_proto::Metadata> {
+    let mut b = MetadataBuilder::new();
+    for (k, v) in user_supplied {
+        match k.as_str() {
+            "trace_id" => {
+                b = b.trace_id(v);
+            }
+            "conversation_id" => {
+                b = b.conversation_id(v);
+            }
+            "correlation_id" => {
+                b = b.correlation_id(v);
+            }
+            "lifecycle" => {
+                let lc = match v.to_ascii_lowercase().as_str() {
+                    "unspecified" => Lifecycle::Unspecified,
+                    "transient" => Lifecycle::Transient,
+                    "durable" => Lifecycle::Durable,
+                    "ephemeral" => Lifecycle::Ephemeral,
+                    other => {
+                        return Err(PyValueError::new_err(format!(
+                            "metadata['lifecycle']: unknown value {other:?} \
+                             (expected one of unspecified, transient, durable, ephemeral)"
+                        )))
+                    }
+                };
+                b = b.lifecycle(lc);
+            }
+            // parent_file_ids would arrive as a comma-separated list
+            // in the dict-shaped API; we deliberately do NOT split
+            // here to keep the contract honest. Users who need
+            // lineage call MetadataBuilder directly via a future
+            // higher-level helper.
+            _ => {
+                b = b.user(k, v);
+            }
+        }
+    }
+    b.build().map_err(metadata_err_to_py)
 }
 
 #[pymethods]
@@ -53,80 +113,85 @@ impl PyClient {
         future_into_py(py, async move { Ok(false) })
     }
 
-    /// `await client.send(source, to=..., chunk_size=..., timeout=...)`.
+    /// `await client.send(source, *, to, metadata=None, chunk_size=None, timeout=None)`.
     ///
-    /// Group B implementation per RFC-001 task #3:
+    /// Per RFC-001 §5.2. `metadata` is a `dict[str, str]`; well-known
+    /// keys (`trace_id`, `conversation_id`, `correlation_id`,
+    /// `lifecycle`) are lifted to the typed `Metadata` fields, every
+    /// other key goes into `user_metadata`.
     ///
-    /// - `source` is a path-only `PathBuf` for w5; bytes / `BinaryIO`
-    ///   sources land in w6 task #12.
-    /// - `to` is forwarded verbatim to the auto-adapter; the engine
-    ///   handles peer-name vs URL parsing.
-    /// - `chunk_size` is plumbed via per-call `TransferConfig` override
-    ///   only when set; defaults to the engine's adaptive choice.
-    /// - `timeout` (seconds, optional) wraps the await in
-    ///   `tokio::time::timeout`; on expiry a Python `TimeoutError`
-    ///   is raised.
-    /// - `metadata=` and `on_progress=` are NOT in this signature —
-    ///   they are w6 tasks #16 and #13 respectively.
+    /// `chunk_size` is plumbed via per-call `TransferConfig`
+    /// override only when set; defaults to the engine's adaptive
+    /// choice. `timeout` (seconds, optional) wraps the await in
+    /// `tokio::time::timeout` and raises `TimeoutError` on expiry.
     ///
-    /// Returns a placeholder [`PyReceipt`] carrying only the receipt
-    /// id; the full state machine (`await sent/received/processed`)
-    /// arrives with w6 task #14.
-    #[pyo3(signature = (source, *, to, chunk_size=None, timeout=None))]
+    /// `on_progress=` and bytes/BinaryIO sources are w6 tasks #13
+    /// and #12 respectively (Group C in the w6 plan).
+    #[pyo3(signature = (source, *, to, metadata=None, chunk_size=None, timeout=None))]
     fn send<'py>(
         &self,
         py: Python<'py>,
         source: PathBuf,
         to: String,
+        metadata: Option<HashMap<String, String>>,
         chunk_size: Option<usize>,
         timeout: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let engine = Arc::clone(&self.engine);
+        let meta = match metadata {
+            Some(m) if !m.is_empty() => Some(build_metadata(m)?),
+            _ => None,
+        };
         future_into_py(py, async move {
             let task = build_upload_task(source, to, chunk_size).map_err(PyValueError::new_err)?;
-            let receipt = match timeout {
-                Some(secs) => {
+            let receipt = match (timeout, meta) {
+                (Some(secs), m) => {
                     if !secs.is_finite() || secs <= 0.0 {
                         return Err(PyValueError::new_err(
                             "timeout must be a finite positive number of seconds",
                         ));
                     }
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs_f64(secs),
-                        engine.send(task),
-                    )
-                    .await
-                    .map_err(timeout_to_py)?
-                    .map_err(engine_err_to_py)?
+                    let dur = std::time::Duration::from_secs_f64(secs);
+                    let fut = match m {
+                        Some(envelope) => {
+                            futures::future::Either::Left(engine.send_with_metadata(task, envelope))
+                        }
+                        None => futures::future::Either::Right(engine.send(task)),
+                    };
+                    tokio::time::timeout(dur, fut)
+                        .await
+                        .map_err(timeout_to_py)?
+                        .map_err(engine_err_to_py)?
                 }
-                None => engine.send(task).await.map_err(engine_err_to_py)?,
+                (None, Some(envelope)) => engine
+                    .send_with_metadata(task, envelope)
+                    .await
+                    .map_err(engine_err_to_py)?,
+                (None, None) => engine.send(task).await.map_err(engine_err_to_py)?,
             };
-            Ok(PyReceipt {
-                id: receipt.id().to_string(),
-            })
+            Ok(PyReceipt::from_arc(receipt))
         })
     }
 
-    /// `await client.send_directory(source, to=...)`.
+    /// `await client.send_directory(source, *, to, metadata=None)`.
     ///
-    /// Group B implementation per RFC-001 task #4: walks `source`
-    /// non-recursively, sends each regular file via the auto-adapter,
-    /// and returns a single placeholder [`PyReceipt`] keyed by the
-    /// last receipt issued. This matches the convention of the
-    /// existing MCP `send_directory` tool.
-    ///
-    /// Recursive walking, per-file metadata, and a richer
-    /// "directory receipt" type are deliberate w6 follow-ups so the
-    /// killer demo's basic shape can compile against this signature
-    /// today.
-    #[pyo3(signature = (source, *, to))]
+    /// Walks `source` non-recursively, sends each regular file via
+    /// the auto-adapter, and returns a single `Receipt` keyed by the
+    /// last receipt issued. Recursive walking and a richer
+    /// "directory receipt" type are deferred follow-ups.
+    #[pyo3(signature = (source, *, to, metadata=None))]
     fn send_directory<'py>(
         &self,
         py: Python<'py>,
         source: PathBuf,
         to: String,
+        metadata: Option<HashMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let engine = Arc::clone(&self.engine);
+        let meta = match metadata {
+            Some(m) if !m.is_empty() => Some(build_metadata(m)?),
+            _ => None,
+        };
         future_into_py(py, async move {
             if !source.is_dir() {
                 return Err(PyValueError::new_err(format!(
@@ -137,7 +202,9 @@ impl PyClient {
             let mut entries = tokio::fs::read_dir(&source)
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("read_dir: {e}")))?;
-            let mut last_id: Option<String> = None;
+            let mut last: Option<
+                Arc<aerosync::core::receipt::Receipt<aerosync::core::receipt::Sender>>,
+            > = None;
             let mut count: usize = 0;
             while let Some(entry) = entries
                 .next_entry()
@@ -150,18 +217,71 @@ impl PyClient {
                 }
                 let task =
                     build_upload_task(path, to.clone(), None).map_err(PyValueError::new_err)?;
-                let receipt = engine.send(task).await.map_err(engine_err_to_py)?;
-                last_id = Some(receipt.id().to_string());
+                let receipt = match meta.clone() {
+                    Some(envelope) => engine
+                        .send_with_metadata(task, envelope)
+                        .await
+                        .map_err(engine_err_to_py)?,
+                    None => engine.send(task).await.map_err(engine_err_to_py)?,
+                };
+                last = Some(receipt);
                 count += 1;
             }
-            let id = last_id.ok_or_else(|| {
+            let receipt = last.ok_or_else(|| {
                 PyValueError::new_err(format!(
                     "send_directory: {} contained no regular files",
                     source.display()
                 ))
             })?;
-            tracing::info!(file_count = count, last_receipt = %id, "send_directory done");
-            Ok(PyReceipt { id })
+            tracing::info!(file_count = count, last_receipt = %receipt.id(), "send_directory done");
+            Ok(PyReceipt::from_arc(receipt))
+        })
+    }
+
+    /// `await client.history(*, limit=100, direction="all", metadata_filter=None)`.
+    ///
+    /// Returns a list of [`crate::records::PyHistoryEntry`] keyed by
+    /// `~/.config/aerosync/history.jsonl` (the engine's default
+    /// `HistoryStore::default_path()`). `metadata_filter` is the
+    /// RFC-003 §8 facility — every `(k, v)` pair must appear in the
+    /// entry's `metadata.user_metadata` for it to match.
+    ///
+    /// History reads do NOT depend on the running engine state; they
+    /// open a fresh `HistoryStore` keyed by the default path. Users
+    /// who want a different path will route through `Config` once
+    /// w6 task #11 lands.
+    #[pyo3(signature = (*, limit=100, direction="all", metadata_filter=None, history_path=None))]
+    fn history<'py>(
+        &self,
+        py: Python<'py>,
+        limit: usize,
+        direction: &str,
+        metadata_filter: Option<HashMap<String, String>>,
+        history_path: Option<PathBuf>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let dir = match direction {
+            "all" => None,
+            "sent" => Some("send".to_string()),
+            "received" => Some("receive".to_string()),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "direction must be 'sent' / 'received' / 'all', got {other:?}"
+                )))
+            }
+        };
+        let path = history_path.unwrap_or_else(HistoryStore::default_path);
+        future_into_py(py, async move {
+            let store = HistoryStore::new(&path).await.map_err(engine_err_to_py)?;
+            let q = aerosync::core::history::HistoryQuery {
+                direction: dir,
+                limit,
+                metadata_eq: metadata_filter.unwrap_or_default(),
+                ..Default::default()
+            };
+            let rows = store.query(&q).await.map_err(engine_err_to_py)?;
+            let py_rows: Vec<crate::records::PyHistoryEntry> =
+                rows.into_iter().map(Into::into).collect();
+            Ok(py_rows)
         })
     }
 }
@@ -172,11 +292,6 @@ impl PyClient {
 /// destination string is forwarded verbatim — RFC-001 keeps URL /
 /// peer-name parsing inside the engine so binding code does not have
 /// to keep up with `AutoAdapter`'s protocol probes.
-///
-/// `chunk_size` is accepted but currently unused: the engine reads
-/// chunk size from `TransferConfig` rather than from per-task
-/// overrides. Wiring a per-call override is a w6 follow-up alongside
-/// the `Config` plumbing (task #11).
 fn build_upload_task(
     source: PathBuf,
     destination: String,
@@ -190,33 +305,6 @@ fn build_upload_task(
     Ok(TransferTask::new_upload(source, destination, meta.len()))
 }
 
-/// w5 placeholder Receipt. Group A introduces only the type so the
-/// module can register it; the real `await sent/received/processed`
-/// API and the wiring into [`aerosync::core::receipt::Receipt`] land
-/// in w6 task #14.
-#[pyclass(module = "aerosync._native", name = "Receipt")]
-pub struct PyReceipt {
-    pub(crate) id: String,
-}
-
-#[pymethods]
-impl PyReceipt {
-    #[getter]
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    /// Placeholder `await receipt.processed()` — resolves immediately.
-    /// w6 task #14 replaces this with a wait-for-terminal future.
-    fn processed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        future_into_py(py, async { Ok(()) })
-    }
-
-    fn __repr__(&self) -> String {
-        format!("Receipt(id={:?})", self.id)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,9 +313,6 @@ mod tests {
 
     #[test]
     fn shared_runtime_acquire_is_idempotent() {
-        // Acquiring the runtime twice must not panic; a regression
-        // here would surface as `pyo3-async-runtimes` "runtime
-        // already registered" panic on the second call.
         let a = shared_tokio();
         let b = shared_tokio();
         assert!(Arc::ptr_eq(&a, &b));
@@ -236,8 +321,6 @@ mod tests {
     #[test]
     fn client_default_is_constructible_without_python() {
         let c = PyClient::new_default();
-        // Cheap engine field touch to ensure no GIL / interpreter
-        // assumptions sneak into PyClient::new_default.
         assert!(Arc::strong_count(&c.engine) >= 1);
     }
 
@@ -266,8 +349,6 @@ mod tests {
         let task = build_upload_task(f.path().to_path_buf(), "alice".into(), None).unwrap();
         assert_eq!(task.file_size, 11);
         assert!(task.is_upload);
-        // Destination is forwarded verbatim — no peer-name vs URL
-        // pre-parsing in the binding layer.
         assert_eq!(task.destination, "alice");
     }
 
@@ -277,5 +358,44 @@ mod tests {
         let path = f.path().to_path_buf();
         let task = build_upload_task(path.clone(), "bob".into(), Some(1024)).unwrap();
         assert_eq!(task.source_path, path);
+    }
+
+    #[test]
+    fn build_metadata_routes_well_known_fields() {
+        let mut input = HashMap::new();
+        input.insert("trace_id".to_string(), "run-7".to_string());
+        input.insert("tenant".to_string(), "acme".to_string());
+        let m = build_metadata(input).unwrap();
+        assert_eq!(m.trace_id.as_deref(), Some("run-7"));
+        assert_eq!(
+            m.user_metadata.get("tenant").map(|s| s.as_str()),
+            Some("acme")
+        );
+        assert!(!m.user_metadata.contains_key("trace_id"));
+    }
+
+    #[test]
+    fn build_metadata_lifecycle_string_parses() {
+        let mut input = HashMap::new();
+        input.insert("lifecycle".to_string(), "transient".to_string());
+        let m = build_metadata(input).unwrap();
+        assert_eq!(m.lifecycle, Some(Lifecycle::Transient as i32));
+    }
+
+    #[test]
+    fn build_metadata_invalid_lifecycle_rejected() {
+        let mut input = HashMap::new();
+        input.insert("lifecycle".to_string(), "permanent".to_string());
+        let err = build_metadata(input).unwrap_err();
+        assert!(err.to_string().contains("lifecycle"));
+    }
+
+    #[test]
+    fn build_metadata_oversize_user_value_rejected() {
+        let mut input = HashMap::new();
+        input.insert("k".into(), "x".repeat(20_000));
+        let err = build_metadata(input).unwrap_err();
+        // metadata_err_to_py maps to ValueError until #10 lands.
+        assert!(err.to_string().contains("user_metadata"));
     }
 }

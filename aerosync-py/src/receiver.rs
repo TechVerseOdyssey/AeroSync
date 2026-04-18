@@ -1,34 +1,39 @@
-//! `Receiver` + `IncomingFile` (RFC-001 §5.3, §5.6 — tasks #5, #6).
+//! `Receiver` + `IncomingFile` (RFC-001 §5.3, §5.6 — tasks #5, #6, #15).
 //!
-//! Group C wires the async iterator on top of `FileReceiver`'s
-//! `WsBroadcast` channel. Iteration semantics:
+//! The receiver iterator is wired on top of `FileReceiver`'s
+//! `WsBroadcast`. When a `Completed` event lands we yield a
+//! [`PyIncomingFile`] carrying:
 //!
-//! 1. `__aenter__` subscribes to the broadcast BEFORE calling
-//!    `start()` so we never miss a `Completed` event from a transfer
-//!    that races the subscription.
-//! 2. `__aiter__` returns `self`; the iterator is single-consumer
-//!    (one async-for loop per receiver). Multi-consumer fan-out is
-//!    intentionally out of scope for v0.2 — users wire their own
-//!    asyncio queues if they need it.
-//! 3. `__anext__` first drains any backlog (received_files whose
-//!    index ≥ our `yielded` cursor), then awaits the next
-//!    `WsEvent::Completed` and re-checks. Non-Completed events
-//!    (`Started`, `Progress`, `Failed`) are ignored — `Failed`
-//!    surfaces via the receipt machinery in w6 task #14, not via
-//!    iteration.
-//! 4. When the broadcast channel closes (receiver shutdown), we
-//!    raise `StopAsyncIteration`. A `Lagged` is treated as a
-//!    spurious wakeup — the file backlog scan will pick up
-//!    anything we missed.
+//! - The on-disk path / filename / size / sha256 (from `ReceivedFile`).
+//! - A locally-constructed receiver-side
+//!   [`Receipt<RxSide>`](aerosync::core::receipt::Receipt) walked
+//!   through `Open → Close → Close → Process` so the user can call
+//!   `await incoming.ack()` immediately.
+//! - The receipt is also inserted into the `FileReceiver`'s
+//!   shared `receipts().receiver_receipts` registry, so an HTTP
+//!   client hitting `POST /v1/receipts/:id/ack` (RFC-002 §6.4)
+//!   would observe the same state machine.
 //!
-//! `IncomingFile.ack()` / `nack()` are **not** in this commit — they
-//! belong to RFC-002 receipts (w6 task #14/#15).
+//! # Linkage caveat (Group A scope)
+//!
+//! Today the receiver-side `Receipt` is *synthetic*: it is created
+//! inside this binding rather than driven by a wire-level
+//! receipt-stream from the sender (RFC-002 §6.2). This means
+//! `incoming.ack()` does NOT yet propagate back to the sender's
+//! `Receipt::processed()`. Wiring the QUIC receipt stream so that
+//! ack-on-receiver flips the sender's terminal state is an engine-
+//! side follow-up tracked outside this RFC. The Python API surface
+//! is what's stable here.
 
 use crate::errors::engine_err_to_py;
+use crate::receipt::state_label;
 use crate::runtime::future_into_py;
+use aerosync::core::receipt::{Event, Receipt, Receiver as RxSide};
 use aerosync::core::server::{FileReceiver, ServerConfig, WsEvent};
-use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration};
+use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -41,16 +46,8 @@ pub struct PyReceiver {
     pub(crate) inner: Arc<Mutex<FileReceiver>>,
     pub(crate) name: Option<String>,
     pub(crate) address: String,
-    /// Lazily-populated by `__aenter__`. Held in an Option so we can
-    /// distinguish "not yet entered" from "entered but channel closed"
-    /// during iteration.
     pub(crate) ws_rx: Arc<Mutex<Option<broadcast::Receiver<WsEvent>>>>,
-    /// Index into `FileReceiver::get_received_files()` — points at the
-    /// next file to yield. Bumped after each successful `__anext__`.
     pub(crate) yielded: Arc<AtomicUsize>,
-    /// True between `__aenter__` and `__aexit__`. Used to make
-    /// `__aexit__` idempotent on double-exit (which asyncio does not
-    /// itself promise but tests sometimes do).
     pub(crate) started: Arc<AtomicBool>,
 }
 
@@ -80,15 +77,12 @@ impl PyReceiver {
     }
 
     /// Async context manager entry — subscribes to the WS broadcast
-    /// then starts the underlying `FileReceiver` (which spawns
-    /// HTTP/HTTPS/QUIC listeners depending on the `ServerConfig`).
+    /// then starts the underlying `FileReceiver`.
     fn __aenter__<'py>(slf: Py<Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&slf.bind(py).borrow().inner);
         let ws_rx = Arc::clone(&slf.bind(py).borrow().ws_rx);
         let started = Arc::clone(&slf.bind(py).borrow().started);
         future_into_py(py, async move {
-            // Subscribe FIRST so we don't lose Completed events on
-            // ultra-fast localhost transfers.
             let rx = {
                 let guard = inner.lock().await;
                 guard.ws_sender().subscribe()
@@ -100,9 +94,6 @@ impl PyReceiver {
         })
     }
 
-    /// Async context manager exit — best-effort shutdown of the
-    /// underlying `FileReceiver`. Returns `False` so any in-flight
-    /// exception is NOT suppressed.
     #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
     fn __aexit__<'py>(
         &self,
@@ -134,19 +125,35 @@ impl PyReceiver {
         let yielded = Arc::clone(&slf.bind(py).borrow().yielded);
         future_into_py(py, async move {
             loop {
-                // 1) Drain backlog: if there are already files past
-                //    our cursor, hand the next one back immediately.
-                let files = inner.lock().await.get_received_files().await;
+                // 1) Drain backlog: hand back the next completed file.
+                let (files, registry) = {
+                    let guard = inner.lock().await;
+                    (
+                        guard.get_received_files().await,
+                        guard.receipts().receiver_receipts.clone(),
+                    )
+                };
                 let i = yielded.load(Ordering::SeqCst);
                 if i < files.len() {
                     let f = files[i].clone();
                     yielded.store(i + 1, Ordering::SeqCst);
+                    // Build a synthetic receiver-side receipt walked
+                    // to `Processing` so `await incoming.ack()` is
+                    // a one-line happy path. See module-level
+                    // "Linkage caveat".
+                    let rcpt: Arc<Receipt<RxSide>> = Arc::new(Receipt::new(f.id));
+                    let _ = rcpt.apply_event(Event::Open);
+                    let _ = rcpt.apply_event(Event::Close);
+                    let _ = rcpt.apply_event(Event::Close);
+                    let _ = rcpt.apply_event(Event::Process);
+                    registry.insert(Arc::clone(&rcpt));
                     return Ok(PyIncomingFile {
                         path: f.saved_path,
                         file_name: f.original_name,
                         size_bytes: f.size,
                         sha256: f.sha256,
-                        receipt_id: None,
+                        receipt: Some(rcpt),
+                        user_metadata: HashMap::new(),
                     });
                 }
 
@@ -170,9 +177,10 @@ impl PyReceiver {
 
 /// `IncomingFile` — receiver-side handle to a freshly-arrived file.
 ///
-/// Fields populated from `aerosync::core::server::ReceivedFile` at
-/// yield time. `ack()` / `nack()` are deliberately absent — they
-/// belong to RFC-002 receipts (w6 task #15).
+/// `ack()` / `nack()` operate on a locally-constructed
+/// receiver-side `Receipt` that the iterator pre-walked to
+/// `Processing`, so callers can call `await incoming.ack()` as the
+/// one-liner the killer demo expects.
 #[pyclass(
     module = "aerosync._native",
     name = "IncomingFile",
@@ -184,7 +192,8 @@ pub struct PyIncomingFile {
     pub(crate) file_name: String,
     pub(crate) size_bytes: u64,
     pub(crate) sha256: Option<String>,
-    pub(crate) receipt_id: Option<String>,
+    pub(crate) receipt: Option<Arc<Receipt<RxSide>>>,
+    pub(crate) user_metadata: HashMap<String, String>,
 }
 
 #[pymethods]
@@ -211,7 +220,74 @@ impl PyIncomingFile {
 
     #[getter]
     fn receipt_id(&self) -> Option<String> {
-        self.receipt_id.clone()
+        self.receipt.as_ref().map(|r| r.id().to_string())
+    }
+
+    /// Receiver-side receipt state as a string (mirrors
+    /// `Receipt.state` on the sender side). Returns `None` if no
+    /// receipt is attached (legacy code paths that don't go through
+    /// `__anext__`).
+    #[getter]
+    fn state(&self) -> Option<&'static str> {
+        self.receipt.as_ref().map(|r| state_label(&r.state()))
+    }
+
+    /// `await incoming.ack(metadata=None)` — applies `Event::Ack`.
+    /// `metadata` is accepted for forward compat with RFC-002 §6.4
+    /// but currently parsed and discarded (the receiver `Receipt`
+    /// does not yet carry an ack-time metadata payload — that lands
+    /// when the receipt-stream wire frame gains the optional
+    /// `Metadata` field).
+    #[pyo3(signature = (metadata = None))]
+    fn ack<'py>(
+        &self,
+        py: Python<'py>,
+        metadata: Option<HashMap<String, String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let receipt = self
+            .receipt
+            .clone()
+            .ok_or_else(|| PyRuntimeError::new_err("IncomingFile has no attached receipt"))?;
+        let _ = metadata; // accepted, currently no-op (see docstring)
+        future_into_py(py, async move {
+            receipt
+                .apply_event(Event::Ack)
+                .map_err(|e| PyValueError::new_err(format!("ack rejected: {e}")))?;
+            Ok(state_label(&receipt.state()))
+        })
+    }
+
+    /// `await incoming.nack(reason)` — applies `Event::Nack{reason}`.
+    fn nack<'py>(&self, py: Python<'py>, reason: String) -> PyResult<Bound<'py, PyAny>> {
+        let receipt = self
+            .receipt
+            .clone()
+            .ok_or_else(|| PyRuntimeError::new_err("IncomingFile has no attached receipt"))?;
+        future_into_py(py, async move {
+            receipt
+                .apply_event(Event::Nack { reason })
+                .map_err(|e| PyValueError::new_err(format!("nack rejected: {e}")))?;
+            Ok(state_label(&receipt.state()))
+        })
+    }
+
+    /// Receiver-side `user_metadata` dict.
+    ///
+    /// Currently always empty: the engine does not yet expose the
+    /// sender-supplied [`Metadata`](aerosync_proto::Metadata)
+    /// envelope on the `ReceivedFile` produced by `FileReceiver`.
+    /// Wiring this requires plumbing the `Metadata` from the
+    /// `TransferStart` frame into `ReceivedFile`, which is engine
+    /// work tracked outside RFC-001 §15. The accessor exists today
+    /// so user code can write the killer-demo shape and not break
+    /// when the propagation lands.
+    #[getter]
+    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        for (k, v) in &self.user_metadata {
+            d.set_item(k, v)?;
+        }
+        Ok(d)
     }
 
     fn __repr__(&self) -> String {
@@ -222,9 +298,36 @@ impl PyIncomingFile {
     }
 }
 
-/// Build a default `ServerConfig` rooted at `save_dir`. Helper used by
-/// the `aerosync.receiver()` factory; lifted out so the test suite can
-/// exercise the validation logic without spinning up a real receiver.
+/// Test-only helper: build a [`PyIncomingFile`] with an attached
+/// receiver-side receipt pre-walked to `Processing`. Used by pytest
+/// to exercise the `ack`/`nack`/`metadata` surface without spinning
+/// up a full receiver.
+#[pyfunction]
+#[pyo3(signature = (path, file_name, size_bytes=0, sha256=None, user_metadata=None))]
+pub fn _test_make_incoming_file(
+    path: PathBuf,
+    file_name: String,
+    size_bytes: u64,
+    sha256: Option<String>,
+    user_metadata: Option<HashMap<String, String>>,
+) -> PyIncomingFile {
+    let id = uuid::Uuid::new_v4();
+    let rcpt: Arc<Receipt<RxSide>> = Arc::new(Receipt::new(id));
+    let _ = rcpt.apply_event(Event::Open);
+    let _ = rcpt.apply_event(Event::Close);
+    let _ = rcpt.apply_event(Event::Close);
+    let _ = rcpt.apply_event(Event::Process);
+    PyIncomingFile {
+        path,
+        file_name,
+        size_bytes,
+        sha256,
+        receipt: Some(rcpt),
+        user_metadata: user_metadata.unwrap_or_default(),
+    }
+}
+
+/// Build a default `ServerConfig` rooted at `save_dir`.
 pub(crate) fn server_config_for(save_dir: Option<PathBuf>) -> ServerConfig {
     let mut cfg = ServerConfig::default();
     if let Some(dir) = save_dir {
@@ -257,7 +360,8 @@ mod tests {
             file_name: "x.bin".into(),
             size_bytes: 42,
             sha256: None,
-            receipt_id: None,
+            receipt: None,
+            user_metadata: HashMap::new(),
         };
         let r = f.__repr__();
         assert!(r.contains("x.bin"));
@@ -266,8 +370,6 @@ mod tests {
 
     #[test]
     fn receiver_address_round_trips_through_factory_state() {
-        // Factory builds a default ServerConfig; the listener is not
-        // started here — we just check the address-string assembly.
         let cfg = server_config_for(None);
         let recv = FileReceiver::new(cfg);
         let py = PyReceiver::new(recv, Some("alice".into()), "0.0.0.0:7788".into());
@@ -278,12 +380,6 @@ mod tests {
 
     #[tokio::test]
     async fn receiver_yields_files_in_arrival_order() {
-        // Simulate the engine pushing two ReceivedFiles directly via
-        // FileReceiver's get_received_files surface: we don't have a
-        // setter, so this test instead asserts the public field
-        // semantics — the iterator's "index cursor" advances on each
-        // yield. The full network round-trip lives in pytest
-        // (test_receiver.py) where we boot a real listener.
         let cfg = server_config_for(None);
         let recv = FileReceiver::new(cfg);
         let py = PyReceiver::new(recv, None, "127.0.0.1:0".into());

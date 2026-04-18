@@ -57,6 +57,27 @@ class Progress:
 
 
 @dataclass(frozen=True, slots=True)
+class Outcome:
+    """Terminal outcome returned by `await receipt.processed()`.
+
+    The Rust binding returns this as a plain ``dict`` (cheap & no
+    extra dataclass round-trip on the hot path); this dataclass is
+    the documented Python-side mirror so users who want a typed
+    handle can write ``Outcome(**outcome_dict)``.
+
+    `status` is one of ``"acked"``, ``"nacked"``, ``"cancelled"``,
+    ``"errored"``. `reason` carries the free-form string for nack /
+    cancel; `code` and `detail` carry the numeric + textual diagnostic
+    for the errored path.
+    """
+
+    status: str
+    reason: Optional[str] = None
+    code: Optional[int] = None
+    detail: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
 class HistoryEntry:
     """One row of the persisted transfer history.
 

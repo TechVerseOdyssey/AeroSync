@@ -36,11 +36,13 @@ use pyo3::prelude::*;
 
 pub mod client;
 pub mod errors;
+pub mod receipt;
 pub mod receiver;
 pub mod records;
 pub mod runtime;
 
-use client::{PyClient, PyReceipt};
+use client::PyClient;
+use receipt::{PyReceipt, PyReceiptWatcher};
 use receiver::{PyIncomingFile, PyReceiver};
 use records::{PyHistoryEntry, PyPeer, PyProgress};
 
@@ -142,9 +144,11 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(make_client, m)?)?;
     m.add_function(wrap_pyfunction!(make_receiver, m)?)?;
     m.add_function(wrap_pyfunction!(discover, m)?)?;
+    m.add_function(wrap_pyfunction!(receiver::_test_make_incoming_file, m)?)?;
 
     m.add_class::<PyClient>()?;
     m.add_class::<PyReceipt>()?;
+    m.add_class::<PyReceiptWatcher>()?;
     m.add_class::<PyReceiver>()?;
     m.add_class::<PyIncomingFile>()?;
     m.add_class::<PyPeer>()?;
