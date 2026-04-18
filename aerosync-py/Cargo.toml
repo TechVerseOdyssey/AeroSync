@@ -74,11 +74,13 @@ futures = { workspace = true }
 # compiles cleanly on rust-version = 1.89 and below.
 once_cell = "1"
 
+# RFC-001 §6.2 v0.2 contract: bytes/BinaryIO `source=` arguments are
+# staged to a NamedTempFile before being handed to the engine. Used at
+# runtime, not just in tests, so it lives in regular dependencies.
+tempfile = "3"
+
 [build-dependencies]
 # Re-uses pyo3's own Python probe so we can ask it for the libdir
 # during the build. Same major.minor as the runtime pyo3 dep so the
 # probe results are identical.
 pyo3-build-config = "0.28"
-
-[dev-dependencies]
-tempfile = "3"

@@ -5,17 +5,22 @@
 
 use crate::errors::{engine_err_to_py, metadata_err_to_py, timeout_to_py};
 use crate::receipt::PyReceipt;
+use crate::records::PyProgress;
 use crate::runtime::future_into_py;
 use aerosync::core::history::HistoryStore;
 use aerosync::core::metadata::MetadataBuilder;
+use aerosync::core::progress::TransferStatus;
+use aerosync::core::receipt::{Receipt, Sender};
 use aerosync::core::transfer::{TransferConfig, TransferEngine, TransferTask};
 use aerosync_proto::Lifecycle;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyType;
+use pyo3::types::{PyBytes, PyType};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tempfile::NamedTempFile;
+use uuid::Uuid;
 
 /// Outbound `Client`. Constructed via the `aerosync.client()` async
 /// factory which returns an async context manager.
@@ -32,6 +37,217 @@ impl PyClient {
             engine: Arc::new(TransferEngine::new(TransferConfig::default())),
         }
     }
+}
+
+/// Materialised source for a `Client.send` call.
+///
+/// `path` is always a real on-disk file; `_keepalive` carries an
+/// optional [`NamedTempFile`] that owns the staging file when the
+/// caller passed `bytes` / `BinaryIO`. Dropping `_keepalive` removes
+/// the staging file, so the client code spawns a tokio task tied to
+/// the receipt's terminal state to do that asynchronously.
+struct Staged {
+    path: PathBuf,
+    keepalive: Option<NamedTempFile>,
+}
+
+impl Staged {
+    /// Consume the staged source, returning the path and the optional
+    /// tempfile keep-alive separately. The keep-alive must outlive
+    /// the upload — the engine reads the file off-thread.
+    fn materialize(self) -> (PathBuf, Option<NamedTempFile>) {
+        (self.path, self.keepalive)
+    }
+}
+
+/// Inspect a Python `source=` argument and materialise it into a
+/// real on-disk path that the engine can read.
+///
+/// Recognised shapes (in order — first match wins):
+/// 1. `bytes` / `bytearray` — staged into a `NamedTempFile`.
+/// 2. anything implementing `read(size: int) -> bytes` (typed as
+///    `BinaryIO` in Python) — drained synchronously into a
+///    `NamedTempFile` (1 MiB chunks, GIL held throughout).
+/// 3. `os.PathLike` / `str` / `pathlib.Path` — extracted as
+///    `PathBuf` and used directly.
+///
+/// Anything else raises `TypeError` with a helpful diagnostic.
+///
+/// **GIL contract:** must be called while holding the GIL because
+/// it both reads Python attributes and (for option 2) calls back
+/// into Python. The returned [`Staged`] no longer touches Python.
+fn stage_source(_py: Python<'_>, source: &Bound<'_, PyAny>) -> PyResult<Staged> {
+    use pyo3::types::PyAnyMethods;
+    use std::io::Write;
+
+    // Option 1: bytes / bytearray.
+    if let Ok(buf) = source.cast::<PyBytes>() {
+        let bytes = buf.as_bytes();
+        let mut f = NamedTempFile::new()
+            .map_err(|e| PyRuntimeError::new_err(format!("staging tempfile: {e}")))?;
+        f.write_all(bytes)
+            .map_err(|e| PyRuntimeError::new_err(format!("write staging tempfile: {e}")))?;
+        f.flush()
+            .map_err(|e| PyRuntimeError::new_err(format!("flush staging tempfile: {e}")))?;
+        let path = f.path().to_path_buf();
+        return Ok(Staged {
+            path,
+            keepalive: Some(f),
+        });
+    }
+    if let Ok(buf) = source.extract::<Vec<u8>>() {
+        // bytearray and other byte-buffers fall through to here via
+        // PyO3's `Vec<u8>` extractor. We deliberately try this AFTER
+        // the PyBytes downcast so the common-case `bytes` argument
+        // takes the zero-copy path.
+        if source.hasattr("read")? {
+            // Don't accidentally swallow a BinaryIO whose `__iter__`
+            // happens to yield int — fall through to the read() path.
+        } else {
+            let mut f = NamedTempFile::new()
+                .map_err(|e| PyRuntimeError::new_err(format!("staging tempfile: {e}")))?;
+            f.write_all(&buf)
+                .map_err(|e| PyRuntimeError::new_err(format!("write staging tempfile: {e}")))?;
+            f.flush()
+                .map_err(|e| PyRuntimeError::new_err(format!("flush staging tempfile: {e}")))?;
+            let path = f.path().to_path_buf();
+            return Ok(Staged {
+                path,
+                keepalive: Some(f),
+            });
+        }
+    }
+
+    // Option 2: BinaryIO (anything with a callable `read`).
+    if source.hasattr("read")? {
+        let mut f = NamedTempFile::new()
+            .map_err(|e| PyRuntimeError::new_err(format!("staging tempfile: {e}")))?;
+        // 1 MiB read window. RFC-001 §6.2 explicitly accepts the
+        // GIL-held synchronous drain for v0.2; streaming bytes is a
+        // v0.3 enhancement (deferred follow-up).
+        const CHUNK: usize = 1024 * 1024;
+        loop {
+            let chunk_obj = source.call_method1("read", (CHUNK,))?;
+            let bytes_chunk: Vec<u8> = chunk_obj.extract().map_err(|_| {
+                PyTypeError::new_err("BinaryIO.read() must return `bytes` (got non-bytes object)")
+            })?;
+            if bytes_chunk.is_empty() {
+                break;
+            }
+            f.write_all(&bytes_chunk)
+                .map_err(|e| PyRuntimeError::new_err(format!("write staging tempfile: {e}")))?;
+        }
+        f.flush()
+            .map_err(|e| PyRuntimeError::new_err(format!("flush staging tempfile: {e}")))?;
+        let path = f.path().to_path_buf();
+        return Ok(Staged {
+            path,
+            keepalive: Some(f),
+        });
+    }
+
+    // Option 3: path-like.
+    if let Ok(path) = source.extract::<PathBuf>() {
+        return Ok(Staged {
+            path,
+            keepalive: None,
+        });
+    }
+
+    Err(PyTypeError::new_err(format!(
+        "send(source=…) expected str / pathlib.Path / bytes / BinaryIO, got {}",
+        source
+            .get_type()
+            .name()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|_| "<unknown>".to_string()),
+    )))
+}
+
+/// Spawn a polling task that surfaces engine-side `TransferProgress`
+/// snapshots into the user's Python `on_progress` callback.
+///
+/// The task lives on the shared tokio runtime; it polls the engine's
+/// progress monitor every `POLL_MS` until the receipt reaches a
+/// terminal state, calling back at most once per observed change in
+/// `bytes_transferred`. Exceptions raised inside the callback are
+/// logged at WARN level and stop further invocations.
+///
+/// `keepalive` (an optional staging [`NamedTempFile`]) is held by the
+/// task so it lives at least until the receipt terminates — that's
+/// also when the staging file becomes safe to delete.
+fn spawn_progress_pump(
+    engine: Arc<TransferEngine>,
+    task_id: Uuid,
+    total_bytes: u64,
+    receipt: Arc<Receipt<Sender>>,
+    callback: Py<PyAny>,
+    keepalive: Option<NamedTempFile>,
+) {
+    const POLL_MS: u64 = 100;
+    let started = std::time::Instant::now();
+    tokio::spawn(async move {
+        let mut last_bytes: u64 = u64::MAX;
+        let mut terminal = false;
+        loop {
+            let pm = engine.get_progress_monitor().await;
+            let snapshot = pm.read().await.get_transfer(&task_id).cloned();
+            let receipt_terminal = receipt.state().is_terminal();
+
+            if let Some(snap) = snapshot {
+                if snap.bytes_transferred != last_bytes
+                    || matches!(
+                        snap.status,
+                        TransferStatus::Completed
+                            | TransferStatus::Failed(_)
+                            | TransferStatus::Cancelled
+                    )
+                {
+                    last_bytes = snap.bytes_transferred;
+                    let progress = PyProgress {
+                        bytes_sent: snap.bytes_transferred,
+                        bytes_total: snap.total_bytes.max(total_bytes),
+                        files_sent: 0,
+                        files_total: 1,
+                        elapsed_secs: started.elapsed().as_secs_f64(),
+                    };
+                    let cb_result = Python::attach(|py| -> PyResult<()> {
+                        callback.call1(py, (progress,))?;
+                        Ok(())
+                    });
+                    if let Err(e) = cb_result {
+                        tracing::warn!(error=%e, "on_progress callback raised; pump exiting");
+                        break;
+                    }
+                }
+                if matches!(
+                    snap.status,
+                    TransferStatus::Completed
+                        | TransferStatus::Failed(_)
+                        | TransferStatus::Cancelled
+                ) {
+                    terminal = true;
+                }
+            }
+            if receipt_terminal || terminal {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
+        }
+        // Keep the staging file alive at least until we exit the
+        // pump; receipt is now terminal so the engine is done with it.
+        drop(keepalive);
+    });
+}
+
+/// Drop the staging file once the receipt reaches a terminal state.
+/// Used when no `on_progress` callback is supplied (otherwise the
+/// progress pump owns the keep-alive).
+fn spawn_temp_keepalive(receipt: Arc<Receipt<Sender>>, keepalive: NamedTempFile) {
+    tokio::spawn(async move {
+        let _ = receipt.await_state(|s| s.is_terminal()).await;
+        drop(keepalive);
+    });
 }
 
 /// Translate the user-facing `metadata={...}` dict into a sealed
@@ -113,37 +329,74 @@ impl PyClient {
         future_into_py(py, async move { Ok(false) })
     }
 
-    /// `await client.send(source, *, to, metadata=None, chunk_size=None, timeout=None)`.
+    /// `await client.send(source, *, to, metadata=None, chunk_size=None, timeout=None, on_progress=None)`.
     ///
     /// Per RFC-001 §5.2. `metadata` is a `dict[str, str]`; well-known
     /// keys (`trace_id`, `conversation_id`, `correlation_id`,
     /// `lifecycle`) are lifted to the typed `Metadata` fields, every
     /// other key goes into `user_metadata`.
     ///
+    /// `source` is one of:
+    /// - `str` / `os.PathLike` / `pathlib.Path` — read directly by the
+    ///   engine (zero-copy, fast path).
+    /// - `bytes` — staged into a `NamedTempFile` and the file path
+    ///   handed to the engine (RFC-001 §6.2 v0.2 contract).
+    /// - any object with a `read(size: int) -> bytes` method
+    ///   (`BinaryIO`) — drained synchronously into a `NamedTempFile`
+    ///   (1 MiB chunks, GIL held). Streaming bytes is a v0.3
+    ///   enhancement, deliberately out of scope here.
+    ///
+    /// Staging files are kept alive on the shared tokio runtime
+    /// until the returned receipt reaches a terminal state, then
+    /// auto-dropped (deletes the inode).
+    ///
     /// `chunk_size` is plumbed via per-call `TransferConfig`
     /// override only when set; defaults to the engine's adaptive
     /// choice. `timeout` (seconds, optional) wraps the await in
     /// `tokio::time::timeout` and raises `TimeoutError` on expiry.
     ///
-    /// `on_progress=` and bytes/BinaryIO sources are w6 tasks #13
-    /// and #12 respectively (Group C in the w6 plan).
-    #[pyo3(signature = (source, *, to, metadata=None, chunk_size=None, timeout=None))]
+    /// `on_progress`, when supplied, is a Python callable
+    /// `Callable[[Progress], None]`. It is invoked from a polling
+    /// task on the shared tokio runtime every ~100 ms while the
+    /// transfer is in progress, then once more with the terminal
+    /// snapshot before the polling task exits. Exceptions raised
+    /// inside the callback are logged at WARN level and stop further
+    /// invocations — they never propagate back into the awaitable.
+    // Clippy's too_many_arguments lint (default 7) tags this signature
+    // because RFC-001 §5.2 commits to seven user-visible kwargs plus
+    // `self`. Splitting into a builder would break the documented API,
+    // so we explicitly silence the lint here.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (source, *, to, metadata=None, chunk_size=None, timeout=None, on_progress=None))]
     fn send<'py>(
         &self,
         py: Python<'py>,
-        source: PathBuf,
+        source: Bound<'py, PyAny>,
         to: String,
         metadata: Option<HashMap<String, String>>,
         chunk_size: Option<usize>,
         timeout: Option<f64>,
+        on_progress: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let engine = Arc::clone(&self.engine);
         let meta = match metadata {
             Some(m) if !m.is_empty() => Some(build_metadata(m)?),
             _ => None,
         };
+        let staged = stage_source(py, &source)?;
+        if let Some(cb) = &on_progress {
+            if !cb.is_callable() {
+                return Err(PyTypeError::new_err(
+                    "on_progress must be a callable accepting one Progress argument",
+                ));
+            }
+        }
+        let on_progress_obj = on_progress.map(|c| c.unbind());
         future_into_py(py, async move {
-            let task = build_upload_task(source, to, chunk_size).map_err(PyValueError::new_err)?;
+            let (path, keepalive) = staged.materialize();
+            let task = build_upload_task(path, to, chunk_size).map_err(PyValueError::new_err)?;
+            let task_id = task.id;
+            let total_bytes = task.file_size;
             let receipt = match (timeout, meta) {
                 (Some(secs), m) => {
                     if !secs.is_finite() || secs <= 0.0 {
@@ -169,6 +422,24 @@ impl PyClient {
                     .map_err(engine_err_to_py)?,
                 (None, None) => engine.send(task).await.map_err(engine_err_to_py)?,
             };
+            // Wire up auxiliary tasks AFTER the receipt is in hand —
+            // both need the receipt to know when to stop.
+            match (on_progress_obj, keepalive) {
+                (Some(cb), keep) => {
+                    spawn_progress_pump(
+                        Arc::clone(&engine),
+                        task_id,
+                        total_bytes,
+                        Arc::clone(&receipt),
+                        cb,
+                        keep,
+                    );
+                }
+                (None, Some(keep)) => {
+                    spawn_temp_keepalive(Arc::clone(&receipt), keep);
+                }
+                (None, None) => {}
+            }
             Ok(PyReceipt::from_arc(receipt))
         })
     }
