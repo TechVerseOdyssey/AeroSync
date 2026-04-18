@@ -1,0 +1,59 @@
+name: Python
+
+on:
+  push:
+    branches: ["master"]
+    paths:
+      - "aerosync-py/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/python.yml"
+  pull_request:
+    branches: ["master"]
+    paths:
+      - "aerosync-py/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/python.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  quality:
+    # mypy --strict + ruff + pytest against a native build of the
+    # PyO3 extension. Ubuntu only — the build matrix lives in
+    # python-release.yml; this job is the editor-experience guard
+    # for RFC-001 §13 #17 (mypy strict, py.typed, ruff, CI quality).
+    name: Python quality (mypy + ruff + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-python-quality
+      - name: Install Python dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install "maturin>=1.5,<2.0" "pytest>=7" "pytest-asyncio>=0.23" "mypy>=1.10" "ruff>=0.4" "tomli>=1.1.0; python_version < '3.11'"
+      - name: Build extension in-place
+        run: maturin develop -m aerosync-py/Cargo.toml
+      - name: ruff check
+        run: ruff check aerosync-py/python/ aerosync-py/tests/
+      - name: ruff format check
+        run: ruff format --check aerosync-py/python/ aerosync-py/tests/
+        continue-on-error: true
+      - name: mypy --strict
+        run: mypy --strict aerosync-py/python/aerosync aerosync-py/tests
+      - name: pytest
+        run: pytest aerosync-py/tests/ -v

@@ -18,10 +18,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import pytest
-
 import aerosync
-
+import pytest
 
 # ── Class hierarchy shape ─────────────────────────────────────────────
 
@@ -79,7 +77,11 @@ def test_timeout_error_is_aerosync_class_not_builtin() -> None:
     `TimeoutError`. Documented in RFC-001 §5.8."""
     import builtins
 
-    assert aerosync.TimeoutError is not builtins.TimeoutError
+    # mypy correctly notes the two classes have non-overlapping
+    # identities; the assertion is the entire point of the test
+    # (RFC-001 §5.8 commits to a *new* TimeoutError, not Python's
+    # builtin), so we silence the diagnostic at the call site.
+    assert aerosync.TimeoutError is not builtins.TimeoutError  # type: ignore[comparison-overlap]
     assert issubclass(aerosync.TimeoutError, aerosync.AeroSyncError)
 
 
@@ -109,7 +111,7 @@ def test_failed_transfer_outcome_carries_structured_reason(tmp_path: Path) -> No
     f = tmp_path / "blob.bin"
     f.write_bytes(b"x" * 16)
 
-    async def run() -> dict:
+    async def run() -> dict[str, object]:
         async with aerosync.client() as c:
             r = await c.send(f, to="nowhere-host:1")
             try:
@@ -120,8 +122,9 @@ def test_failed_transfer_outcome_carries_structured_reason(tmp_path: Path) -> No
 
     outcome = asyncio.run(run())
     assert outcome["status"] in {"nacked", "cancelled", "errored"}
-    # `aerosync.Outcome` mirrors the dict shape exactly.
-    typed = aerosync.Outcome(**outcome)
+    # `aerosync.Outcome` mirrors the dict shape exactly. mypy can't
+    # narrow `dict[str, object]` to per-field types on a **splat.
+    typed = aerosync.Outcome(**outcome)  # type: ignore[arg-type]
     assert typed.status == outcome["status"]
 
 
@@ -145,7 +148,7 @@ def test_history_empty_store_returns_empty_list(tmp_path: Path) -> None:
     """An empty (non-existent) history.jsonl yields []."""
     history_path = tmp_path / "history.jsonl"
 
-    async def run() -> list:
+    async def run() -> list[aerosync.HistoryEntry]:
         async with aerosync.client() as c:
             return await c.history(history_path=history_path)
 
@@ -160,7 +163,7 @@ def test_history_accepts_metadata_filter_kwarg(tmp_path: Path) -> None:
     in the Python-side surface."""
     history_path = tmp_path / "history.jsonl"
 
-    async def run() -> list:
+    async def run() -> list[aerosync.HistoryEntry]:
         async with aerosync.client() as c:
             return await c.history(
                 history_path=history_path,

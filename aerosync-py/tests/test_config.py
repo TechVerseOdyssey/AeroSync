@@ -12,10 +12,8 @@ import asyncio
 import warnings
 from pathlib import Path
 
-import pytest
-
 import aerosync
-
+import pytest
 
 # ── Construction & validation ─────────────────────────────────────────
 
@@ -224,7 +222,7 @@ def test_config_unknown_attribute_in_pyobject_is_typeerror() -> None:
         timeout_default = None
 
     with pytest.raises(TypeError):
-        aerosync.client(config=FakeConfig())  # type: ignore[arg-type]
+        aerosync.client(config=FakeConfig())
 
 
 def test_config_dataclass_re_exported() -> None:

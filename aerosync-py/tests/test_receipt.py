@@ -13,9 +13,8 @@ import re
 import uuid
 from pathlib import Path
 
-import pytest
-
 import aerosync
+import pytest
 from aerosync import _native
 
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -95,7 +94,7 @@ def test_receipt_processed_returns_outcome_dict(tmp_path: Path) -> None:
     f = tmp_path / "blob.bin"
     f.write_bytes(b"x" * 4)
 
-    async def run() -> dict:
+    async def run() -> dict[str, object]:
         async with aerosync.client() as c:
             r = await c.send(f, to="nowhere-host:1")
             try:
@@ -108,7 +107,10 @@ def test_receipt_processed_returns_outcome_dict(tmp_path: Path) -> None:
     assert isinstance(outcome, dict)
     assert outcome["status"] in {"acked", "nacked", "cancelled", "errored"}
     # Outcome dataclass mirror should accept the dict verbatim.
-    typed = aerosync.Outcome(**outcome)
+    # mypy can't narrow `dict[str, object]` to `Outcome.__init__`
+    # field types one-by-one, so the **kwargs splat is widened to
+    # `object`. The runtime contract is dict-of-{str|int|None}.
+    typed = aerosync.Outcome(**outcome)  # type: ignore[arg-type]
     assert typed.status == outcome["status"]
 
 

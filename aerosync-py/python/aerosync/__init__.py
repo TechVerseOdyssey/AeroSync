@@ -10,6 +10,7 @@ through their methods.
 
 from __future__ import annotations
 
+from aerosync._config import Config
 from aerosync._native import (
     AeroSyncError,
     AuthError,
@@ -18,11 +19,11 @@ from aerosync._native import (
     ConfigError,
     ConnectionError,
     EngineError,
-    HistoryEntry as _NativeHistoryEntry,
+    HistoryEntry,
     IncomingFile,
-    Peer as _NativePeer,
+    Peer,
     PeerNotFoundError,
-    Progress as _NativeProgress,
+    Progress,
     Receipt,
     Receiver,
     TimeoutError,
@@ -32,8 +33,19 @@ from aerosync._native import (
     receiver,
     version,
 )
-from aerosync._config import Config
-from aerosync._types import HistoryEntry, Lifecycle, Outcome, Peer, Progress
+from aerosync._types import HistoryEntry as _DocHistoryEntry
+from aerosync._types import Lifecycle, Outcome
+from aerosync._types import Peer as _DocPeer
+from aerosync._types import Progress as _DocProgress
+
+# Backward-compatible aliases for the previous (w5/w6) public names.
+# The native classes have always been the runtime types returned by
+# the SDK; the dataclass mirrors in `_types.py` are kept as IDE / docs
+# helpers under `_DocXxx` and reachable via the historical `_NativeXxx`
+# aliases below for any user code that has reached past `__all__`.
+_NativeHistoryEntry = HistoryEntry
+_NativePeer = Peer
+_NativeProgress = Progress
 
 __all__ = [
     "Config",

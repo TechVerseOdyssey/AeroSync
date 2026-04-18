@@ -47,3 +47,92 @@ strip = true
 
 [project.optional-dependencies]
 test = ["pytest>=7", "pytest-asyncio>=0.23"]
+# `dev` is what contributors install for the full toolchain (mypy /
+# ruff / maturin). It mirrors the CI `python-quality` job step-for-step
+# so a clean local run reproduces the matrix run exactly.
+dev = [
+  "pytest>=7",
+  "pytest-asyncio>=0.23",
+  "mypy>=1.10",
+  "ruff>=0.4",
+  "maturin>=1.5,<2.0",
+  "tomli>=1.1.0; python_version < '3.11'",
+]
+
+# ── Lint / type / test config ────────────────────────────────────────
+#
+# Centralised here (rather than in mypy.ini / ruff.toml) so the SDK
+# package ships the contributor toolchain config alongside the runtime
+# metadata. Both tools auto-discover `[tool.*]` tables in pyproject.toml.
+
+[tool.mypy]
+# Target Python 3.10 because both `_types.py` and `_config.py` use the
+# `@dataclass(slots=True)` form (PEP 615 / 3.10+) — see RFC-001 §5.4.
+# RFC-001 §3 nominally commits us to 3.9 wheels via `abi3-py39`; the
+# pure-Python source slots-on-the-dataclass usage has been in the SDK
+# since w5 and the `requires-python = ">=3.9"` line in this same file
+# is mildly aspirational (a true 3.9 install would TypeError on the
+# `slots=True` kwarg at import). Reconciling that — either by bumping
+# `requires-python` or by switching to manual `__slots__ = (...)` — is
+# tracked as a v0.2.1 follow-up; out of scope for #17 (mypy --strict
+# alone). Setting the type-check target to 3.10 means we still catch
+# every type error that *is* in scope without spurious slots failures.
+python_version = "3.10"
+strict = true
+mypy_path = "python"
+packages = ["aerosync"]
+# `_native.pyi` is hand-rolled — accept that our Rust extension does
+# not ship its own annotations beyond that file.
+ignore_missing_imports = false
+# Tests use `pytest.raises((Exc1, Exc2))` and untyped `monkeypatch`
+# fixtures; rather than per-line ignores everywhere, exempt the suite
+# from the strictest checks but keep `disallow_untyped_defs` so
+# functions still have to declare their signatures.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_decorators = false
+disallow_any_generics = false
+warn_return_any = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = ["target", "build", "dist", "*.egg-info"]
+
+[tool.ruff.lint]
+# A measured subset of rules: pycodestyle errors/warnings, pyflakes,
+# import sorting, naming, pyupgrade for 3.9+, common bug patterns.
+# Deliberately omit overly opinionated families (D = pydocstyle,
+# ANN = enforce annotations on every def — both add value but we
+# already enforce annotations via `mypy --strict`).
+select = ["E", "F", "W", "I", "N", "UP", "B"]
+ignore = [
+  # E501 line-too-long is enforced by `line-length` above; ruff still
+  # flags lines that exceed it inside docstrings, where wrapping a
+  # cited URL or a Rust signature reduces readability. Suppress
+  # globally to match the intent of `line-length`.
+  "E501",
+  # B008 forbids function calls in default args; we use
+  # `field(default_factory=...)` shape elsewhere but a few
+  # `Path(...)` defaults are deliberate and benign here.
+  "B008",
+  # N818 wants every exception class to end in `Error`. RFC-001 §5.8
+  # deliberately uses `TransferFailed` and `ChecksumMismatch` (without
+  # the suffix) as user-facing names — renaming would be a SemVer break.
+  "N818",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# `__init__.py` re-exports — F401 (unused import) is the entire point.
+"__init__.py" = ["F401"]
+# Tests use `assert` (S101 in bandit-land, but ruff's `S` is opt-in
+# anyway), and we re-import `_native` for white-box coverage.
+"tests/*" = ["F401", "F811"]
+
+[tool.pytest.ini_options]
+# `asyncio_mode = "strict"` ensures every async test function is
+# explicitly marked, so accidental sync tests don't slip past the
+# event-loop boundary.
+asyncio_mode = "strict"
+testpaths = ["tests"]
+

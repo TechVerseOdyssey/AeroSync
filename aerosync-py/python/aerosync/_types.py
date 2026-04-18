@@ -15,7 +15,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 
 class Lifecycle(str, Enum):
@@ -72,9 +71,9 @@ class Outcome:
     """
 
     status: str
-    reason: Optional[str] = None
-    code: Optional[int] = None
-    detail: Optional[str] = None
+    reason: str | None = None
+    code: int | None = None
+    detail: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +91,7 @@ class HistoryEntry:
     direction: str
     file_name: str
     size_bytes: int
-    sha256: Optional[str] = None
-    completed_at: Optional[datetime] = None
-    receipt_id: Optional[str] = None
-    receipt_state: Optional[str] = None
+    sha256: str | None = None
+    completed_at: datetime | None = None
+    receipt_id: str | None = None
+    receipt_state: str | None = None

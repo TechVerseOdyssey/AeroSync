@@ -42,14 +42,15 @@ from __future__ import annotations
 import os
 import sys
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Mapping, Optional, Union
+from typing import Any, Union
 
 if sys.version_info >= (3, 11):
     import tomllib as _toml
 else:  # pragma: no cover - only exercised on 3.9 / 3.10 CI legs
-    import tomli as _toml  # type: ignore[no-redef]
+    import tomli as _toml  # type: ignore[no-redef,import-not-found,unused-ignore]
 
 
 # Set of recognised log-level strings. Mirrors the `tracing` crate
@@ -102,12 +103,12 @@ class Config:
             ``timeout=`` kwarg. ``None`` means "no per-call timeout".
     """
 
-    auth_token: Optional[str] = None
-    state_dir: Optional[_PathLike] = None
-    rendezvous_url: Optional[str] = None
+    auth_token: str | None = None
+    state_dir: _PathLike | None = None
+    rendezvous_url: str | None = None
     log_level: str = "info"
-    chunk_size_default: Optional[int] = None
-    timeout_default: Optional[float] = None
+    chunk_size_default: int | None = None
+    timeout_default: float | None = None
 
     def __post_init__(self) -> None:
         # `frozen=True` means we cannot use plain `self.x = ...`
@@ -133,7 +134,7 @@ class Config:
     # ── Constructors ──────────────────────────────────────────────────
 
     @classmethod
-    def from_dict(cls, d: Mapping[str, Any]) -> "Config":
+    def from_dict(cls, d: Mapping[str, Any]) -> Config:
         """Build a :class:`Config` from a flat mapping.
 
         Unknown keys (anything not declared as a dataclass field on
@@ -157,7 +158,7 @@ class Config:
         return cls(**clean)
 
     @classmethod
-    def from_toml(cls, path: _PathLike) -> "Config":
+    def from_toml(cls, path: _PathLike) -> Config:
         """Build a :class:`Config` from a TOML file.
 
         Reads the entire file, parses it as TOML, and forwards the
@@ -178,7 +179,7 @@ class Config:
         return cls.from_dict(data)
 
     @classmethod
-    def from_default(cls) -> "Config":
+    def from_default(cls) -> Config:
         """Read ``~/.aerosync/config.toml`` if present, else return defaults.
 
         Designed for the killer-demo "just works" path:
@@ -195,7 +196,7 @@ class Config:
 
     # ── Convenience ───────────────────────────────────────────────────
 
-    def with_overrides(self, **overrides: Any) -> "Config":
+    def with_overrides(self, **overrides: Any) -> Config:
         """Return a copy with ``overrides`` applied. Equivalent to
         ``dataclasses.replace(cfg, **overrides)`` but keeps the public
         API self-contained so users do not need to import dataclasses

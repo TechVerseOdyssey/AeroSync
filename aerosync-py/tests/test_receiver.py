@@ -19,9 +19,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import pytest
-
 import aerosync
+import pytest
 
 
 def test_receiver_factory_returns_async_context_manager(tmp_path: Path) -> None:
@@ -53,7 +52,7 @@ def test_receiver_address_default_save_dir(tmp_path: Path) -> None:
 
 
 def test_discover_returns_a_list() -> None:
-    async def go() -> list:
+    async def go() -> list[aerosync.Peer]:
         # Tiny timeout so the test stays fast even with no peers
         # on the LAN. The mDNS scan task is awaited to completion
         # by the engine before the future resolves.

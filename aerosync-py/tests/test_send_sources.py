@@ -14,11 +14,9 @@ import asyncio
 import io
 import re
 from pathlib import Path
-from typing import List
-
-import pytest
 
 import aerosync
+import pytest
 
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -112,7 +110,10 @@ def test_send_rejects_non_callable_on_progress(tmp_path: Path) -> None:
 
     async def run() -> None:
         async with aerosync.client() as c:
-            await c.send(f, to="alice", on_progress=42)
+            # Intentional: `42` is not a callable. Test asserts the
+            # binding raises TypeError; mypy knows the kwarg expects a
+            # callable, so we suppress the diagnostic at the call site.
+            await c.send(f, to="alice", on_progress=42)  # type: ignore[arg-type]
 
     with pytest.raises(TypeError):
         asyncio.run(run())
@@ -126,7 +127,7 @@ def test_send_invokes_on_progress_at_least_once(tmp_path: Path) -> None:
     f = tmp_path / "blob.bin"
     f.write_bytes(b"x" * 16)
 
-    received: List[aerosync.Progress] = []
+    received: list[aerosync.Progress] = []
 
     def cb(progress: aerosync.Progress) -> None:
         received.append(progress)
@@ -178,7 +179,7 @@ def test_send_progress_callback_exception_does_not_crash(tmp_path: Path) -> None
 def test_send_bytes_with_on_progress_combines_cleanly(tmp_path: Path) -> None:
     """The two new features compose: bytes source + on_progress
     must work in the same call."""
-    received: List[aerosync.Progress] = []
+    received: list[aerosync.Progress] = []
 
     def cb(p: aerosync.Progress) -> None:
         received.append(p)
