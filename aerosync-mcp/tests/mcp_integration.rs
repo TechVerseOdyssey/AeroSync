@@ -492,10 +492,8 @@ async fn test_send_file_records_resume_path_in_sqlite() {
     let params = SendFileParams {
         source: src.to_string_lossy().to_string(),
         destination: "http://127.0.0.1:1/upload".to_string(),
-        token: None,
         no_verify: Some(true),
-        limit: None,
-        mcp_auth_token: None,
+        ..Default::default()
     };
 
     let _ = server
@@ -557,10 +555,8 @@ async fn test_send_file_keeps_resume_path_after_failure() {
     let params = SendFileParams {
         source: src.to_string_lossy().to_string(),
         destination: "http://127.0.0.1:1/upload".to_string(),
-        token: None,
         no_verify: Some(true),
-        limit: None,
-        mcp_auth_token: None,
+        ..Default::default()
     };
     let _ = server
         .send_file(rmcp::handler::server::wrapper::Parameters(params))

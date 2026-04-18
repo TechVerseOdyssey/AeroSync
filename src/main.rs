@@ -5,6 +5,7 @@ use zeroize::Zeroizing;
 use aerosync::core::{
     auth::{AuthConfig, AuthManager},
     discovery::AeroSyncMdns,
+    metadata::MetadataBuilder,
     preflight::preflight_check,
     resume::ResumeStore,
     server::{FileReceiver, ServerConfig, TlsConfig},
@@ -14,6 +15,7 @@ use aerosync::core::{
 use aerosync::protocols::{
     http::HttpConfig, quic::QuicConfig, ratelimit::parse_limit, AutoAdapter,
 };
+use aerosync_proto::Lifecycle;
 use clap::{Parser, Subcommand};
 use futures::stream::{self, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -98,6 +100,36 @@ enum Commands {
         /// [警告] 仅限内网测试环境，生产环境请用 --pin-cert 进行证书钉扎
         #[arg(long)]
         accept_invalid_certs: bool,
+
+        // ── RFC-003 metadata envelope flags ──
+        /// 用户元数据 key=value（可重复指定）。值必须为 UTF-8 字符串。
+        /// 示例：--meta tenant=acme --meta agent=cleaner
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
+
+        /// 关联追踪 ID（写入 metadata.trace_id）
+        #[arg(long, value_name = "ID")]
+        trace_id: Option<String>,
+
+        /// 会话 ID（写入 metadata.conversation_id）
+        #[arg(long, value_name = "ID")]
+        conversation_id: Option<String>,
+
+        /// 上游 file ID（lineage，可重复指定，写入 metadata.parent_file_ids）
+        #[arg(long = "parent", value_name = "FILE_ID")]
+        parent: Vec<String>,
+
+        /// 生命周期提示：transient | durable | ephemeral
+        #[arg(long, value_name = "LIFECYCLE")]
+        lifecycle: Option<String>,
+
+        /// 自由格式关联 ID（写入 metadata.correlation_id）
+        #[arg(long, value_name = "ID")]
+        correlation_id: Option<String>,
+
+        /// 显式指定内容类型，跳过自动嗅探
+        #[arg(long, value_name = "MIME")]
+        content_type: Option<String>,
     },
 
     /// 启动接收端，监听文件传输
@@ -195,6 +227,27 @@ enum Commands {
         /// 只显示成功记录
         #[arg(long)]
         success_only: bool,
+
+        // ── RFC-003 metadata envelope filters ──
+        /// 按用户元数据 key=value 过滤（可重复，多个为 AND 关系）
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
+
+        /// 按 trace_id 精确匹配
+        #[arg(long, value_name = "ID")]
+        trace_id: Option<String>,
+
+        /// 按 lifecycle 过滤：transient | durable | ephemeral
+        #[arg(long, value_name = "LIFECYCLE")]
+        lifecycle: Option<String>,
+
+        /// 起始时间（含），RFC-3339 格式，如 2026-04-01T00:00:00Z
+        #[arg(long, value_name = "RFC3339")]
+        since: Option<String>,
+
+        /// 结束时间（含），RFC-3339 格式
+        #[arg(long, value_name = "RFC3339")]
+        until: Option<String>,
     },
 
     /// 订阅接收端 WebSocket 事件流（实时感知文件到达）
@@ -336,7 +389,23 @@ async fn main() -> anyhow::Result<()> {
             limit,
             pin_cert,
             accept_invalid_certs,
+            meta,
+            trace_id,
+            conversation_id,
+            parent,
+            lifecycle,
+            correlation_id,
+            content_type,
         } => {
+            let send_meta = SendMetadataArgs {
+                meta,
+                trace_id,
+                conversation_id,
+                parent,
+                lifecycle,
+                correlation_id,
+                content_type,
+            };
             cmd_send(
                 source,
                 destination,
@@ -351,6 +420,7 @@ async fn main() -> anyhow::Result<()> {
                 limit,
                 pin_cert,
                 accept_invalid_certs,
+                send_meta,
                 &app_config,
             )
             .await?;
@@ -410,8 +480,24 @@ async fn main() -> anyhow::Result<()> {
             sent,
             received,
             success_only,
+            meta,
+            trace_id,
+            lifecycle,
+            since,
+            until,
         } => {
-            cmd_history(limit, sent, received, success_only).await?;
+            cmd_history(
+                limit,
+                sent,
+                received,
+                success_only,
+                meta,
+                trace_id,
+                lifecycle,
+                since,
+                until,
+            )
+            .await?;
         }
 
         Commands::Watch {
@@ -435,6 +521,80 @@ async fn main() -> anyhow::Result<()> {
 
 // ──────────────────────────── send ──────────────────────────────────────────
 
+/// Bundle of RFC-003 metadata flags collected from the CLI. Kept as a struct
+/// so `cmd_send` doesn't blow past clippy's `too_many_arguments` limit (and
+/// because every new metadata field plumbs through identically).
+#[derive(Debug, Default, Clone)]
+struct SendMetadataArgs {
+    meta: Vec<String>,
+    trace_id: Option<String>,
+    conversation_id: Option<String>,
+    parent: Vec<String>,
+    lifecycle: Option<String>,
+    correlation_id: Option<String>,
+    content_type: Option<String>,
+}
+
+/// Parse `--lifecycle <name>` into a proto enum. Case-insensitive on the
+/// short form; the proto label spelling is also accepted so power users can
+/// paste it from the spec.
+fn parse_lifecycle(s: &str) -> anyhow::Result<Lifecycle> {
+    match s.to_ascii_lowercase().as_str() {
+        "transient" | "lifecycle_transient" => Ok(Lifecycle::Transient),
+        "durable" | "lifecycle_durable" => Ok(Lifecycle::Durable),
+        "ephemeral" | "lifecycle_ephemeral" => Ok(Lifecycle::Ephemeral),
+        "unspecified" | "lifecycle_unspecified" | "" => Ok(Lifecycle::Unspecified),
+        other => Err(anyhow::anyhow!(
+            "invalid lifecycle '{}'; expected transient | durable | ephemeral",
+            other
+        )),
+    }
+}
+
+/// Parse `--meta key=value` flags into a `(key, value)` pair vec. The first
+/// `=` is the separator; further `=` characters are kept in the value, which
+/// matters for things like base64 padding or query strings.
+fn parse_meta_kv(items: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    items
+        .iter()
+        .map(|s| {
+            let (k, v) = s
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("--meta expects KEY=VALUE, got '{}'", s))?;
+            Ok((k.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+/// Build a sealed metadata template from CLI flags. System fields (id,
+/// from_node, content_type, size, sha256, …) are populated by the engine in
+/// `seal_system_fields`; this template only carries user-supplied values.
+fn build_metadata_template(args: &SendMetadataArgs) -> anyhow::Result<aerosync_proto::Metadata> {
+    let mut builder = MetadataBuilder::new();
+    if let Some(ref t) = args.trace_id {
+        builder = builder.trace_id(t.clone());
+    }
+    if let Some(ref c) = args.conversation_id {
+        builder = builder.conversation_id(c.clone());
+    }
+    if let Some(ref c) = args.correlation_id {
+        builder = builder.correlation_id(c.clone());
+    }
+    for p in &args.parent {
+        builder = builder.parent(p.clone());
+    }
+    if let Some(ref l) = args.lifecycle {
+        builder = builder.lifecycle(parse_lifecycle(l)?);
+    }
+    if let Some(ref ct) = args.content_type {
+        builder = builder.content_type(ct.clone());
+    }
+    for (k, v) in parse_meta_kv(&args.meta)? {
+        builder = builder.user(k, v);
+    }
+    builder.build().map_err(|e| anyhow::anyhow!(e))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn cmd_send(
     source: PathBuf,
@@ -450,8 +610,12 @@ async fn cmd_send(
     limit: Option<String>,
     pin_cert: Vec<PathBuf>,
     accept_invalid_certs: bool,
+    metadata_args: SendMetadataArgs,
     app_config: &AeroSyncConfig,
 ) -> anyhow::Result<()> {
+    // Validate metadata flags up front — no point spinning up the engine if
+    // the user mistyped `--lifecycle foo` or `--meta no_equals_sign`.
+    let metadata_template = build_metadata_template(&metadata_args)?;
     // 收集要发送的文件列表
     let files = collect_files(&source, recursive).await?;
 
@@ -605,7 +769,13 @@ async fn cmd_send(
         task.sha256 = sha256;
         let task_id = task.id;
 
-        engine.add_transfer(task).await?;
+        // Each file gets its own clone of the metadata template — the
+        // engine mutates the envelope per-file (sha256, size_bytes,
+        // file_name, …) inside `seal_system_fields`, so callers must
+        // not share a single Metadata between concurrent transfers.
+        let _receipt = engine
+            .send_with_metadata(task, metadata_template.clone())
+            .await?;
 
         // 为该文件创建进度条
         let pb = mp.add(ProgressBar::new(*size));
@@ -1096,11 +1266,17 @@ async fn cmd_status(host: String) -> anyhow::Result<()> {
 
 // ──────────────────────────── history ───────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_history(
     limit: usize,
     sent: bool,
     received: bool,
     success_only: bool,
+    meta: Vec<String>,
+    trace_id: Option<String>,
+    lifecycle: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
 ) -> anyhow::Result<()> {
     use aerosync::core::{HistoryQuery, HistoryStore};
 
@@ -1119,10 +1295,22 @@ async fn cmd_history(
         None
     };
 
+    // Parse metadata-side filters up front so a typo in
+    // `--lifecycle` or `--since` fails before we hit disk.
+    let metadata_eq: HashMap<String, String> = parse_meta_kv(&meta)?.into_iter().collect();
+    let lifecycle = lifecycle.as_deref().map(parse_lifecycle).transpose()?;
+    let since = since.as_deref().map(parse_rfc3339).transpose()?;
+    let until = until.as_deref().map(parse_rfc3339).transpose()?;
+
     let q = HistoryQuery {
         direction,
         success_only,
         limit,
+        metadata_eq,
+        trace_id,
+        lifecycle,
+        since,
+        until,
         ..Default::default()
     };
 
@@ -1153,9 +1341,42 @@ async fn cmd_history(
         if let Some(ref err) = e.error {
             println!("      error: {}", err);
         }
+        // Surface trace_id and a short user_metadata summary — the
+        // CLI is the primary audit interface for non-MCP consumers,
+        // and we want the metadata to be visible without a second
+        // tool invocation.
+        if let Some(ref m) = e.metadata {
+            if let Some(ref t) = m.trace_id {
+                println!("      trace_id: {}", t);
+            }
+            if !m.user_metadata.is_empty() {
+                let mut kvs: Vec<_> = m.user_metadata.iter().collect();
+                kvs.sort_by(|a, b| a.0.cmp(b.0));
+                let preview = kvs
+                    .iter()
+                    .take(4)
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let suffix = if kvs.len() > 4 {
+                    format!(" (+{} more)", kvs.len() - 4)
+                } else {
+                    String::new()
+                };
+                println!("      meta: {}{}", preview, suffix);
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Parse RFC-3339 timestamp strings used by `--since` / `--until`.
+/// Wrapped to give a clearer error than `chrono`'s default.
+fn parse_rfc3339(s: &str) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .map_err(|e| anyhow::anyhow!("invalid RFC-3339 timestamp '{}': {}", s, e))
 }
 
 async fn cmd_resume(action: ResumeAction) -> anyhow::Result<()> {
@@ -1493,5 +1714,46 @@ mod watch_tests {
     fn test_unlimited_retries_flag() {
         let max_retries: u32 = 0;
         assert!(max_retries == 0, "0 should mean unlimited");
+    }
+
+    // ── RFC-003 (Group C) — CLI metadata helpers ─────────────────────
+
+    #[test]
+    fn parse_meta_kv_splits_on_first_equals() {
+        let parsed = parse_meta_kv(&[
+            "tenant=acme".to_string(),
+            "url=https://x?a=1&b=2".to_string(),
+        ])
+        .expect("two valid pairs");
+        assert_eq!(parsed[0], ("tenant".to_string(), "acme".to_string()));
+        // Subsequent '=' must be retained in the value.
+        assert_eq!(
+            parsed[1],
+            ("url".to_string(), "https://x?a=1&b=2".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_meta_kv_rejects_bare_token() {
+        let err = parse_meta_kv(&["nope".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("KEY=VALUE"));
+    }
+
+    #[test]
+    fn parse_lifecycle_accepts_short_and_long_form() {
+        assert_eq!(parse_lifecycle("transient").unwrap(), Lifecycle::Transient);
+        assert_eq!(
+            parse_lifecycle("LIFECYCLE_DURABLE").unwrap(),
+            Lifecycle::Durable
+        );
+        assert_eq!(parse_lifecycle("Ephemeral").unwrap(), Lifecycle::Ephemeral);
+        assert!(parse_lifecycle("garbage").is_err());
+    }
+
+    #[test]
+    fn parse_rfc3339_round_trip() {
+        let dt = parse_rfc3339("2026-04-19T10:00:00Z").unwrap();
+        assert_eq!(dt.timestamp(), 1_776_592_800);
+        assert!(parse_rfc3339("yesterday").is_err());
     }
 }

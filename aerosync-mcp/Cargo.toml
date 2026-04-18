@@ -35,6 +35,13 @@ reqwest = { workspace = true }
 uuid = { workspace = true }
 zeroize = { workspace = true }
 rusqlite = { version = "0.31", features = ["bundled"] }
+# Needed for parsing RFC-3339 `since`/`until` filters on `list_history`
+# and shaping the metadata-aware HistoryQuery; mirrors the feature set
+# pinned in the workspace root for `aerosync`.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+# Required to construct the `aerosync_proto::Lifecycle` enum and
+# `Metadata` envelope passed through `send_file` / `send_directory`.
+aerosync-proto = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

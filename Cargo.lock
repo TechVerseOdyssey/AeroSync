@@ -76,7 +76,9 @@ name = "aerosync-mcp"
 version = "0.1.0"
 dependencies = [
  "aerosync",
+ "aerosync-proto",
  "anyhow",
+ "chrono",
  "futures",
  "reqwest",
  "rmcp",
