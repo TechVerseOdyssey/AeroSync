@@ -25,7 +25,8 @@ async fn main() -> anyhow::Result<()> {
     // 初始化 SQLite 任务持久化（~/.aerosync/tasks.db）
     let db_path = aerosync_dir.join("tasks.db");
 
-    let mut builder = server::AeroSyncMcpServer::new();
+    let mut builder = server::AeroSyncMcpServer::new()
+        .with_aerosync_dir(aerosync_dir.clone());
 
     if let Ok(logger) = aerosync_core::audit::AuditLogger::new(&audit_path).await {
         builder = builder.with_audit(Arc::new(logger));

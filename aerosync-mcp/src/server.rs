@@ -9,6 +9,7 @@ use aerosync_core::{
     audit::AuditLogger,
     auth::AuthConfig,
     discovery::AeroSyncMdns,
+    resume::ResumeStore,
     server::{FileReceiver, ServerConfig},
     transfer::{TransferConfig, TransferEngine, TransferTask},
     FileManager, HistoryQuery, HistoryStore,
@@ -156,6 +157,11 @@ pub struct AeroSyncMcpServer {
     task_store: Option<Arc<TaskStore>>,
     /// Optional local authentication secret (from AEROSYNC_MCP_SECRET env var)
     secret: Option<Zeroizing<String>>,
+    /// Base directory for AeroSync state (e.g., `~/.aerosync`).
+    ///
+    /// 续传 JSON 文件存放于 `aerosync_dir/.aerosync/{task_id}.json`
+    /// （由 `ResumeStore::new(aerosync_dir)` 决定的二级目录）。
+    aerosync_dir: std::path::PathBuf,
 }
 
 impl Default for AeroSyncMcpServer {
@@ -168,12 +174,17 @@ impl Default for AeroSyncMcpServer {
 impl AeroSyncMcpServer {
     pub fn new() -> Self {
         let secret = std::env::var("AEROSYNC_MCP_SECRET").ok().map(Zeroizing::new);
+        // 默认 ~/.aerosync；测试场景或无 HOME 时回退到当前目录，保持可隔离
+        let aerosync_dir = std::env::var("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".aerosync"))
+            .unwrap_or_else(|_| std::path::PathBuf::from(".aerosync"));
         Self {
             receiver: Arc::new(Mutex::new(None)),
             audit: None,
             tasks: Arc::new(Mutex::new(HashMap::new())),
             task_store: None,
             secret,
+            aerosync_dir,
         }
     }
 
@@ -185,6 +196,19 @@ impl AeroSyncMcpServer {
     pub fn with_task_store(mut self, store: Arc<TaskStore>) -> Self {
         self.task_store = Some(store);
         self
+    }
+
+    /// 覆盖 AeroSync 状态根目录（默认 `~/.aerosync`）。
+    /// 影响断点续传 JSON 的存放位置以及 recovery.rs 的扫描路径。
+    pub fn with_aerosync_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.aerosync_dir = dir;
+        self
+    }
+
+    /// 计算指定 task 的 ResumeState JSON 路径（与 `ResumeStore::new(aerosync_dir)` 内部一致）
+    fn resume_json_path_for(&self, task_id: Uuid) -> std::path::PathBuf {
+        // ResumeStore 内部使用 `base_dir/.aerosync/{task_id}.json`；这里复刻同样规则。
+        self.aerosync_dir.join(".aerosync").join(format!("{}.json", task_id))
     }
 
     /// Pre-populate the in-memory task registry with tasks loaded from the store.
@@ -210,7 +234,7 @@ impl AeroSyncMcpServer {
 
     /// 发送单个文件到指定地址（自动协商 QUIC/HTTP 协议）
     #[tool(description = "Send a single file to a remote address. Automatically negotiates QUIC or HTTP protocol. Returns immediately with a task_id; use get_transfer_status to poll progress.")]
-    async fn send_file(
+    pub async fn send_file(
         &self,
         rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<SendFileParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
@@ -248,6 +272,8 @@ impl AeroSyncMcpServer {
         // 生成唯一任务 ID，立即注册为 Pending
         let task_id = Uuid::new_v4();
         let description = format!("send_file: {} → {}", params.source, params.destination);
+        let aerosync_dir = self.aerosync_dir.clone();
+        let resume_json_path = self.resume_json_path_for(task_id);
         {
             let pending_entry = TaskEntry {
                 status: BackgroundTaskStatus::Pending,
@@ -255,7 +281,8 @@ impl AeroSyncMcpServer {
                 last_updated: Instant::now(),
             };
             if let Some(ref store) = self.task_store {
-                store.upsert(task_id, &pending_entry).await;
+                // 关键：把 resume_json_path 写入 SQLite，使重启后 recovery 可发现该任务
+                store.upsert_with_resume(task_id, &pending_entry, Some(&resume_json_path)).await;
             }
             let mut tasks = self.tasks.lock().await;
             evict_expired(&mut tasks);
@@ -267,6 +294,7 @@ impl AeroSyncMcpServer {
         let task_store_bg = self.task_store.clone();
         let source_bg = source.clone();
         let dest_url_bg = dest_url.clone();
+        let resume_json_path_bg = resume_json_path.clone();
 
         tokio::spawn(async move {
             // 标记为 Running
@@ -276,7 +304,7 @@ impl AeroSyncMcpServer {
                     e.status = BackgroundTaskStatus::Running;
                     e.last_updated = Instant::now();
                     if let Some(ref store) = task_store_bg {
-                        store.upsert(task_id, e).await;
+                        store.upsert_with_resume(task_id, e, Some(&resume_json_path_bg)).await;
                     }
                 }
             }
@@ -291,9 +319,17 @@ impl AeroSyncMcpServer {
                     auth_token: params.token.clone().map(Zeroizing::new),
                     ..QuicConfig::default()
                 };
-                let adapter = Arc::new(AutoAdapter::new(http_config, quic_config));
+                // 注入 ResumeStore：HttpTransfer 在每完成一个分片后自动落盘，
+                // 重启后 recovery.rs 可读取并续传
+                let resume_store = Arc::new(ResumeStore::new(&aerosync_dir));
+                let adapter = Arc::new(
+                    AutoAdapter::new(http_config, quic_config)
+                        .with_resume_store(Arc::clone(&resume_store)),
+                );
                 let config = TransferConfig {
                     auth_token: params.token.clone().map(Zeroizing::new),
+                    // 让 TransferEngine 自带的 ResumeStore 也落到同一目录
+                    resume_state_dir: aerosync_dir.clone(),
                     ..TransferConfig::default()
                 };
                 let engine = TransferEngine::new(config);
@@ -309,6 +345,9 @@ impl AeroSyncMcpServer {
                     .unwrap_or_else(|| source_bg.clone());
                 let task_dest = format!("{}/{}", dest_url_bg.trim_end_matches('/'), rel.display());
                 let mut transfer_task = TransferTask::new_upload(source_bg.clone(), task_dest, file_size);
+                // 关键：用 MCP 的 task_id 覆盖 TransferTask.id，保证 ResumeState
+                // 文件名 `{task_id}.json` 与 SQLite 中记录的 resume_json_path 一致
+                transfer_task.id = task_id;
                 transfer_task.sha256 = sha256;
                 engine.add_transfer(transfer_task).await.map_err(|e| format!("Failed to add transfer: {}", e))?;
 
@@ -341,7 +380,9 @@ impl AeroSyncMcpServer {
                 }
             }.await;
 
-            // 更新最终状态
+            // 更新最终状态——成功时清空 resume_json_path（避免 recovery 误重试），
+            // 失败时保留 path 供下次启动续传
+            let final_succeeded = matches!(result, Ok(_));
             let mut t = tasks_bg.lock().await;
             if let Some(e) = t.get_mut(&task_id) {
                 e.status = match result {
@@ -350,7 +391,11 @@ impl AeroSyncMcpServer {
                 };
                 e.last_updated = Instant::now();
                 if let Some(ref store) = task_store_bg {
-                    store.upsert(task_id, e).await;
+                    if final_succeeded {
+                        store.upsert_with_resume(task_id, e, None).await;
+                    } else {
+                        store.upsert_with_resume(task_id, e, Some(&resume_json_path_bg)).await;
+                    }
                 }
             }
         });
@@ -435,6 +480,7 @@ impl AeroSyncMcpServer {
         let files_count = files.len();
         let tasks_bg = Arc::clone(&self.tasks);
         let task_store_bg = self.task_store.clone();
+        let aerosync_dir = self.aerosync_dir.clone();
 
         tokio::spawn(async move {
             {
@@ -465,9 +511,17 @@ impl AeroSyncMcpServer {
                     auth_token: params.token.clone().map(Zeroizing::new),
                     ..QuicConfig::default()
                 };
-                let adapter = Arc::new(AutoAdapter::new(http_config, quic_config));
+                // 注入 ResumeStore，使每个文件的分片进度落到 aerosync_dir 下（而非 CWD）。
+                // 注意：目录场景下每个文件持有独立 UUID（与 MCP task_id 解耦），
+                // 因此当前不向 SQLite 注册 resume_json_path——重启后只能看到目录任务整体失败。
+                let resume_store = Arc::new(ResumeStore::new(&aerosync_dir));
+                let adapter = Arc::new(
+                    AutoAdapter::new(http_config, quic_config)
+                        .with_resume_store(Arc::clone(&resume_store)),
+                );
                 let config = TransferConfig {
                     auth_token: params.token.clone().map(Zeroizing::new),
+                    resume_state_dir: aerosync_dir.clone(),
                     ..TransferConfig::default()
                 };
                 let engine = TransferEngine::new(config);

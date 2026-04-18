@@ -4,7 +4,7 @@
 //! 5. TaskStore round-trip — persist → reload → states survive simulated restart
 
 use aerosync_mcp::{
-    server::{AeroSyncMcpServer, BackgroundTaskStatus, TaskEntry},
+    server::{AeroSyncMcpServer, BackgroundTaskStatus, SendFileParams, TaskEntry},
     task_store::TaskStore,
 };
 use std::{sync::Arc, time::Instant};
@@ -316,6 +316,134 @@ async fn test_evict_old_keeps_fresh_removes_ancient() {
     let remaining = store.load_all().await;
     assert_eq!(remaining.len(), 1, "only fresh task should remain after eviction");
     assert_eq!(remaining[0].0, fresh_id, "remaining task should be the fresh one");
+}
+
+// ── 6. P1 修复回归测试：send_file 必须把 resume_json_path 写入 SQLite ──────────
+//
+// 缺陷：在 P1 修复之前，`send_file` 只调用 `task_store.upsert(...)`，
+// 从不写入 `resume_json_path`，导致 `load_resumable()` 永远返回 0 条，
+// 重启后断点续传恢复路径成"悬空"。本测试锁死该回归。
+
+/// send_file 同步阶段必须把 resume_json_path 写入 SQLite，
+/// 路径必须落在 `aerosync_dir/.aerosync/{task_id}.json`。
+#[tokio::test]
+async fn test_send_file_records_resume_path_in_sqlite() {
+    let dir = tempdir().unwrap();
+    let aerosync_dir = dir.path().to_path_buf();
+    let db_path = aerosync_dir.join("tasks.db");
+    let store = Arc::new(TaskStore::open(&db_path).unwrap());
+
+    // 准备一个小源文件（避免触发实际网络 IO 的开销）
+    let src = aerosync_dir.join("payload.bin");
+    tokio::fs::write(&src, b"hello aerosync").await.unwrap();
+
+    let server = AeroSyncMcpServer::new()
+        .with_task_store(Arc::clone(&store))
+        .with_aerosync_dir(aerosync_dir.clone());
+
+    // 目标使用明确的 http:// 前缀，让 negotiate_protocol 直接返回不发探针，
+    // 后台传输会失败（无监听者），但同步阶段写库已发生。
+    let params = SendFileParams {
+        source: src.to_string_lossy().to_string(),
+        destination: "http://127.0.0.1:1/upload".to_string(),
+        token: None,
+        no_verify: Some(true),
+        limit: None,
+        _auth_token: None,
+    };
+
+    let _ = server
+        .send_file(rmcp::handler::server::wrapper::Parameters(params))
+        .await
+        .expect("send_file should succeed at sync stage even if bg fails");
+
+    // 直接读 SQLite，验证恰好一条任务且 resume_json_path 非空
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE resume_json_path IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "send_file 必须把 resume_json_path 写入 SQLite（P1 回归）"
+    );
+
+    let resume_path: String = conn
+        .query_row("SELECT resume_json_path FROM tasks LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    let expected_prefix = aerosync_dir
+        .join(".aerosync")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        resume_path.starts_with(&expected_prefix),
+        "resume_json_path 应位于 {{aerosync_dir}}/.aerosync 下，实际为：{}",
+        resume_path
+    );
+    assert!(
+        resume_path.ends_with(".json"),
+        "resume_json_path 应以 .json 结尾，实际为：{}",
+        resume_path
+    );
+}
+
+/// 即使后台任务最终失败，TaskStore 中的 resume_json_path 也必须保留，
+/// 这样下次进程启动时 recovery 能尝试断点续传。
+#[tokio::test]
+async fn test_send_file_keeps_resume_path_after_failure() {
+    let dir = tempdir().unwrap();
+    let aerosync_dir = dir.path().to_path_buf();
+    let db_path = aerosync_dir.join("tasks.db");
+    let store = Arc::new(TaskStore::open(&db_path).unwrap());
+
+    let src = aerosync_dir.join("payload.bin");
+    tokio::fs::write(&src, b"x").await.unwrap();
+
+    let server = AeroSyncMcpServer::new()
+        .with_task_store(Arc::clone(&store))
+        .with_aerosync_dir(aerosync_dir.clone());
+
+    let params = SendFileParams {
+        source: src.to_string_lossy().to_string(),
+        destination: "http://127.0.0.1:1/upload".to_string(),
+        token: None,
+        no_verify: Some(true),
+        limit: None,
+        _auth_token: None,
+    };
+    let _ = server
+        .send_file(rmcp::handler::server::wrapper::Parameters(params))
+        .await
+        .expect("send_file sync stage should not error");
+
+    // 等待后台任务收敛到失败状态（端口 1 不可达，几乎立即失败）
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM tasks LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        if status == "failed" || status == "completed" {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("background task did not converge to failed within 15s");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // 失败后 resume_json_path 必须保留（让重启后 recovery 可识别）
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let resume_path: Option<String> = conn
+        .query_row("SELECT resume_json_path FROM tasks LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        resume_path.is_some(),
+        "失败状态下 resume_json_path 必须保留，便于下次启动续传"
+    );
 }
 
 /// Multiple tasks with different statuses — all persisted and loaded correctly.
