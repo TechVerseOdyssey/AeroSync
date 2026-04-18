@@ -1,11 +1,16 @@
 use crate::core::audit::{AuditLogger, Direction};
+use crate::core::history::HistoryEntry;
+use crate::core::history::HistoryStore;
 use crate::core::progress::TransferStatus;
+use crate::core::receipt::{Event, Receipt, Sender};
+use crate::core::receipt_registry::ReceiptRegistry;
 use crate::core::resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
 use crate::core::{AeroSyncError, ProgressMonitor, Result, TransferProgress};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -182,6 +187,21 @@ pub struct TransferEngine {
     cancel_receiver: Arc<RwLock<Option<mpsc::UnboundedReceiver<Uuid>>>>,
     _task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     audit_logger: Option<Arc<AuditLogger>>,
+    /// RFC-002 §6.4 sender-side receipt registry. Populated by
+    /// [`TransferEngine::send`]; the in-process `ReceiptRegistry` is
+    /// the lookup point for `wait_receipt`/`cancel_receipt` and for
+    /// QUIC frame routing once the receipt stream is wired into the
+    /// transport (deferred from this task — see `quic_receipt`).
+    receipt_registry: Arc<ReceiptRegistry<Sender>>,
+    /// Optional [`HistoryStore`] auto-paired with every `send` call:
+    /// when set, each freshly-issued [`Receipt`] is connected via
+    /// [`HistoryStore::spawn_watch_bridge`] so terminal transitions
+    /// land in the JSONL history.
+    history_store: Option<Arc<HistoryStore>>,
+    /// Map of QUEUE-side `task_id → receipt_id` so the bridge spawned
+    /// by `send` can drive the right receipt when the worker reports
+    /// completion.
+    task_to_receipt: Arc<RwLock<std::collections::HashMap<Uuid, Uuid>>>,
 }
 
 impl TransferEngine {
@@ -198,7 +218,25 @@ impl TransferEngine {
             cancel_receiver: Arc::new(RwLock::new(Some(cancel_receiver))),
             _task_handle: Arc::new(RwLock::new(None)),
             audit_logger: None,
+            receipt_registry: Arc::new(ReceiptRegistry::new()),
+            history_store: None,
+            task_to_receipt: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Builder: attach a [`HistoryStore`] so future [`Self::send`]
+    /// calls auto-persist receipt terminals via
+    /// [`HistoryStore::spawn_watch_bridge`].
+    pub fn with_history_store(mut self, store: Arc<HistoryStore>) -> Self {
+        self.history_store = Some(store);
+        self
+    }
+
+    /// Borrow the engine's sender-side [`ReceiptRegistry`]. MCP tools
+    /// (`wait_receipt`, `cancel_receipt`) hold a clone of this Arc to
+    /// look up live receipts by id.
+    pub fn receipt_registry(&self) -> Arc<ReceiptRegistry<Sender>> {
+        Arc::clone(&self.receipt_registry)
     }
 
     /// 启动引擎，注入协议适配器
@@ -270,12 +308,156 @@ impl TransferEngine {
 
     #[tracing::instrument(skip(self), fields(task_id = %task_id))]
     pub async fn cancel_transfer(&self, task_id: Uuid) -> Result<()> {
+        // Mirror the cancel signal into the per-task Receipt (if any)
+        // so observers of `Receipt::watch` see a Cancelled terminal
+        // rather than waiting forever. The cancel event is rejected
+        // silently if the receipt is already terminal.
+        if let Some(receipt_id) = self.task_to_receipt.read().await.get(&task_id).copied() {
+            if let Some(receipt) = self.receipt_registry.get(receipt_id) {
+                let _ = receipt.apply_event(Event::Cancel {
+                    reason: "transfer cancelled by sender".to_string(),
+                });
+            }
+        }
         self.cancel_sender
             .as_ref()
             .ok_or_else(|| AeroSyncError::System("Transfer engine not started".to_string()))?
             .send(task_id)
             .map_err(|_| AeroSyncError::System("Failed to send cancel signal".to_string()))?;
         Ok(())
+    }
+
+    /// RFC-002 §6.4 sender API: queue a transfer and return an
+    /// [`Arc<Receipt<Sender>>`] that observes its lifecycle.
+    ///
+    /// The returned receipt starts in [`State::Initiated`] and is
+    /// driven by an internal bridge task through
+    /// `StreamOpened → DataTransferred → StreamClosed → Processing`
+    /// once the worker reports the local transfer succeeded. The final
+    /// `Acked` / `Nacked` transition is **not** synthesised by the
+    /// engine — that event must come from the receiver-side, either
+    /// via a wired QUIC receipt-stream reader (see
+    /// `protocols::quic_receipt`) or via an explicit
+    /// `apply_event(Event::Ack)` from a test or local handler.
+    ///
+    /// Failure paths: a worker `Failed` status maps to
+    /// `Event::Error{code, detail}`; an explicit `cancel_transfer`
+    /// maps to `Event::Cancel{reason}`.
+    ///
+    /// The receipt is registered in
+    /// [`Self::receipt_registry`] before this function returns so MCP
+    /// `wait_receipt`/`cancel_receipt` can find it immediately.
+    /// If a [`HistoryStore`] was attached via
+    /// [`Self::with_history_store`], a stub history entry tagged with
+    /// the receipt id is appended and a `spawn_watch_bridge` is
+    /// installed so terminals land in JSONL.
+    #[tracing::instrument(skip(self, task), fields(task_id = %task.id))]
+    pub async fn send(&self, task: TransferTask) -> Result<Arc<Receipt<Sender>>> {
+        let receipt_id = Uuid::new_v4();
+        let receipt: Arc<Receipt<Sender>> = Arc::new(Receipt::<Sender>::new(receipt_id));
+        self.receipt_registry.insert(Arc::clone(&receipt));
+
+        // Move to StreamOpened immediately so observers see at least
+        // one transition before the queued worker picks the task up.
+        let _ = receipt.apply_event(Event::Open);
+
+        // Optional history-store integration.
+        if let Some(store) = &self.history_store {
+            let filename = task
+                .source_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let entry = HistoryEntry::success(
+                filename,
+                None,
+                task.file_size,
+                task.sha256.clone(),
+                None,
+                if task.destination.starts_with("quic://") {
+                    "quic"
+                } else {
+                    "http"
+                },
+                "send",
+                0,
+            )
+            .with_receipt_id(receipt_id);
+            store.append_silent(entry).await;
+            store.spawn_watch_bridge(Arc::clone(&receipt));
+        }
+
+        let task_id = task.id;
+        self.task_to_receipt
+            .write()
+            .await
+            .insert(task_id, receipt_id);
+
+        // Bridge: poll the ProgressMonitor for terminal status and
+        // mirror it into the Receipt state machine. Polling at 20ms
+        // is acceptable because (a) transfers are typically
+        // seconds-long, (b) the bridge exits as soon as terminal is
+        // observed. A push-based replacement awaits ProgressMonitor
+        // gaining a watch channel — out of scope for RFC-002 §14 #8.
+        let monitor = Arc::clone(&self.progress_monitor);
+        let registry = Arc::clone(&self.receipt_registry);
+        let task_to_receipt = Arc::clone(&self.task_to_receipt);
+        let bridge_receipt = Arc::clone(&receipt);
+        tokio::spawn(async move {
+            // Hard upper bound so a stuck monitor can't leak the task.
+            let deadline = std::time::Instant::now() + Duration::from_secs(60 * 60 * 24);
+            loop {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                if std::time::Instant::now() >= deadline {
+                    let _ = bridge_receipt.apply_event(Event::Error {
+                        code: 504,
+                        detail: "transfer-engine bridge deadline exceeded".to_string(),
+                    });
+                    break;
+                }
+                let snapshot = {
+                    let m = monitor.read().await;
+                    m.get_transfer(&task_id).cloned()
+                };
+                match snapshot.map(|p| p.status) {
+                    Some(TransferStatus::Completed) => {
+                        // Drive Open/StreamOpened → DataTransferred → StreamClosed → Processing.
+                        // Each apply_event is a no-op if already past
+                        // that state (e.g. on retry).
+                        let _ = bridge_receipt.apply_event(Event::Close);
+                        let _ = bridge_receipt.apply_event(Event::Close);
+                        let _ = bridge_receipt.apply_event(Event::Process);
+                        break;
+                    }
+                    Some(TransferStatus::Failed(reason)) => {
+                        let _ = bridge_receipt.apply_event(Event::Error {
+                            code: 1,
+                            detail: reason,
+                        });
+                        break;
+                    }
+                    Some(TransferStatus::Cancelled) => {
+                        let _ = bridge_receipt.apply_event(Event::Cancel {
+                            reason: "transfer cancelled".to_string(),
+                        });
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
+            // Cleanup: remove the task→receipt map entry. The receipt
+            // itself stays in the registry until pruned (so callers
+            // can still observe the terminal state) — `prune_terminal`
+            // is the GC hook for that.
+            let _ = registry; // explicit borrow so we keep the Arc alive
+            task_to_receipt.write().await.remove(&task_id);
+        });
+
+        // Queue the actual transfer. We do this AFTER spawning the
+        // bridge so the bridge can never miss a fast completion.
+        self.add_transfer(task).await?;
+
+        Ok(receipt)
     }
 
     pub async fn get_progress_monitor(&self) -> Arc<RwLock<ProgressMonitor>> {
@@ -956,6 +1138,202 @@ mod tests {
         let m = engine.get_progress_monitor().await;
         assert_eq!(m.read().await.get_stats().completed_files, 5);
         assert_eq!(up_count.load(Ordering::SeqCst), 5);
+    }
+
+    // ── RFC-002 §14 Task #8: TransferEngine::send → Receipt ─────────
+
+    use crate::core::receipt::{CompletedTerminal, FailedTerminal, State};
+
+    /// Wait up to `timeout_ms` for the receipt's state to satisfy
+    /// `pred`, polling its `watch` channel. Panics on timeout with a
+    /// message including the last-observed state.
+    async fn wait_for_receipt<F>(
+        receipt: &Arc<Receipt<Sender>>,
+        timeout_ms: u64,
+        pred: F,
+        label: &str,
+    ) -> State
+    where
+        F: Fn(&State) -> bool,
+    {
+        let start = std::time::Instant::now();
+        let mut rx = receipt.watch();
+        loop {
+            {
+                let snapshot = rx.borrow_and_update().clone();
+                if pred(&snapshot) {
+                    return snapshot;
+                }
+                if start.elapsed() > Duration::from_millis(timeout_ms) {
+                    panic!(
+                        "wait_for_receipt({label}) timed out after {timeout_ms}ms; last={snapshot:?}"
+                    );
+                }
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_returns_receipt_registered_in_registry() {
+        let engine = TransferEngine::new(TransferConfig::default());
+        let (adapter, _, _) = SuccessAdapter::new();
+        engine.start(adapter).await.unwrap();
+
+        let task = TransferTask::new_upload(
+            PathBuf::from("/no-such-file.bin"),
+            "http://h/upload".to_string(),
+            0,
+        );
+        let receipt = engine.send(task).await.expect("send must succeed");
+        assert!(engine.receipt_registry().contains(receipt.id()));
+    }
+
+    #[tokio::test]
+    async fn test_send_drives_receipt_through_processing_then_external_ack() {
+        // Without a wired QUIC receipt-stream reader the engine drives
+        // the receipt only as far as `Processing`; the receiver-side
+        // Ack is applied externally to demonstrate the full happy path.
+        let engine = TransferEngine::new(TransferConfig::default());
+        let (adapter, up_count, _) = SuccessAdapter::new();
+        engine.start(adapter).await.unwrap();
+
+        let task = TransferTask::new_upload(
+            PathBuf::from("/some.bin"),
+            "http://h/upload".to_string(),
+            0,
+        );
+        let receipt = engine.send(task).await.unwrap();
+
+        wait_for_receipt(
+            &receipt,
+            2_000,
+            |s| matches!(s, State::Processing),
+            "Processing",
+        )
+        .await;
+        assert_eq!(up_count.load(Ordering::SeqCst), 1);
+
+        receipt.apply_event(Event::Ack).expect("ack must succeed");
+        let final_state = receipt.state();
+        assert!(matches!(
+            final_state,
+            State::Completed(CompletedTerminal::Acked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_send_failed_transfer_drives_receipt_to_errored() {
+        let engine = TransferEngine::new(TransferConfig::default());
+        engine.start(Arc::new(FailAdapter)).await.unwrap();
+
+        let task = TransferTask::new_upload(
+            PathBuf::from("/no.bin"),
+            "http://h/upload".to_string(),
+            0,
+        );
+        let receipt = engine.send(task).await.unwrap();
+
+        let terminal = wait_for_receipt(
+            &receipt,
+            2_000,
+            |s| matches!(s, State::Failed(FailedTerminal::Errored { .. })),
+            "Errored",
+        )
+        .await;
+        match terminal {
+            State::Failed(FailedTerminal::Errored { detail, .. }) => {
+                assert!(detail.contains("simulated"), "detail={detail}");
+            }
+            other => panic!("expected Errored, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_transfer_drives_receipt_to_cancelled() {
+        let cfg = TransferConfig {
+            max_concurrent_transfers: 1,
+            ..TransferConfig::default()
+        };
+        let engine = TransferEngine::new(cfg);
+        let (adapter, _, _) = SlowAdapter::new(500);
+        engine.start(adapter).await.unwrap();
+
+        let task = TransferTask::new_upload(
+            PathBuf::from("/slow.bin"),
+            "http://h/upload".to_string(),
+            0,
+        );
+        let task_id = task.id;
+        let receipt = engine.send(task).await.unwrap();
+        // Cancel before the slow upload completes.
+        sleep(Duration::from_millis(50)).await;
+        engine.cancel_transfer(task_id).await.unwrap();
+
+        let terminal = wait_for_receipt(
+            &receipt,
+            2_000,
+            |s| matches!(s, State::Failed(FailedTerminal::Cancelled { .. })),
+            "Cancelled",
+        )
+        .await;
+        match terminal {
+            State::Failed(FailedTerminal::Cancelled { reason }) => {
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_with_history_store_persists_terminal() {
+        let dir = TempDir::new().unwrap();
+        let history = Arc::new(
+            HistoryStore::new(&dir.path().join("h.jsonl"))
+                .await
+                .unwrap(),
+        );
+        let engine = TransferEngine::new(TransferConfig::default()).with_history_store(history.clone());
+        let (adapter, _, _) = SuccessAdapter::new();
+        engine.start(adapter).await.unwrap();
+
+        let task = TransferTask::new_upload(
+            PathBuf::from("/h.bin"),
+            "http://h/upload".to_string(),
+            0,
+        );
+        let receipt = engine.send(task).await.unwrap();
+        wait_for_receipt(
+            &receipt,
+            2_000,
+            |s| matches!(s, State::Processing),
+            "Processing",
+        )
+        .await;
+        receipt.apply_event(Event::Ack).unwrap();
+
+        // Give the watch-bridge a moment to land the terminal.
+        for _ in 0..40 {
+            if history
+                .query_by_receipt(receipt.id())
+                .await
+                .unwrap()
+                .and_then(|e| e.receipt_state)
+                .is_some()
+            {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        let entry = history
+            .query_by_receipt(receipt.id())
+            .await
+            .unwrap()
+            .expect("history entry must exist");
+        assert_eq!(
+            entry.receipt_state,
+            Some(crate::core::ReceiptStateLabel::Acked)
+        );
     }
 
     #[tokio::test]
