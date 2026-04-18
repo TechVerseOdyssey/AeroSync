@@ -19,6 +19,20 @@ use aerosync::core::{
 };
 use aerosync::protocols::{http::HttpConfig, quic::QuicConfig, AutoAdapter};
 use rmcp::{model::*, schemars, tool, tool_handler, tool_router, ServerHandler};
+
+/// Re-export the `rmcp` parameter wrapper under a stable, crate-local
+/// path so external integration tests (e.g. workspace-level e2e
+/// suites) can drive the tool methods without taking a direct
+/// dev-dependency on `rmcp`.
+pub type ParametersAlias<T> = rmcp::handler::server::wrapper::Parameters<T>;
+
+/// Constructor companion for [`ParametersAlias`]: external callers
+/// invoke this to wrap their tool parameters before handing them to
+/// the `#[tool]` methods on [`AeroSyncMcpServer`]. Equivalent to
+/// `rmcp::handler::server::wrapper::Parameters(t)`.
+pub fn wrap_params<T>(t: T) -> ParametersAlias<T> {
+    rmcp::handler::server::wrapper::Parameters(t)
+}
 use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
@@ -1728,7 +1742,10 @@ mod tests {
         assert_eq!(payload["success"], serde_json::Value::Bool(true));
         assert_eq!(payload["data"]["state"]["label"], "cancelled");
         assert_eq!(payload["data"]["state"]["reason"], "user abort");
-        assert_eq!(payload["data"]["already_terminal"], serde_json::Value::Bool(false));
+        assert_eq!(
+            payload["data"]["already_terminal"],
+            serde_json::Value::Bool(false)
+        );
         assert!(receipt.state().is_terminal());
     }
 
@@ -1774,7 +1791,10 @@ mod tests {
             .unwrap();
         let payload = extract_text_payload(&result);
         assert_eq!(payload["success"], serde_json::Value::Bool(true));
-        assert_eq!(payload["data"]["already_terminal"], serde_json::Value::Bool(true));
+        assert_eq!(
+            payload["data"]["already_terminal"],
+            serde_json::Value::Bool(true)
+        );
         // Reason from the FIRST cancel must still be in place.
         assert_eq!(payload["data"]["state"]["reason"], "first");
     }

@@ -90,6 +90,11 @@ libc = "0.2"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-tungstenite = "0.20"
+# Workspace-internal dep used only by `tests/receipts_e2e.rs` to drive the
+# MCP `cancel_receipt` tool function directly (no out-of-process MCP server).
+# Path-only — adds nothing to the external dependency surface or `cargo deny`
+# advisories.
+aerosync-mcp = { path = "aerosync-mcp" }
 
 [workspace]
 members = [
