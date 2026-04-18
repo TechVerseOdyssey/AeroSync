@@ -11,12 +11,16 @@ version = 2
 #   1. WHY the advisory is not exploitable in AeroSync's actual code paths
 #   2. WHEN we expect to remove the ignore (which dependency upgrade unblocks it)
 #
-# All current ignores trace back to either:
-#   - warp 0.3.7  (HTTPS receiver, will be migrated to axum in v0.2.0)
-#   - quinn 0.10  (QUIC transport, will be upgraded to 0.11 in v0.2.0)
+# v0.2.0 preparation status:
+#   - quinn 0.10 → 0.11  .......... DONE (kills RUSTSEC-2026-0037)
+#   - rustls 0.21 → 0.23 .......... DONE (kills RUSTSEC-2025-0009)
+#   - rcgen 0.11 → 0.13 ........... DONE
+#   - rustls-pemfile 1 → 2 ........ DONE (but warp still pulls pemfile 2.x)
+#   - warp 0.3 → axum ............. PENDING (blocks the 5 ignores below)
 #
-# Once both are done the entire chain of old rustls/webpki/ring/pemfile
-# disappears. Track the migration in TODO.local.md (v0.2.0 milestone).
+# The remaining 5 advisories are all in the warp 0.3.7 transitive tree.
+# They disappear the moment we rewrite src/core/server.rs from warp filters
+# onto axum (planned as part of RFC-002 #5 HTTP SSE fallback work).
 # ─────────────────────────────────────────────────────────────────────
 ignore = [
   # ── rustls-webpki: name-constraint parsing bugs ──
@@ -24,46 +28,34 @@ ignore = [
   # requires misissuance to exploit." AeroSync uses self-signed certs
   # (HTTPS receiver) and pinned certs (QUIC); neither walks a CA chain
   # that could be misissued. We never assert URI / wildcard name
-  # constraints. Affects both 0.101.7 (rcgen chain) and 0.102.8 (warp
-  # chain).
-  { id = "RUSTSEC-2026-0098", reason = "name-constraint URI parsing; not on any AeroSync code path; blocked on warp 0.3 → axum (v0.2.0)" },
-  { id = "RUSTSEC-2026-0099", reason = "name-constraint wildcard parsing; not on any AeroSync code path; blocked on warp 0.3 → axum (v0.2.0)" },
-  # ── rustls-webpki 0.102.8: CRL distribution point matching ──
+  # constraints. Reaches us only via warp's internal rustls 0.21 chain.
+  { id = "RUSTSEC-2026-0098", reason = "name-constraint URI parsing; not on any AeroSync code path; blocked on warp 0.3 → axum (RFC-002 #5)" },
+  { id = "RUSTSEC-2026-0099", reason = "name-constraint wildcard parsing; not on any AeroSync code path; blocked on warp 0.3 → axum (RFC-002 #5)" },
+  # ── rustls-webpki: CRL distribution point matching ──
   # AeroSync does not consult Certificate Revocation Lists in either
   # the HTTPS or QUIC path. Self-signed / pinned cert verification
   # bypasses CRL checking entirely.
-  { id = "RUSTSEC-2026-0049", reason = "CRL distribution point matching; AeroSync does not use CRLs; blocked on warp 0.3 → axum (v0.2.0)" },
-  # ── ring 0.16.20: AES panic when overflow checks are enabled ──
-  # Release builds disable overflow checks; debug/test builds do not
-  # exercise the AES paths in question (we use ring only via the rustls
-  # 0.21 transitive chain, which itself stays out of these paths in
-  # our usage). Blocked on rustls 0.22+ which uses ring 0.17 — comes
-  # for free once warp 0.3 is gone.
-  { id = "RUSTSEC-2025-0009", reason = "AES panic only with overflow_checks=on; release builds disable; blocked on warp 0.3 → axum (v0.2.0)" },
-  # ── quinn-proto 0.10.6: DoS in Quinn endpoints ──
-  # We use quinn for our own QUIC transport between trusted peers
-  # (auth-token gated, mDNS-discovered LAN). External adversaries
-  # cannot reach our QUIC endpoint without first guessing a 32-byte
-  # auth token. Blocked on quinn 0.10 → 0.11 migration (v0.2.0;
-  # requires rustls 0.21 → 0.23 + ServerCertVerifier rewrite).
-  { id = "RUSTSEC-2026-0037", reason = "Quinn DoS; AeroSync requires auth token before any QUIC operation; blocked on quinn 0.10 → 0.11 (v0.2.0)" },
-  # ── rustls-pemfile 1.0.4: unmaintained ──
-  # Used directly by aerosync-core to parse user-provided PEM certs
-  # (--tls-cert / --tls-key). Upstream replacement is rustls-pki-types'
-  # PemObject trait, but switching requires upgrading rustls 0.21 → 0.23
-  # which only makes sense alongside the warp 0.3 → axum migration.
-  # The crate itself is feature-frozen but not vulnerable.
-  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; functionally fine; migration to rustls-pki-types PemObject blocked on rustls 0.23 upgrade (v0.2.0)" },
-  # ── rand 0.7.3 / 0.8.5: unsound with custom logger calling rand::rng() ──
+  { id = "RUSTSEC-2026-0049", reason = "CRL distribution point matching; AeroSync does not use CRLs; blocked on warp 0.3 → axum (RFC-002 #5)" },
+  # ── rustls-pemfile: unmaintained ──
+  # Our own code no longer depends on rustls-pemfile directly (we use
+  # rustls-pki-types parsers), but warp 0.3.7's HTTPS stack still pulls
+  # rustls-pemfile 2.x for its internal PEM loading. The crate is
+  # feature-frozen but not vulnerable; the ignore disappears when warp
+  # leaves the tree.
+  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; only reaches us via warp 0.3's HTTPS stack; blocked on warp 0.3 → axum (RFC-002 #5)" },
+  # ── rand 0.8.5: unsound with custom logger calling rand::rng() ──
   # Advisory: triggers ONLY when a custom log::Log implementation calls
   # rand::thread_rng() at trace/warn level with a 64-KB-aligned reseed
   # event. AeroSync uses `tracing` (not `log`), has no custom logger,
-  # and never calls rand from inside any logging code. Both versions
-  # are pulled transitively (tauri-build via phf, eframe via zbus,
-  # warp via tungstenite, quinn-proto). All disappear once the v0.2.0
-  # warp/quinn migration completes — none of those upgrades is in scope
-  # for v0.1.0.
-  { id = "RUSTSEC-2026-0097", reason = "rand unsound only with custom log::Log calling rng(); AeroSync uses tracing with no such logger; blocked on warp/quinn upgrades (v0.2.0)" },
+  # and never calls rand from inside any logging code. rand is pulled
+  # transitively via warp's tungstenite WebSocket stack.
+  { id = "RUSTSEC-2026-0097", reason = "rand unsound only with custom log::Log calling rng(); AeroSync uses tracing with no such logger; blocked on warp 0.3 → axum (RFC-002 #5)" },
+  # ── number_prefix 0.4.0: unmaintained ──
+  # Pulled transitively by indicatif 0.17 for human-readable byte
+  # formatting in the CLI progress bars. The crate is 30 lines of
+  # utility code, has no network / crypto surface, and is not
+  # vulnerable. Waits on indicatif upstream to drop the dep.
+  { id = "RUSTSEC-2025-0119", reason = "number_prefix unmaintained; utility crate with no security surface; reaches us only via indicatif CLI progress bars; blocked on indicatif dropping the dep upstream" },
 ]
 # Default severity policy: error on real vulnerabilities, warn on
 # unmaintained / unsound (these are informational and pervasive in
@@ -87,6 +79,10 @@ allow = [
   "OpenSSL",
   "BSL-1.0",
   "CC0-1.0",
+  # CDLA-Permissive-2.0: Community Data License Agreement (Permissive).
+  # Used by webpki-roots 1.x (pulled via reqwest 0.12 for bundled root
+  # CA list). Permissive, compatible with our MIT license.
+  "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 

@@ -1,9 +1,9 @@
+use crate::core::resume::{ResumeState, ResumeStore};
+use crate::core::{AeroSyncError, Result, TransferTask};
 use crate::protocols::circuit_breaker::CircuitBreaker;
 use crate::protocols::ratelimit::RateLimiter;
 use crate::protocols::traits::{TransferProgress, TransferProtocol};
 use crate::protocols::utils::send_progress;
-use crate::core::resume::{ResumeState, ResumeStore};
-use crate::core::{AeroSyncError, Result, TransferTask};
 use async_trait::async_trait;
 use bytes::Bytes;
 use memmap2::MmapOptions;

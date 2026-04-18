@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (v0.2.0 prep — TLS stack modernization)
+- Upgraded QUIC transport to `quinn 0.11` (from 0.10), which required
+  reworking `ClientConfig::new` to wrap rustls via
+  `quinn::crypto::rustls::QuicClientConfig` and making
+  `SendStream::finish()` synchronous at every call site.
+  Closes **RUSTSEC-2026-0037** (Quinn DoS).
+- Upgraded `rustls 0.21 → 0.23`. `PinnedCertVerifier` was rewritten to
+  the new `rustls::client::danger::ServerCertVerifier` trait (requires
+  explicit `supported_verify_schemes`, `verify_tls12_signature`,
+  `verify_tls13_signature` implementations) and uses
+  `rustls_pki_types::CertificateDer<'_>` / `ServerName<'_>` /
+  `UnixTime` in place of the legacy rustls types. The rustls process-
+  wide crypto provider (`ring`) is installed lazily on first QUIC use.
+  Closes **RUSTSEC-2025-0009** (ring AES panic).
+- Upgraded `rustls-pemfile 1 → 2` and migrated `load_tls_from_pem`
+  to the iterator-based parsers that return
+  `rustls_pki_types::{CertificateDer, PrivateKeyDer}` directly.
+- Upgraded `rcgen 0.11 → 0.13`. Self-signed cert generation now uses
+  the infallible `CertifiedKey::cert.pem()` /
+  `key_pair.serialize_pem()` accessors.
+- Upgraded `reqwest 0.11 → 0.12` (pulled in by the new rustls chain;
+  no code changes required on our side).
+- `deny.toml` ignore list dropped from 7 to 5 entries; reasons updated
+  to point to the RFC-002 follow-up that will remove warp.
+- `rustls-native-certs` removed from `Cargo.toml` — it was declared but
+  never imported in any source file.
+
 ### Added
 - LICENSE (MIT) and full crate metadata so each crate can be published
   to crates.io.

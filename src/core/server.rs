@@ -477,18 +477,18 @@ async fn watch_config_reload_task(
 
 /// 生成自签名证书，返回 (cert_pem_bytes, key_pem_bytes)
 fn generate_self_signed_pem() -> Result<(Vec<u8>, Vec<u8>)> {
-    let cert = rcgen::generate_simple_self_signed(vec![
+    // rcgen 0.13: returns CertifiedKey { cert, key_pair } whose PEM
+    // serializations are now infallible and exposed via Cert::pem() /
+    // KeyPair::serialize_pem().
+    let certified = rcgen::generate_simple_self_signed(vec![
         "localhost".into(),
         "127.0.0.1".into(),
         "0.0.0.0".into(),
     ])
     .map_err(|e| AeroSyncError::System(format!("Failed to generate self-signed cert: {}", e)))?;
 
-    let cert_pem = cert
-        .serialize_pem()
-        .map_err(|e| AeroSyncError::System(format!("Failed to serialize cert PEM: {}", e)))?
-        .into_bytes();
-    let key_pem = cert.serialize_private_key_pem().into_bytes();
+    let cert_pem = certified.cert.pem().into_bytes();
+    let key_pem = certified.key_pair.serialize_pem().into_bytes();
     Ok((cert_pem, key_pem))
 }
 
@@ -1811,38 +1811,59 @@ async fn start_quic_server(
 }
 
 fn configure_quic_server(tls: Option<&TlsConfig>) -> Result<quinn::ServerConfig> {
-    use rustls::{Certificate, PrivateKey, ServerConfig as TlsServerConfig};
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls::ServerConfig as TlsServerConfig;
 
-    let (certs, key) = if let Some(tls_cfg) = tls {
-        // 加载外部 PEM 文件
-        load_tls_from_pem(&tls_cfg.cert_path, &tls_cfg.key_path)?
-    } else {
-        // 自动生成自签名证书
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
-            .map_err(|e| AeroSyncError::System(format!("Failed to generate certificate: {}", e)))?;
-        let cert_der = cert.serialize_der().map_err(|e| {
-            AeroSyncError::System(format!("Failed to serialize certificate: {}", e))
-        })?;
-        let key_der = cert.serialize_private_key_der();
-        (vec![Certificate(cert_der)], PrivateKey(key_der))
-    };
+    // rustls 0.23 requires a crypto provider to be registered before any
+    // config is built. We reuse the installer from the client side.
+    crate::protocols::quic::ensure_crypto_provider_installed();
+
+    let (certs, key): (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) =
+        if let Some(tls_cfg) = tls {
+            load_tls_from_pem(&tls_cfg.cert_path, &tls_cfg.key_path)?
+        } else {
+            // rcgen 0.13: generate_simple_self_signed returns a cert + key
+            // pair; both have der() accessors. We embed the DER bytes into
+            // owned rustls types.
+            let cert =
+                rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
+                    .map_err(|e| {
+                        AeroSyncError::System(format!("Failed to generate certificate: {}", e))
+                    })?;
+            let cert_der = CertificateDer::from(cert.cert.der().to_vec());
+            let key_der = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+                cert.key_pair.serialize_der(),
+            ));
+            (vec![cert_der], key_der)
+        };
 
     let mut tls_config = TlsServerConfig::builder()
-        .with_safe_defaults()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| AeroSyncError::System(format!("TLS config error: {}", e)))?;
 
     tls_config.alpn_protocols = vec![b"aerosync".to_vec()];
 
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(tls_config)))
+    // quinn 0.11: ServerConfig wraps rustls via the QuicServerConfig bridge
+    // instead of taking a raw rustls::ServerConfig.
+    let quic_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
+        .map_err(|e| AeroSyncError::System(format!("QUIC TLS config error: {}", e)))?;
+    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_crypto)))
 }
 
-/// 从 PEM 文件加载证书链和私钥
+/// Load a PEM-encoded cert chain + private key from disk.
+///
+/// Uses rustls-pemfile 2 + rustls-pki-types (v0.2.0 upgrade): the file
+/// parsers now return iterators of `Result<CertificateDer | PrivateKeyDer>`
+/// directly, removing the unmaintained rustls-pemfile 1 wrappers.
 fn load_tls_from_pem(
     cert_path: &PathBuf,
     key_path: &PathBuf,
-) -> Result<(Vec<rustls::Certificate>, rustls::PrivateKey)> {
+) -> Result<(
+    Vec<rustls::pki_types::CertificateDer<'static>>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+)> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use std::io::BufReader;
 
     let cert_file = std::fs::File::open(cert_path).map_err(|e| {
@@ -1853,11 +1874,9 @@ fn load_tls_from_pem(
         ))
     })?;
     let mut cert_reader = BufReader::new(cert_file);
-    let certs: Vec<rustls::Certificate> = rustls_pemfile::certs(&mut cert_reader)
-        .map_err(|e| AeroSyncError::System(format!("Failed to parse cert PEM: {}", e)))?
-        .into_iter()
-        .map(rustls::Certificate)
-        .collect();
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|e| AeroSyncError::System(format!("Failed to parse cert PEM: {}", e)))?;
 
     if certs.is_empty() {
         return Err(AeroSyncError::System(format!(
@@ -1866,6 +1885,7 @@ fn load_tls_from_pem(
         )));
     }
 
+    // Try PKCS8, then RSA, then SEC1 — mirrors the v0.1.x behaviour.
     let key_file = std::fs::File::open(key_path).map_err(|e| {
         AeroSyncError::System(format!(
             "Cannot open key file {}: {}",
@@ -1874,26 +1894,33 @@ fn load_tls_from_pem(
         ))
     })?;
     let mut key_reader = BufReader::new(key_file);
+    let key: Option<PrivateKeyDer<'static>> =
+        match rustls_pemfile::pkcs8_private_keys(&mut key_reader)
+            .next()
+            .transpose()
+            .map_err(|e| AeroSyncError::System(format!("Failed to parse PKCS8 key: {}", e)))?
+        {
+            Some(k) => Some(PrivateKeyDer::Pkcs8(k)),
+            None => {
+                let key_file2 = std::fs::File::open(key_path).ok();
+                if let Some(f) = key_file2 {
+                    let mut r = BufReader::new(f);
+                    let rsa = rustls_pemfile::rsa_private_keys(&mut r)
+                        .next()
+                        .transpose()
+                        .map_err(|e| {
+                            AeroSyncError::System(format!("Failed to parse RSA key: {}", e))
+                        })?;
+                    rsa.map(PrivateKeyDer::Pkcs1)
+                } else {
+                    None
+                }
+            }
+        };
 
-    // 尝试 PKCS8，再尝试 RSA
-    let key = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
-        .map_err(|e| AeroSyncError::System(format!("Failed to parse key PEM: {}", e)))?
-        .into_iter()
-        .next()
-        .map(rustls::PrivateKey)
-        .or_else(|| {
-            // 重新打开文件读 RSA 格式
-            let key_file2 = std::fs::File::open(key_path).ok()?;
-            let mut kr = BufReader::new(key_file2);
-            rustls_pemfile::rsa_private_keys(&mut kr)
-                .ok()?
-                .into_iter()
-                .next()
-                .map(rustls::PrivateKey)
-        })
-        .ok_or_else(|| {
-            AeroSyncError::System(format!("No private key found in {}", key_path.display()))
-        })?;
+    let key = key.ok_or_else(|| {
+        AeroSyncError::System(format!("No private key found in {}", key_path.display()))
+    })?;
 
     Ok((certs, key))
 }
@@ -1958,7 +1985,7 @@ async fn handle_quic_connection(
                             .await;
                     }
                     let _ = send.write_all(b"ERROR:Unauthorized").await;
-                    let _ = send.finish().await;
+                    let _ = send.finish();
                     continue;
                 }
                 Err(e) => {
@@ -1972,7 +1999,7 @@ async fn handle_quic_connection(
             let _ = send
                 .write_all(format!("ERROR:File too large: {}", file_size).as_bytes())
                 .await;
-            let _ = send.finish().await;
+            let _ = send.finish();
             continue;
         }
 
@@ -2020,7 +2047,7 @@ async fn handle_quic_connection(
                 let _ = send.write_all(format!("ERROR:{}", e).as_bytes()).await;
             }
         }
-        let _ = send.finish().await;
+        let _ = send.finish();
     }
 
     Ok(())

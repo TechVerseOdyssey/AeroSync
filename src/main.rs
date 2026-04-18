@@ -11,7 +11,9 @@ use aerosync::core::{
     transfer::{TransferConfig, TransferEngine, TransferTask},
     FileManager,
 };
-use aerosync::protocols::{http::HttpConfig, quic::QuicConfig, ratelimit::parse_limit, AutoAdapter};
+use aerosync::protocols::{
+    http::HttpConfig, quic::QuicConfig, ratelimit::parse_limit, AutoAdapter,
+};
 use clap::{Parser, Subcommand};
 use futures::stream::{self, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};

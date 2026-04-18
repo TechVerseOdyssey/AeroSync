@@ -18,7 +18,7 @@ pub mod protocols;
 // `use aerosync::TransferEngine` without remembering the sub-module path.
 pub use crate::core::{
     AeroSyncError, AeroSyncMdns, AuditLogger, AuthConfig, AuthManager, FileManager, FileReceiver,
-    HistoryStore, ProgressMonitor, ResumeStore, Result, ServerConfig, TlsConfig, TransferConfig,
+    HistoryStore, ProgressMonitor, Result, ResumeStore, ServerConfig, TlsConfig, TransferConfig,
     TransferEngine, TransferTask,
 };
 pub use crate::protocols::{AutoAdapter, HttpConfig, HttpTransfer, QuicConfig, QuicTransfer};

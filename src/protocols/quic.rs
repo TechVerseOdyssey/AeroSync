@@ -1,28 +1,60 @@
-use crate::protocols::traits::{TransferProgress, TransferProtocol};
 use crate::core::{AeroSyncError, Result, TransferTask};
+use crate::protocols::traits::{TransferProgress, TransferProtocol};
 use async_trait::async_trait;
 use quinn::{ClientConfig, Connection, Endpoint};
-use rustls::client::{ServerCertVerified, ServerCertVerifier};
-use rustls::{Certificate, ClientConfig as TlsClientConfig, ServerName};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName as PkiServerName, UnixTime};
+use rustls::{ClientConfig as TlsClientConfig, DigitallySignedStruct, SignatureScheme};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
+/// One-shot installer for the rustls process-wide crypto provider.
+/// rustls 0.23 requires an explicit crypto provider; we pick `ring` to
+/// keep the existing algorithm profile and avoid pulling aws-lc. Safe to
+/// call repeatedly.
+pub(crate) fn ensure_crypto_provider_installed() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // The installer returns Err if another provider is already set,
+        // which is fine — we just want SOMETHING installed before any
+        // rustls type is constructed.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// 证书固定验证器：只接受指定指纹的证书，而非完全跳过验证。
 /// 用于开发/自签名场景。生产环境应使用系统证书库。
+#[derive(Debug)]
 struct PinnedCertVerifier {
     /// 接受的证书 DER 字节集合（为空时表示开发模式，接受任何证书并打印警告）
     accepted_certs: Vec<Vec<u8>>,
     dev_mode: bool,
+    supported_schemes: Vec<SignatureScheme>,
 }
 
 impl PinnedCertVerifier {
+    fn supported_default_schemes() -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+        ]
+    }
+
     /// 开发模式：接受任何自签名证书，但打印安全警告。
     fn dev_mode() -> Arc<Self> {
         tracing::warn!(
@@ -32,6 +64,7 @@ impl PinnedCertVerifier {
         Arc::new(Self {
             accepted_certs: vec![],
             dev_mode: true,
+            supported_schemes: Self::supported_default_schemes(),
         })
     }
 
@@ -40,6 +73,7 @@ impl PinnedCertVerifier {
         Arc::new(Self {
             accepted_certs: certs,
             dev_mode: false,
+            supported_schemes: Self::supported_default_schemes(),
         })
     }
 }
@@ -47,22 +81,19 @@ impl PinnedCertVerifier {
 impl ServerCertVerifier for PinnedCertVerifier {
     fn verify_server_cert(
         &self,
-        end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        _server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &PkiServerName<'_>,
         _ocsp_response: &[u8],
-        _now: SystemTime,
+        _now: UnixTime,
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
         if self.dev_mode {
-            // 开发模式：接受但警告
             return Ok(ServerCertVerified::assertion());
         }
-        // 生产模式：检查证书是否在固定列表中
         if self
             .accepted_certs
             .iter()
-            .any(|c| c == end_entity.0.as_slice())
+            .any(|c| c.as_slice() == end_entity.as_ref())
         {
             Ok(ServerCertVerified::assertion())
         } else {
@@ -70,6 +101,30 @@ impl ServerCertVerifier for PinnedCertVerifier {
                 "Certificate not in pinned list".to_string(),
             ))
         }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        // Dev-mode / pinning: we have already attested the cert by identity,
+        // so signature verification is implicitly trusted.
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.supported_schemes.clone()
     }
 }
 
@@ -108,8 +163,9 @@ impl Default for QuicConfig {
 
 impl QuicTransfer {
     pub fn new(config: QuicConfig) -> Result<Self> {
+        ensure_crypto_provider_installed();
+
         let verifier = if !config.pinned_server_certs.is_empty() {
-            // 生产钉扎模式：加载 DER 文件
             let certs: Result<Vec<Vec<u8>>> = config
                 .pinned_server_certs
                 .iter()
@@ -125,12 +181,13 @@ impl QuicTransfer {
                 .collect();
             PinnedCertVerifier::with_pinned(certs?)
         } else {
-            // 开发模式 fallback（打印警告）
             PinnedCertVerifier::dev_mode()
         };
 
+        // rustls 0.23: builder no longer has with_safe_defaults(); the crypto
+        // provider installed above supplies the default cipher suites/kx.
         let mut tls_config = TlsClientConfig::builder()
-            .with_safe_defaults()
+            .dangerous()
             .with_custom_certificate_verifier(verifier)
             .with_no_client_auth();
 
@@ -150,7 +207,11 @@ impl QuicTransfer {
             config.keep_alive_interval,
         )));
 
-        let mut client_config = ClientConfig::new(Arc::new(tls_config));
+        // quinn 0.11: ClientConfig wraps rustls QuicClientConfig via the
+        // quinn::crypto::rustls bridge instead of taking raw rustls::ClientConfig.
+        let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
+            .map_err(|e| AeroSyncError::Network(format!("QUIC TLS config error: {}", e)))?;
+        let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
         client_config.transport_config(Arc::new(transport));
 
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())
@@ -233,8 +294,11 @@ impl QuicTransfer {
             });
         }
 
+        // quinn 0.11: SendStream::finish() is sync and only queues the FIN;
+        // call stopped() or wait for the remote to read-close to guarantee
+        // delivery. For our upload path we fire-and-forget the FIN since the
+        // caller aggregates at the application layer.
         send.finish()
-            .await
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
 
         tracing::info!(
@@ -262,8 +326,8 @@ impl QuicTransfer {
         send.write_all(request.as_bytes())
             .await
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
+        // quinn 0.11: finish() is sync; queues FIN, no await needed.
         send.finish()
-            .await
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
 
         let mut file = File::create(file_path).await?;

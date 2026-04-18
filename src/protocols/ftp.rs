@@ -3,8 +3,8 @@
 //! 使用 suppaftp（tokio 异步后端）实现 FTP/FTPS 文件传输。
 //! URL 格式：ftp://host:port/path/to/file
 
-use crate::protocols::traits::{TransferProgress, TransferProtocol};
 use crate::core::{AeroSyncError, Result, TransferTask};
+use crate::protocols::traits::{TransferProgress, TransferProtocol};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio::time::Instant;

@@ -12,9 +12,9 @@
 //! - 三步流程：Initiate → Upload Part(s) → Complete
 //! - 上传 ID（UploadId）可通过 `ResumeState.metadata` 持久化以支持断点续传
 
+use crate::core::{AeroSyncError, Result, TransferTask};
 use crate::protocols::traits::{TransferProgress, TransferProtocol};
 use crate::protocols::utils::send_progress;
-use crate::core::{AeroSyncError, Result, TransferTask};
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
