@@ -36,9 +36,10 @@ use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, Mutex};
 
 /// Inbound `Receiver`. Constructed via the `aerosync.receiver(...)`
@@ -47,7 +48,18 @@ use tokio::sync::{broadcast, Mutex};
 pub struct PyReceiver {
     pub(crate) inner: Arc<Mutex<FileReceiver>>,
     pub(crate) name: Option<String>,
+    /// User-supplied `listen=` string (e.g. `"127.0.0.1:0"`). Used as
+    /// a fallback by the `address` getter before the underlying
+    /// receiver has bound its socket. Once `start()` has run, the
+    /// getter prefers the OS-assigned address from `bound_http_addr`.
     pub(crate) address: String,
+    /// Cloned from `FileReceiver::local_http_addr_handle()` at
+    /// construction time. Reads the live OS-assigned HTTP address
+    /// without contending the outer tokio mutex around the
+    /// `FileReceiver` — important because the `address` getter is
+    /// sync and has to remain non-blocking. `None` until the
+    /// `FileReceiver` has actually bound the listener.
+    pub(crate) bound_http_addr: Arc<StdMutex<Option<SocketAddr>>>,
     pub(crate) ws_rx: Arc<Mutex<Option<broadcast::Receiver<WsEvent>>>>,
     pub(crate) yielded: Arc<AtomicUsize>,
     pub(crate) started: Arc<AtomicBool>,
@@ -55,10 +67,12 @@ pub struct PyReceiver {
 
 impl PyReceiver {
     pub fn new(inner: FileReceiver, name: Option<String>, address: String) -> Self {
+        let bound_http_addr = inner.local_http_addr_handle();
         Self {
             inner: Arc::new(Mutex::new(inner)),
             name,
             address,
+            bound_http_addr,
             ws_rx: Arc::new(Mutex::new(None)),
             yielded: Arc::new(AtomicUsize::new(0)),
             started: Arc::new(AtomicBool::new(false)),
@@ -73,8 +87,20 @@ impl PyReceiver {
         self.name.clone()
     }
 
+    /// Returns the address the receiver is reachable at.
+    ///
+    /// Prefers the OS-assigned `SocketAddr` captured by
+    /// `FileReceiver::start()` (so callers who passed
+    /// `listen="127.0.0.1:0"` see the real port), falling back to
+    /// the user-supplied `listen=` string when the receiver has not
+    /// yet bound its socket. The fallback preserves the previous
+    /// pre-`__aenter__` behaviour where the getter would echo the
+    /// constructor argument.
     #[getter]
     fn address(&self) -> String {
+        if let Some(addr) = *self.bound_http_addr.lock().unwrap() {
+            return addr.to_string();
+        }
         self.address.clone()
     }
 

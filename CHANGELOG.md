@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet — see the v0.2.0 section below.
+> v0.2.1 development. Targets quality-of-life fixes around the v0.2.0
+> Python SDK + a leaner default Cargo build. No wire-format changes.
+
+### Added
+
+- **`FileReceiver::local_http_addr()` / `local_quic_addr()`** — public
+  Rust accessors that return the OS-assigned `SocketAddr` once
+  `start()` has bound the listener. `None` before start and after
+  `stop()`. Lets callers who pass `http_port = 0` (or
+  `listen="127.0.0.1:0"` from Python) discover the real port instead
+  of grepping tracing output. (P0.3)
+
+### Changed
+
+- **`Receiver.address` (Python SDK)** — now returns the actual
+  bound `host:port` after `__aenter__` resolves, falling back to the
+  user-supplied `listen=` string only before the receiver has bound.
+  Unblocks the README quickstart pattern where a sender needs to
+  discover the receiver's port after binding to `127.0.0.1:0`.
+  (P0.3, RFC-001 §5.3 follow-up)
+
 
 ## [v0.2.0] - 2026-04-18
 

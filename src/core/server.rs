@@ -152,6 +152,18 @@ pub struct FileReceiver {
     /// HTTPS so SSE subscribers and ack/nack/cancel POSTs hit the same
     /// registry regardless of which scheme they connected over.
     receipts: ReceiptHttpState,
+    /// OS-assigned plain-HTTP listener address, captured at bind time
+    /// in `start()` before the listener is moved into the per-protocol
+    /// task. Wrapped in `Arc<std::sync::Mutex<…>>` so callers (notably
+    /// the Python binding's `Receiver.address` getter) can read it
+    /// synchronously without taking the outer tokio mutex on the whole
+    /// `FileReceiver`. `None` until the receiver has successfully
+    /// bound the HTTP socket; reset to `None` on `stop()`.
+    local_http_addr: Arc<Mutex<Option<SocketAddr>>>,
+    /// OS-assigned QUIC endpoint address — same shape and lifecycle
+    /// rules as `local_http_addr`. `None` until `start()` has bound
+    /// the UDP socket via `quinn::Endpoint::server`.
+    local_quic_addr: Arc<Mutex<Option<SocketAddr>>>,
 }
 
 impl FileReceiver {
@@ -172,7 +184,38 @@ impl FileReceiver {
             chunk_arrivals: Arc::new(Mutex::new(HashMap::new())),
             mdns_handle: None,
             receipts: ReceiptHttpState::new(),
+            local_http_addr: Arc::new(Mutex::new(None)),
+            local_quic_addr: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Returns the OS-assigned address of the plain-HTTP listener
+    /// once `start()` has bound it. Returns `None` if the server is
+    /// stopped, or if HTTP was disabled in the `ServerConfig`.
+    ///
+    /// This is the right value to advertise to senders when the
+    /// receiver was constructed with `http_port = 0` (let the OS
+    /// pick) — without it, callers would have to either parse the
+    /// `tracing` log line or guess the port.
+    pub fn local_http_addr(&self) -> Option<SocketAddr> {
+        *self.local_http_addr.lock().unwrap()
+    }
+
+    /// Returns the OS-assigned address of the QUIC endpoint once
+    /// `start()` has bound it. Same lifecycle and `None`-semantics
+    /// as [`local_http_addr`](Self::local_http_addr).
+    pub fn local_quic_addr(&self) -> Option<SocketAddr> {
+        *self.local_quic_addr.lock().unwrap()
+    }
+
+    /// Internal: hand out a clone of the shared `Arc<Mutex<…>>`
+    /// holding the bound HTTP address. The Python binding's
+    /// `Receiver.address` getter clones this once at construction
+    /// time so it can read the address back synchronously after
+    /// `__aenter__` resolves, without contending the outer tokio
+    /// mutex around the whole `FileReceiver`.
+    pub fn local_http_addr_handle(&self) -> Arc<Mutex<Option<SocketAddr>>> {
+        Arc::clone(&self.local_http_addr)
     }
 
     /// Expose the WebSocket broadcast sender so callers can subscribe
@@ -232,6 +275,26 @@ impl FileReceiver {
         });
 
         if config.enable_http {
+            // Bind the TCP listener up-front (before spawning the
+            // serve loop) so we can capture the OS-assigned port via
+            // `local_addr()` when the user passed `http_port = 0`.
+            // The pre-bound listener is then moved into the spawned
+            // task, which only runs the axum service loop.
+            let http_addr: SocketAddr =
+                format!("{}:{}", config.bind_address, config.http_port)
+                    .parse()
+                    .map_err(|e| {
+                        AeroSyncError::InvalidConfig(format!("Invalid HTTP address: {}", e))
+                    })?;
+            let listener = tokio::net::TcpListener::bind(http_addr).await.map_err(|e| {
+                AeroSyncError::Network(format!("Failed to bind HTTP {}: {}", http_addr, e))
+            })?;
+            let bound = listener.local_addr().map_err(|e| {
+                AeroSyncError::Network(format!("HTTP local_addr() failed: {}", e))
+            })?;
+            *self.local_http_addr.lock().unwrap() = Some(bound);
+            tracing::info!("HTTP server bound on {} (advertised)", bound);
+
             let http_cfg = config.clone();
             let status = Arc::clone(&self.status);
             let received_files = Arc::clone(&self.received_files);
@@ -243,7 +306,8 @@ impl FileReceiver {
             let receipts_http = self.receipts.clone();
 
             let handle = tokio::spawn(async move {
-                if let Err(e) = start_http_server(
+                if let Err(e) = run_http_server(
+                    listener,
                     http_cfg,
                     status.clone(),
                     received_files,
@@ -264,6 +328,25 @@ impl FileReceiver {
         }
 
         if config.enable_quic {
+            // Same trick as HTTP: build the `quinn::Endpoint` here so
+            // we can record `endpoint.local_addr()` before handing the
+            // endpoint over to the per-connection accept loop.
+            let server_config = configure_quic_server(config.tls.as_ref())?;
+            let quic_addr: SocketAddr =
+                format!("{}:{}", config.bind_address, config.quic_port)
+                    .parse()
+                    .map_err(|e| {
+                        AeroSyncError::InvalidConfig(format!("Invalid QUIC address: {}", e))
+                    })?;
+            let endpoint = quinn::Endpoint::server(server_config, quic_addr).map_err(|e| {
+                AeroSyncError::Network(format!("Failed to create QUIC endpoint: {}", e))
+            })?;
+            let bound = endpoint.local_addr().map_err(|e| {
+                AeroSyncError::Network(format!("QUIC local_addr() failed: {}", e))
+            })?;
+            *self.local_quic_addr.lock().unwrap() = Some(bound);
+            tracing::info!("QUIC server bound on {} (advertised)", bound);
+
             let quic_cfg = config.clone();
             let status = Arc::clone(&self.status);
             let received_files = Arc::clone(&self.received_files);
@@ -271,9 +354,15 @@ impl FileReceiver {
             let audit_quic = audit_logger.clone();
 
             let handle = tokio::spawn(async move {
-                if let Err(e) =
-                    start_quic_server(quic_cfg, status.clone(), received_files, auth, audit_quic)
-                        .await
+                if let Err(e) = run_quic_server(
+                    endpoint,
+                    quic_cfg,
+                    status.clone(),
+                    received_files,
+                    auth,
+                    audit_quic,
+                )
+                .await
                 {
                     tracing::error!("QUIC server error: {}", e);
                     *status.write().await = ServerStatus::Error(e.to_string());
@@ -373,6 +462,12 @@ impl FileReceiver {
         }
         // drop MdnsHandle → 自动注销 mDNS 广播
         self.mdns_handle = None;
+        // Clear the cached bound addresses so a subsequent `start()`
+        // (or a Python `Receiver.address` getter) sees `None` until
+        // we re-bind. This prevents stale addresses from leaking
+        // across stop/start cycles.
+        *self.local_http_addr.lock().unwrap() = None;
+        *self.local_quic_addr.lock().unwrap() = None;
         tracing::info!("File receiver stopped");
         Ok(())
     }
@@ -722,8 +817,16 @@ async fn start_https_server(
 
 // ─────────────────────────────── HTTP server ────────────────────────────────
 
+/// Runs the axum service loop over a pre-bound `TcpListener`.
+///
+/// Splitting the bind out of this function (it now happens in
+/// [`FileReceiver::start`]) is what lets `local_http_addr()` return
+/// the OS-assigned port when the user passes `http_port = 0` — the
+/// listener has already been created and queried by the time the
+/// spawned task runs.
 #[allow(clippy::too_many_arguments)]
-async fn start_http_server(
+async fn run_http_server(
+    listener: tokio::net::TcpListener,
     config: ServerConfig,
     _status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
@@ -746,14 +849,11 @@ async fn start_http_server(
     );
     let router = build_axum_router(state);
 
-    let addr: SocketAddr = format!("{}:{}", config.bind_address, config.http_port)
-        .parse()
-        .map_err(|e| AeroSyncError::InvalidConfig(format!("Invalid address: {}", e)))?;
-
-    tracing::info!("HTTP server listening on {}", addr);
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| AeroSyncError::Network(format!("Failed to bind {}: {}", addr, e)))?;
+    let bound = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| format!("{}:{}", config.bind_address, config.http_port));
+    tracing::info!("HTTP server listening on {}", bound);
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
@@ -1671,24 +1771,25 @@ async fn handle_ws_client(
 
 // ─────────────────────────────── QUIC server ────────────────────────────────
 
-async fn start_quic_server(
+/// Runs the QUIC accept loop over a pre-built `quinn::Endpoint`.
+///
+/// As with [`run_http_server`], the bind happens in
+/// [`FileReceiver::start`] so the caller can record the OS-assigned
+/// UDP port via `endpoint.local_addr()` before this function takes
+/// ownership of the endpoint.
+async fn run_quic_server(
+    endpoint: quinn::Endpoint,
     config: ServerConfig,
     status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_manager: Option<Arc<AuthManager>>,
     audit_logger: Option<Arc<AuditLogger>>,
 ) -> Result<()> {
-    use quinn::Endpoint;
-
-    let server_config = configure_quic_server(config.tls.as_ref())?;
-    let addr: SocketAddr = format!("{}:{}", config.bind_address, config.quic_port)
-        .parse()
-        .map_err(|e| AeroSyncError::InvalidConfig(format!("Invalid QUIC address: {}", e)))?;
-
-    let endpoint = Endpoint::server(server_config, addr)
-        .map_err(|e| AeroSyncError::Network(format!("Failed to create QUIC endpoint: {}", e)))?;
-
-    tracing::info!("QUIC server listening on {}", addr);
+    let bound = endpoint
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    tracing::info!("QUIC server listening on {}", bound);
 
     while let Some(conn) = endpoint.accept().await {
         let connection = match conn.await {

@@ -53,3 +53,8 @@ __pycache__/
 aerosync-py/python/aerosync/_native*.so
 aerosync-py/python/aerosync/_native*.dylib
 aerosync-py/python/aerosync/_native*.pyd
+# Python virtual environments. Contributors create one under
+# aerosync-py/.venv to run `maturin develop` + pytest (see RELEASE
+# checklist) — strictly local, never committed.
+.venv/
+**/.venv/
