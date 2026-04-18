@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl + cross tools (Linux)
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+            mkdir -p .cargo
+            cat >> .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-musl]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+          fi
+
+      - name: Cache cargo registry & build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p aerosync
+          cargo build --release --target ${{ matrix.target }} -p aerosync-mcp
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE="aerosync-${VERSION}-${{ matrix.target }}"
+          mkdir -p "$STAGE"
+          cp "target/${{ matrix.target }}/release/aerosync" "$STAGE/"
+          cp "target/${{ matrix.target }}/release/aerosync-mcp" "$STAGE/"
+          cp README.md LICENSE CHANGELOG.md "$STAGE/"
+          tar -czf "${STAGE}.tar.gz" "$STAGE"
+          shasum -a 256 "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v',''
+          $stage = "aerosync-$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/aerosync.exe" -Destination $stage
+          Copy-Item "target/${{ matrix.target }}/release/aerosync-mcp.exe" -Destination $stage
+          Copy-Item README.md, LICENSE, CHANGELOG.md -Destination $stage
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "$stage.zip").Hash.ToLower()
+          Set-Content -Path "$stage.zip.sha256" -Value "$hash  $stage.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aerosync-${{ matrix.target }}
+          path: |
+            aerosync-*.tar.gz
+            aerosync-*.tar.gz.sha256
+            aerosync-*.zip
+            aerosync-*.zip.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            See [`CHANGELOG.md`](https://github.com/TechVerseOdyssey/AeroSync/blob/master/CHANGELOG.md) for the full notes.
+
+            ## Install
+
+            **One-line (macOS/Linux):**
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/TechVerseOdyssey/AeroSync/master/install.sh | bash
+            ```
+
+            **Manual:** download the archive for your platform below, verify the SHA-256, extract, and put `aerosync` / `aerosync-mcp` on your `$PATH`.
