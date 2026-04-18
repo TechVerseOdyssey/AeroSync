@@ -278,6 +278,12 @@ impl AeroSyncMcpServer {
         self
     }
 
+    /// 显式设置 MCP 本地认证密钥（仅供测试使用；生产建议走 `AEROSYNC_MCP_SECRET`）。
+    pub fn with_secret(mut self, secret: String) -> Self {
+        self.secret = Some(Zeroizing::new(secret));
+        self
+    }
+
     /// 获取当前生效的配置（供测试和诊断使用）
     pub fn config(&self) -> &McpConfig {
         &self.config

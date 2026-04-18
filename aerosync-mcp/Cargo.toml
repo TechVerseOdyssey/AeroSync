@@ -30,3 +30,6 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 [dev-dependencies]
 tempfile = "3"
 rusqlite = { version = "0.31", features = ["bundled"] }
+# Enable client feature only for tests, so we can drive the in-memory rmcp
+# tool router via a real ClientHandler (P3d E2E tests).
+rmcp = { version = "1.4.0", features = ["server", "client", "macros", "transport-io"] }

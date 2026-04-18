@@ -655,6 +655,198 @@ fn test_mcp_config_task_ttl_is_in_seconds() {
     assert_eq!(cfg.task_ttl.as_secs(), 7200);
 }
 
+// ── P3d Tool-level E2E：通过 rmcp client 调真实路由 ──────────────────────────
+//
+// 使用 tokio::io::duplex 在内存中建立双向通道，server 与 client 各持一端。
+// 这样可以验证 #[tool_router] 宏注册到 ServerHandler 的完整链路：
+//   client.call_tool → JSON-RPC frame → server 路由 → tool fn → response
+
+mod e2e {
+    use super::*;
+    use rmcp::{
+        ClientHandler, ServiceExt,
+        model::{CallToolRequestParams, ClientInfo},
+    };
+
+    #[derive(Debug, Clone, Default)]
+    struct DummyClient;
+    impl ClientHandler for DummyClient {
+        fn get_info(&self) -> ClientInfo {
+            ClientInfo::default()
+        }
+    }
+
+    /// 启动 server 与 client 的辅助函数，返回 client 句柄与 server 任务句柄。
+    async fn spawn_pair(
+        server: AeroSyncMcpServer,
+    ) -> (
+        rmcp::service::RunningService<rmcp::RoleClient, DummyClient>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (server_t, client_t) = tokio::io::duplex(8192);
+        let server_handle = tokio::spawn(async move {
+            if let Ok(running) = server.serve(server_t).await {
+                let _ = running.waiting().await;
+            }
+        });
+        let client = DummyClient
+            .serve(client_t)
+            .await
+            .expect("client should connect to in-memory server");
+        (client, server_handle)
+    }
+
+    /// 提取 CallTool 响应里的纯文本内容（所有工具都返回 JSON 字符串）。
+    fn first_text(result: &rmcp::model::CallToolResult) -> &str {
+        result
+            .content
+            .first()
+            .and_then(|c| c.raw.as_text())
+            .map(|t| t.text.as_str())
+            .expect("expected text content in CallToolResult")
+    }
+
+    /// list_tools 必须返回 8 个工具，名字与文档约定一致。
+    /// 这是 #[tool_router] 宏注册链路的核心契约。
+    #[tokio::test]
+    async fn test_e2e_lists_all_8_tools() {
+        let dir = tempdir().unwrap();
+        let server = AeroSyncMcpServer::new().with_aerosync_dir(dir.path().to_path_buf());
+        let (client, _h) = spawn_pair(server).await;
+
+        let tools = client.list_tools(None).await.expect("list_tools should succeed");
+        let names: Vec<String> = tools.tools.iter().map(|t| t.name.to_string()).collect();
+
+        let expected = [
+            "send_file",
+            "send_directory",
+            "start_receiver",
+            "stop_receiver",
+            "get_receiver_status",
+            "list_history",
+            "discover_receivers",
+            "get_transfer_status",
+        ];
+        for name in expected {
+            assert!(
+                names.iter().any(|n| n == name),
+                "工具 `{}` 未注册到 ServerHandler。已注册：{:?}",
+                name,
+                names
+            );
+        }
+        assert_eq!(names.len(), 8, "只能有 8 个工具，实际：{:?}", names);
+
+        client.cancel().await.unwrap();
+    }
+
+    /// get_transfer_status 调用未知 task_id 必须返回 success: false 且消息包含 "not found"。
+    /// 锁定 AI 客户端可解析的错误约定。
+    #[tokio::test]
+    async fn test_e2e_get_transfer_status_unknown_id() {
+        let dir = tempdir().unwrap();
+        let server = AeroSyncMcpServer::new().with_aerosync_dir(dir.path().to_path_buf());
+        let (client, _h) = spawn_pair(server).await;
+
+        let args = serde_json::json!({ "task_id": Uuid::new_v4().to_string() })
+            .as_object()
+            .unwrap()
+            .clone();
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("get_transfer_status").with_arguments(args),
+            )
+            .await
+            .expect("call should succeed");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(first_text(&result)).expect("response must be valid JSON");
+        assert_eq!(parsed["success"], serde_json::json!(false));
+        let err = parsed["error"].as_str().unwrap_or("");
+        assert!(
+            err.to_ascii_lowercase().contains("not found"),
+            "未知 task_id 应返回 'not found' 错误，实际：{}",
+            err
+        );
+
+        client.cancel().await.unwrap();
+    }
+
+    /// 设置了 mcp_auth_token 密钥但客户端未传时，必须返回 Unauthorized。
+    /// 这是 P2 修复后的鉴权链路 E2E 覆盖。
+    #[tokio::test]
+    async fn test_e2e_call_without_mcp_auth_token_is_rejected() {
+        let dir = tempdir().unwrap();
+        let server = AeroSyncMcpServer::new()
+            .with_aerosync_dir(dir.path().to_path_buf())
+            .with_secret("test-secret-xyz".to_string());
+        let (client, _h) = spawn_pair(server).await;
+
+        // 调 get_receiver_status（最轻量的工具），不带 mcp_auth_token
+        let result = client
+            .call_tool(CallToolRequestParams::new("get_receiver_status"))
+            .await
+            .expect("call should succeed at protocol level");
+
+        let parsed: serde_json::Value = serde_json::from_str(first_text(&result)).unwrap();
+        assert_eq!(parsed["success"], serde_json::json!(false));
+        let err = parsed["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("Unauthorized") && err.contains("mcp_auth_token"),
+            "缺失 mcp_auth_token 应返回 Unauthorized 错误，实际：{}",
+            err
+        );
+
+        client.cancel().await.unwrap();
+    }
+
+    /// 携带正确 mcp_auth_token 时鉴权放行；同时验证旧字段名 _auth_token alias 也能用。
+    #[tokio::test]
+    async fn test_e2e_call_with_correct_auth_passes() {
+        let dir = tempdir().unwrap();
+        let server = AeroSyncMcpServer::new()
+            .with_aerosync_dir(dir.path().to_path_buf())
+            .with_secret("good-secret".to_string());
+        let (client, _h) = spawn_pair(server).await;
+
+        // 新字段名
+        let args_new = serde_json::json!({ "mcp_auth_token": "good-secret" })
+            .as_object()
+            .unwrap()
+            .clone();
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("get_receiver_status").with_arguments(args_new),
+            )
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(first_text(&result)).unwrap();
+        assert_eq!(
+            parsed["success"], serde_json::json!(true),
+            "正确密钥应放行，实际响应：{}", first_text(&result)
+        );
+
+        // 旧字段名 alias
+        let args_old = serde_json::json!({ "_auth_token": "good-secret" })
+            .as_object()
+            .unwrap()
+            .clone();
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("get_receiver_status").with_arguments(args_old),
+            )
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(first_text(&result)).unwrap();
+        assert_eq!(
+            parsed["success"], serde_json::json!(true),
+            "旧字段名 _auth_token alias 必须仍可鉴权，实际：{}", first_text(&result)
+        );
+
+        client.cancel().await.unwrap();
+    }
+}
+
 // ── 7. P2 改名向后兼容：_auth_token alias 必须仍然可解析 ──────────────────────
 
 /// 旧客户端使用 `_auth_token` 字段（P2 之前的命名），通过 serde alias
