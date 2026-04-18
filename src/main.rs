@@ -1168,11 +1168,10 @@ async fn cmd_resume(action: ResumeAction) -> anyhow::Result<()> {
                 for s in &pending {
                     let done = s.completed_chunks.len();
                     let total = s.total_chunks;
-                    let pct = if total > 0 {
-                        done * 100 / total as usize
-                    } else {
-                        0
-                    };
+                    let pct = done
+                        .saturating_mul(100)
+                        .checked_div(total as usize)
+                        .unwrap_or(0);
                     println!(
                         "  [{}] {} → {}",
                         s.task_id,

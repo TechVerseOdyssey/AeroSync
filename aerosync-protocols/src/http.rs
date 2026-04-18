@@ -770,11 +770,10 @@ impl TransferProtocol for HttpTransfer {
             let chunk_size = self.config.chunk_size as u64;
 
             // 根据 offset 推算已完成的分片序号
-            let completed_chunks: Vec<u32> = if chunk_size > 0 {
-                (0..((offset / chunk_size) as u32)).collect()
-            } else {
-                vec![]
-            };
+            let completed_chunks: Vec<u32> = offset
+                .checked_div(chunk_size)
+                .map(|n| (0..(n as u32)).collect())
+                .unwrap_or_default();
 
             let mut state = aerosync_core::resume::ResumeState::new(
                 task.id,

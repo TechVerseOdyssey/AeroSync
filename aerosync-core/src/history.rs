@@ -50,11 +50,10 @@ impl HistoryEntry {
         direction: impl Into<String>,
         duration_ms: u64,
     ) -> Self {
-        let avg_speed_bps = if duration_ms > 0 {
-            size * 1000 / duration_ms
-        } else {
-            size
-        };
+        let avg_speed_bps = size
+            .saturating_mul(1000)
+            .checked_div(duration_ms)
+            .unwrap_or(size);
         Self {
             id: Uuid::new_v4(),
             filename: filename.into(),
@@ -193,8 +192,7 @@ impl HistoryStore {
             all.retain(|e| e.success);
         }
 
-        // 按时间降序
-        all.sort_by(|a, b| b.completed_at.cmp(&a.completed_at));
+        all.sort_by_key(|e| std::cmp::Reverse(e.completed_at));
 
         if q.limit > 0 && all.len() > q.limit {
             all.truncate(q.limit);
