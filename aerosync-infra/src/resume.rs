@@ -1,27 +1,36 @@
-//! 断点续传状态管理
+//! 断点续传状态管理（file-backed JSON impl of [`ResumeStorage`]）。
 //!
 //! 状态文件存储路径：`{state_dir}/.aerosync/{task_id}.json`
 //! 每个传输任务对应一个 JSON 文件，记录已完成的分片列表。
 //! 完成后删除文件；重启后自动检测并恢复。
 //!
-//! ## v0.3.0 Phase 2.1 migration
+//! ## v0.3.0 Phase 2.2 migration
 //!
-//! The pure-data types ([`ChunkState`], [`ResumeState`]) and the
-//! [`DEFAULT_CHUNK_SIZE`] constant moved to
-//! [`aerosync_domain::storage`] so the new
-//! [`aerosync_domain::storage::ResumeStorage`] async trait can
-//! reference them. This module re-exports them under their original
-//! paths so every existing caller (`aerosync::core::resume::ResumeState`,
-//! `aerosync::core::ResumeState`, `aerosync::ResumeState`) keeps
-//! resolving without source changes.
+//! Source moved verbatim from `src/core/resume.rs` to
+//! `aerosync-infra/src/resume.rs`. Two semantic changes:
 //!
-//! The [`ResumeStore`] file-backed impl below stays here for now —
-//! Phase 2.2 will move it to `aerosync-infra::resume` and have it
-//! `impl aerosync_domain::storage::ResumeStorage`.
+//! 1. `ResumeStore::save` is now **crash-safe** via tmp+rename
+//!    (write to `{path}.tmp`, fsync, rename). The pre-v0.3.0
+//!    direct `tokio::fs::write` was vulnerable to torn writes if
+//!    the process crashed mid-fsync — partially-written JSON would
+//!    fail to deserialize on next startup, causing silent loss of
+//!    resume state. The `pub async fn save` signature is unchanged.
+//! 2. `ResumeStore` now `impl aerosync_domain::storage::ResumeStorage`
+//!    so consumers can hold it as `Arc<dyn ResumeStorage>` for
+//!    swappable backends (Phase 2.4 wires the engine through the
+//!    trait). The trait impl just delegates to the inherent methods.
+//!
+//! Re-exports below preserve the legacy import path
+//! `aerosync::core::resume::{ResumeState, ChunkState,
+//! DEFAULT_CHUNK_SIZE}` (the root crate forwards to this module via
+//! `pub use aerosync_infra::resume` in `src/core/mod.rs`).
 
-pub use aerosync_domain::storage::{ChunkState, ResumeState, DEFAULT_CHUNK_SIZE};
+pub use aerosync_domain::storage::{
+    ChunkState, ResumeState, ResumeStorage, DEFAULT_CHUNK_SIZE,
+};
 
-use crate::{AeroSyncError, Result};
+use aerosync_domain::{AeroSyncError, Result};
+use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -31,6 +40,12 @@ const STATE_SUBDIR: &str = ".aerosync";
 // ──────────────────────────── ResumeStore ─────────────────────────────────────
 
 /// 负责持久化 ResumeState 到本地 JSON 文件的存储层
+///
+/// Implements [`aerosync_domain::storage::ResumeStorage`]. The trait
+/// methods just delegate to the inherent methods of the same name —
+/// keeping inherent methods means existing callers that hold a
+/// concrete `ResumeStore` (rather than `Arc<dyn ResumeStorage>`)
+/// don't break during the Phase 2.4 trait-object migration.
 pub struct ResumeStore {
     /// 状态文件存放目录（= `base_dir/.aerosync/`）
     state_dir: PathBuf,
@@ -54,14 +69,60 @@ impl ResumeStore {
         self.state_dir.join(format!("{}.json", task_id))
     }
 
-    /// 保存（新建或更新）状态文件
+    /// 保存（新建或更新）状态文件 —— 通过 tmp+rename 保证 crash-safe。
+    ///
+    /// ## v0.3.0 atomic-write upgrade
+    ///
+    /// Pre-v0.3.0 this method called `tokio::fs::write` directly, which
+    /// is `truncate + write + close`. A crash between the truncate and
+    /// the final write would leave a zero-length or partially-written
+    /// JSON file — `serde_json::from_str` would then fail on next
+    /// startup, silently dropping resume state for that task.
+    ///
+    /// The new path:
+    ///   1. Serialize `state` to bytes.
+    ///   2. Write the bytes to `{path}.tmp` (a sibling of the final
+    ///      path so `rename` stays on the same filesystem).
+    ///   3. `fsync` the tmp file's data + metadata so the kernel
+    ///      page cache hits disk before we expose it.
+    ///   4. `rename(tmp, path)` — POSIX rename within a single
+    ///      directory is atomic, so observers see either the old
+    ///      content or the new content, never a torn middle.
+    ///
+    /// Failure of step 4 leaves the previous content intact and
+    /// the tmp file behind; next save attempt overwrites the same
+    /// tmp path. We tolerate that leak rather than racing a cleanup.
     pub async fn save(&self, state: &ResumeState) -> Result<()> {
         self.ensure_dir().await?;
-        let path = self.state_path(state.task_id);
+        let final_path = self.state_path(state.task_id);
+        let tmp_path = {
+            let mut p = final_path.clone();
+            let mut name = p
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_default();
+            name.push(".tmp");
+            p.set_file_name(name);
+            p
+        };
+
         let json = serde_json::to_string_pretty(state).map_err(|e| {
             AeroSyncError::Protocol(format!("Failed to serialize resume state: {}", e))
         })?;
-        tokio::fs::write(&path, json).await?;
+
+        // Step 2: write bytes to tmp.
+        let mut file = tokio::fs::File::create(&tmp_path).await?;
+        use tokio::io::AsyncWriteExt;
+        file.write_all(json.as_bytes()).await?;
+        // Step 3: fsync data+metadata so the kernel page cache reaches
+        // disk before we expose the new file under its final name.
+        file.sync_all().await?;
+        drop(file);
+
+        // Step 4: atomic rename. POSIX guarantees the rename is atomic
+        // within a single filesystem; observers see either the old or
+        // the new content but never a torn middle.
+        tokio::fs::rename(&tmp_path, &final_path).await?;
         Ok(())
     }
 
@@ -131,6 +192,42 @@ impl ResumeStore {
         Ok(pending
             .into_iter()
             .find(|s| s.source_path == source_path && s.destination == destination))
+    }
+}
+
+// ──────────────────────────── ResumeStorage impl ──────────────────────────────
+//
+// All trait methods just delegate to the inherent methods. We keep the
+// inherent methods (rather than only the trait methods) because some
+// existing callers in the workspace hold a concrete `ResumeStore`
+// rather than `Arc<dyn ResumeStorage>`. Phase 2.4 will migrate them
+// to the trait-object form, at which point the inherent methods can
+// be retired in v0.4.
+
+#[async_trait]
+impl ResumeStorage for ResumeStore {
+    async fn save(&self, state: &ResumeState) -> Result<()> {
+        ResumeStore::save(self, state).await
+    }
+
+    async fn load(&self, task_id: Uuid) -> Result<Option<ResumeState>> {
+        ResumeStore::load(self, task_id).await
+    }
+
+    async fn delete(&self, task_id: Uuid) -> Result<()> {
+        ResumeStore::delete(self, task_id).await
+    }
+
+    async fn list_pending(&self) -> Result<Vec<ResumeState>> {
+        ResumeStore::list_pending(self).await
+    }
+
+    async fn find_by_file(
+        &self,
+        source_path: &Path,
+        destination: &str,
+    ) -> Result<Option<ResumeState>> {
+        ResumeStore::find_by_file(self, source_path, destination).await
     }
 }
 

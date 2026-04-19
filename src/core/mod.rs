@@ -36,7 +36,16 @@ pub mod progress;
 pub mod receipt;
 pub mod receipt_registry;
 pub mod receipts_http;
-pub mod resume;
+// `resume` migrated to `aerosync-infra` in v0.3.0 Phase 2.2 with one
+// behavioural upgrade — `ResumeStore::save` is now crash-safe via
+// tmp+rename. The `pub use` re-export keeps every existing path
+// (`crate::core::resume::ResumeState`, `crate::core::ResumeState`,
+// `aerosync::core::resume::ResumeStore`, etc.) resolving for every
+// caller (transfer.rs, mcp/server.rs, py bindings, CLI) without any
+// import-site updates. The downstream `pub use resume::{ResumeState,
+// ResumeStore, DEFAULT_CHUNK_SIZE};` line below still works because
+// `resume` is now in scope as an alias for `aerosync_infra::resume`.
+pub use aerosync_infra::resume;
 pub mod routing;
 pub mod server;
 pub mod sniff;

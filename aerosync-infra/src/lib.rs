@@ -61,8 +61,16 @@ pub mod tls;
 
 // ── Phase 2 modules ───────────────────────────────────────────────────
 //
-// pub mod history;
-// pub mod resume;
+// `resume` migrated from `src/core/resume.rs` in Phase 2.2 with one
+// behavioural upgrade — `ResumeStore::save` is now crash-safe via
+// tmp+rename. Re-exports the `ResumeState` / `ChunkState` value
+// objects from `aerosync_domain::storage` so the legacy import path
+// `aerosync::core::resume::*` keeps resolving via `pub use` shim
+// in `src/core/mod.rs`. `missing_docs` suppressed for the same
+// reason as `audit` (verbatim move; rustdoc cleanup in Phase 4).
+#[allow(missing_docs)]
+pub mod resume;
+// pub mod history;     // Phase 2.3
 
 // ── Phase 4 modules ───────────────────────────────────────────────────
 //
