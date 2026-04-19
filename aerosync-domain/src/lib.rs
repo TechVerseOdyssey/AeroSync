@@ -51,11 +51,12 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
-// ── Phase 1 modules (skeleton; bodies migrated in follow-up commits) ──
-//
-// pub mod error;
-// pub mod metadata;
-// pub mod receipt;
+// ── Phase 1 modules ───────────────────────────────────────────────────
+
+pub mod error;
+
+// pub mod metadata;  // Phase 1e (next commit)
+// pub mod receipt;   // Phase 1f
 
 // ── Phase 2 modules ───────────────────────────────────────────────────
 //

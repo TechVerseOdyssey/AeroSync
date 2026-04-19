@@ -3,7 +3,7 @@
 //! 演示如何在 AeroSync 中使用 Token 认证功能
 
 use aerosync::core::auth::{AuthConfig, AuthManager, AuthMiddleware, TokenManager};
-use aerosync::core::Result;
+use aerosync::core::{AeroSyncError, Result};
 use std::sync::Arc;
 
 /// 示例 1: 基础 Token 生成和验证
@@ -114,7 +114,11 @@ allowed_ips = ["192.168.1.0/24", "10.0.0.0/8"]
 "#;
 
     // 从 TOML 加载配置
-    let config = AuthConfig::from_toml(config_toml)?;
+    // 显式 map_err：v0.3.0 起 `aerosync-domain::AeroSyncError` 不再
+    // 通过 `From<toml::de::Error>` 自动桥接（避免 domain crate 背
+    // toml 依赖）。调用方在跨 toml 边界时显式转换即可。
+    let config = AuthConfig::from_toml(config_toml)
+        .map_err(|e| AeroSyncError::TomlParse(e.to_string()))?;
     println!("加载的配置:");
     println!("  启用认证: {}", config.enable_auth);
     println!("  Token 生命周期: {} 小时", config.token_lifetime_hours);
@@ -126,8 +130,10 @@ allowed_ips = ["192.168.1.0/24", "10.0.0.0/8"]
         Err(e) => println!("\n配置验证失败 ✗: {}", e),
     }
 
-    // 导出为 TOML
-    let exported_toml = config.to_toml()?;
+    // 导出为 TOML（同上，显式 map_err）
+    let exported_toml = config
+        .to_toml()
+        .map_err(|e| AeroSyncError::TomlParse(e.to_string()))?;
     println!("\n导出的 TOML 配置:\n{}", exported_toml);
 
     Ok(())

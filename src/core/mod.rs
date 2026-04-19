@@ -3,7 +3,14 @@ pub mod auth;
 pub mod capabilities;
 #[cfg(feature = "mdns")]
 pub mod discovery;
-pub mod error;
+// `error` migrated to `aerosync-domain` in v0.3.0 Phase 1c. The
+// `pub use` re-export keeps every existing path
+// (`crate::core::error::AeroSyncError`, `crate::core::error::Result`,
+// `aerosync::core::error::*`) resolving without forcing any caller
+// to update. The downstream `pub use error::{AeroSyncError, Result};`
+// line below still works because `error` is now in local scope as an
+// alias for `aerosync_domain::error`.
+pub use aerosync_domain::error;
 pub mod error_advice;
 pub mod file_manager;
 pub mod history;
