@@ -86,14 +86,16 @@ fn make_client(config: Option<Bound<'_, PyAny>>) -> PyResult<PyClient> {
 /// surface is stable from this commit forward; Group C wires up
 /// `__aenter__` / `__aexit__` and the async iterator.
 #[pyfunction(name = "receiver")]
-#[pyo3(signature = (name=None, listen=None, save_dir=None, config=None))]
+#[pyo3(signature = (name=None, listen=None, save_dir=None, config=None, idle_timeout=None))]
 fn make_receiver(
     name: Option<String>,
     listen: Option<String>,
     save_dir: Option<std::path::PathBuf>,
     config: Option<Bound<'_, PyAny>>,
+    idle_timeout: Option<f64>,
 ) -> PyResult<PyReceiver> {
     use aerosync::core::FileReceiver;
+    use pyo3::exceptions::PyValueError;
     let resolved = match config {
         Some(c) if !c.is_none() => config::ResolvedConfig::from_pyobject(&c)?,
         _ => config::ResolvedConfig::empty(),
@@ -114,9 +116,26 @@ fn make_receiver(
             }
         }
     }
+    // (Batch E / P2.1) Validate `idle_timeout=` at the factory
+    // boundary so the user gets a synchronous `ValueError` at
+    // construction rather than an obscure runtime error inside the
+    // `async for` loop. `None` keeps the legacy "block forever"
+    // behaviour. `0.0`, negative, NaN, or +Inf are rejected because
+    // they have no useful "shut down the iterator" semantics.
+    let idle = match idle_timeout {
+        None => None,
+        Some(secs) => {
+            if !secs.is_finite() || secs <= 0.0 {
+                return Err(PyValueError::new_err(
+                    "idle_timeout must be a finite positive number of seconds (or None)",
+                ));
+            }
+            Some(std::time::Duration::from_secs_f64(secs))
+        }
+    };
     let address = format!("{}:{}", cfg.bind_address, cfg.http_port);
     let inner = FileReceiver::new(cfg);
-    Ok(PyReceiver::new(inner, name, address))
+    Ok(PyReceiver::with_idle_timeout(inner, name, address, idle))
 }
 
 /// `await aerosync.discover(timeout=5.0)` — returns a list of [`PyPeer`].

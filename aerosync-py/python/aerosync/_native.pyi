@@ -28,6 +28,7 @@ def receiver(
     listen: str | None = ...,
     save_dir: str | os.PathLike[str] | None = ...,
     config: Any | None = ...,
+    idle_timeout: float | None = ...,
 ) -> Receiver: ...
 def discover(timeout: float = ...) -> Awaitable[list[Peer]]: ...
 

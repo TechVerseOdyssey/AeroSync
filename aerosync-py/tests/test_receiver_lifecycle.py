@@ -21,7 +21,6 @@ import re
 from pathlib import Path
 
 import aerosync
-import pytest
 
 
 def test_receiver_async_with_starts_and_stops_cleanly(tmp_path: Path) -> None:
@@ -155,14 +154,28 @@ def test_receiver_context_manager_releases_port(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.skip(
-    reason=(
-        "blocked on v0.2.1: `async for` on a never-receiving receiver "
-        "currently blocks indefinitely; engine needs an idle-timeout "
-        "knob (RFC-001 §13 #18 follow-up)."
-    )
-)
 def test_receiver_async_iter_empty_timeout(tmp_path: Path) -> None:
     """Receiver with no incoming traffic must time out and exit the
-    `async for` loop instead of blocking forever."""
-    raise NotImplementedError
+    `async for` loop instead of blocking forever.
+
+    Unblocked by Batch E / w0.2.1 P2.1: the new `idle_timeout=`
+    keyword on `aerosync.receiver(...)` makes `__anext__` raise
+    `StopAsyncIteration` after `idle_timeout` seconds without a
+    yielded file. The fuller boundary-condition coverage lives in
+    `test_receiver_idle_timeout.py`; this case is the smoke-level
+    regression net for #18 itself.
+    """
+
+    received: list[aerosync.IncomingFile] = []
+
+    async def run() -> None:
+        async with aerosync.receiver(
+            listen="127.0.0.1:0",
+            save_dir=tmp_path,
+            idle_timeout=0.5,
+        ) as r:
+            async for incoming in r:
+                received.append(incoming)
+
+    asyncio.run(run())
+    assert received == []

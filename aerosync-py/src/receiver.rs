@@ -43,6 +43,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
 /// Project the optional, well-known [`Lifecycle`] enum value carried
@@ -87,10 +88,36 @@ pub struct PyReceiver {
     pub(crate) ws_rx: Arc<Mutex<Option<broadcast::Receiver<WsEvent>>>>,
     pub(crate) yielded: Arc<AtomicUsize>,
     pub(crate) started: Arc<AtomicBool>,
+    /// Optional idle-timeout for the async iterator (Batch E /
+    /// w0.2.1 P2.1, RFC-001 §13 #18 follow-up). When `Some(d)`, the
+    /// `__anext__` future raises `StopAsyncIteration` if `d` elapses
+    /// since the last yielded file (or since `__aenter__` for the
+    /// first yield). `None` keeps the original "block forever"
+    /// behaviour for back-compat.
+    pub(crate) idle_timeout: Option<Duration>,
+    /// Wall-clock instant the next idle-timeout window is measured
+    /// against. Reset to `Instant::now()` at `__aenter__` and again
+    /// each time `__anext__` yields a file. `StdMutex` (not the
+    /// async one) so the timeout-check critical section is a couple
+    /// of nanoseconds and never crosses an `.await`.
+    pub(crate) last_yield_at: Arc<StdMutex<Instant>>,
 }
 
 impl PyReceiver {
     pub fn new(inner: FileReceiver, name: Option<String>, address: String) -> Self {
+        Self::with_idle_timeout(inner, name, address, None)
+    }
+
+    /// Same as [`PyReceiver::new`] but also sets the optional
+    /// `idle_timeout`. Kept as a separate constructor so existing
+    /// call sites (and the `cargo test` internal builders) do not
+    /// need to thread the new knob through.
+    pub fn with_idle_timeout(
+        inner: FileReceiver,
+        name: Option<String>,
+        address: String,
+        idle_timeout: Option<Duration>,
+    ) -> Self {
         let bound_http_addr = inner.local_http_addr_handle();
         let bound_quic_addr = inner.local_quic_addr_handle();
         Self {
@@ -102,6 +129,8 @@ impl PyReceiver {
             ws_rx: Arc::new(Mutex::new(None)),
             yielded: Arc::new(AtomicUsize::new(0)),
             started: Arc::new(AtomicBool::new(false)),
+            idle_timeout,
+            last_yield_at: Arc::new(StdMutex::new(Instant::now())),
         }
     }
 }
@@ -150,6 +179,7 @@ impl PyReceiver {
         let inner = Arc::clone(&slf.bind(py).borrow().inner);
         let ws_rx = Arc::clone(&slf.bind(py).borrow().ws_rx);
         let started = Arc::clone(&slf.bind(py).borrow().started);
+        let last_yield_at = Arc::clone(&slf.bind(py).borrow().last_yield_at);
         future_into_py(py, async move {
             let rx = {
                 let guard = inner.lock().await;
@@ -158,6 +188,13 @@ impl PyReceiver {
             *ws_rx.lock().await = Some(rx);
             inner.lock().await.start().await.map_err(engine_err_to_py)?;
             started.store(true, Ordering::SeqCst);
+            // (Batch E / P2.1) Reset the idle-timeout window so the
+            // first iteration's "no-file" budget starts ticking from
+            // the moment the receiver is actually live, NOT from
+            // construction time. Important when callers construct a
+            // receiver minutes before entering its `async with`
+            // block.
+            *last_yield_at.lock().unwrap() = Instant::now();
             Python::attach(|py| Ok(slf.clone_ref(py)))
         })
     }
@@ -186,11 +223,15 @@ impl PyReceiver {
     }
 
     /// Yield the next completed `IncomingFile`, or raise
-    /// `StopAsyncIteration` when the receiver shuts down.
+    /// `StopAsyncIteration` when the receiver shuts down (or, if an
+    /// `idle_timeout` was configured, when no file has arrived for
+    /// that many seconds since the last yield / since `__aenter__`).
     fn __anext__<'py>(slf: Py<Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&slf.bind(py).borrow().inner);
         let ws_rx = Arc::clone(&slf.bind(py).borrow().ws_rx);
         let yielded = Arc::clone(&slf.bind(py).borrow().yielded);
+        let idle_timeout = slf.bind(py).borrow().idle_timeout;
+        let last_yield_at = Arc::clone(&slf.bind(py).borrow().last_yield_at);
         future_into_py(py, async move {
             loop {
                 // 1) Drain backlog: hand back the next completed file.
@@ -205,6 +246,11 @@ impl PyReceiver {
                 if i < files.len() {
                     let f = files[i].clone();
                     yielded.store(i + 1, Ordering::SeqCst);
+                    // (Batch E / P2.1) Refresh the idle-timeout
+                    // anchor on every actual yield so a long-running
+                    // `async for` that processes one file every few
+                    // seconds never trips the timeout.
+                    *last_yield_at.lock().unwrap() = Instant::now();
                     // Build a synthetic receiver-side receipt walked
                     // to `Processing` so `await incoming.ack()` is
                     // a one-line happy path. See module-level
@@ -247,12 +293,46 @@ impl PyReceiver {
                     });
                 }
 
-                // 2) Otherwise wait for the next WS event and re-loop.
+                // 2) (Batch E / P2.1) Idle-timeout gate. Checked
+                // *before* each await so a configured `idle_timeout`
+                // also fires when no event ever arrives — the
+                // unbounded `rx.recv().await` below would otherwise
+                // park forever.
+                if let Some(budget) = idle_timeout {
+                    let elapsed = last_yield_at.lock().unwrap().elapsed();
+                    if elapsed >= budget {
+                        return Err(PyStopAsyncIteration::new_err(()));
+                    }
+                }
+
+                // 3) Otherwise wait for the next WS event and re-loop.
+                // Bound the wait by the remaining idle-timeout budget
+                // (when configured) so the recv future does not park
+                // beyond the deadline.
                 let mut guard = ws_rx.lock().await;
                 let rx = guard.as_mut().ok_or_else(|| {
                     PyRuntimeError::new_err("Receiver iterated before `async with` entered")
                 })?;
-                match rx.recv().await {
+                let recv_outcome = match idle_timeout {
+                    Some(budget) => {
+                        let elapsed = last_yield_at.lock().unwrap().elapsed();
+                        let remaining = budget.saturating_sub(elapsed);
+                        // If the budget already burned to zero
+                        // between the gate above and acquiring the
+                        // ws_rx lock, the timeout fires immediately.
+                        if remaining.is_zero() {
+                            return Err(PyStopAsyncIteration::new_err(()));
+                        }
+                        match tokio::time::timeout(remaining, rx.recv()).await {
+                            Ok(inner) => inner,
+                            Err(_elapsed) => {
+                                return Err(PyStopAsyncIteration::new_err(()));
+                            }
+                        }
+                    }
+                    None => rx.recv().await,
+                };
+                match recv_outcome {
                     Ok(WsEvent::Completed { .. }) => continue,
                     Ok(_) => continue,
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
