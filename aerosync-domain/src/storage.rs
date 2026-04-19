@@ -534,18 +534,30 @@ pub trait HistoryStorage: Send + Sync + 'static {
     /// JSONL record reflects the final sealed envelope.
     async fn write_metadata(&self, record_id: Uuid, metadata: &Metadata) -> Result<bool>;
 
-    /// Mutate the receipt-state fields (`receipt_state`, `acked_at`,
-    /// `nack_reason`, `cancel_reason`) of the entry whose
-    /// `receipt_id == receipt`. Returns `Ok(true)` on hit, `Ok(false)`
-    /// on miss. Called from the watch-bridge whenever a receipt
-    /// transitions to a terminal state.
+    /// Mutate the receipt-state fields of the entry matched by
+    /// `record_id` — that argument is matched against either the
+    /// entry's own `id` OR its `receipt_id`, so the watch-bridge can
+    /// pass the receipt UUID directly without having to first look up
+    /// the history record id.
+    ///
+    /// `acked_at` is auto-stamped to "now" (Unix seconds) when
+    /// `state == Acked`. `reason` is routed to `nack_reason` when
+    /// `state == Nacked`, `cancel_reason` when `state == Cancelled`,
+    /// and ignored otherwise. Returns `Ok(true)` on hit, `Ok(false)`
+    /// on miss.
+    ///
+    /// The signature matches the inherent
+    /// `HistoryStore::record_receipt_terminal` shape that has shipped
+    /// since v0.2 — a richer split into separate `acked_at` /
+    /// `nack_reason` / `cancel_reason` arguments was considered for
+    /// the trait but rejected: the routing logic is purely a
+    /// projection from `(state, reason)` and lives more naturally on
+    /// the impl side.
     async fn record_receipt_terminal(
         &self,
-        receipt: Uuid,
+        record_id: Uuid,
         state: ReceiptStateLabel,
-        acked_at: Option<u64>,
-        nack_reason: Option<String>,
-        cancel_reason: Option<String>,
+        reason: Option<String>,
     ) -> Result<bool>;
 
     /// Return every entry whose `receipt_state` is non-terminal —

@@ -23,15 +23,30 @@
 //! paths so every existing caller (`aerosync::core::history::*`,
 //! `aerosync::core::*`) keeps resolving without source changes.
 //!
-//! The [`HistoryStore`] file-backed JSONL impl below stays here for
-//! now — Phase 2.3 will move it to `aerosync-infra::history` and
-//! have it `impl aerosync_domain::storage::HistoryStorage`.
+//! ## v0.3.0 Phase 2.3 status (file-move deferred)
+//!
+//! [`HistoryStore`] now `impl`s
+//! [`aerosync_domain::storage::HistoryStorage`] below — that part
+//! of Phase 2.3 lands here in commit-form so Phase 2.4 can wire
+//! `Arc<dyn HistoryStorage>` through the engine. The wholesale
+//! `git mv src/core/history.rs → aerosync-infra/src/history.rs`
+//! is **deferred to Phase 3** because [`HistoryStore::spawn_watch_bridge`]
+//! takes `Arc<aerosync::core::receipt::Receipt<S>>`, and `receipt`
+//! still lives in this root crate. Moving `history` first would
+//! create an `aerosync-infra → aerosync` reverse dependency that
+//! Cargo refuses (the root `aerosync` already depends on
+//! `aerosync-infra`). Phase 3 promotes `Receipt` /
+//! `TransferSession` to `aerosync-domain`, at which point the
+//! `git mv` becomes free of the cycle and lands as Phase 3 follow-up.
 
-pub use aerosync_domain::storage::{HistoryEntry, HistoryFilter, HistoryQuery, ReceiptStateLabel};
+pub use aerosync_domain::storage::{
+    HistoryEntry, HistoryFilter, HistoryQuery, HistoryStorage, ReceiptStateLabel,
+};
 
 use crate::core::metadata::MetadataJson;
 use crate::{AeroSyncError, Result};
 use aerosync_proto::{Lifecycle, Metadata};
+use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -445,6 +460,53 @@ impl HistoryStore {
                 }
             }
         })
+    }
+}
+
+// ──────────────────────────── HistoryStorage impl ─────────────────────────────
+//
+// Bridges the inherent `HistoryStore` API to the
+// `aerosync_domain::storage::HistoryStorage` trait introduced in
+// Phase 2.1b. Each method just delegates to the inherent method of
+// the same name. Inherent methods stay because some workspace
+// consumers (e.g. `transfer.rs` line 220 `Option<Arc<HistoryStore>>`,
+// `mcp/server.rs`) currently hold a concrete `HistoryStore` rather
+// than `Arc<dyn HistoryStorage>`. Phase 2.4 will migrate those call
+// sites to the trait-object form.
+
+#[async_trait]
+impl HistoryStorage for HistoryStore {
+    async fn append(&self, entry: HistoryEntry) -> Result<()> {
+        HistoryStore::append(self, entry).await
+    }
+
+    async fn query(&self, q: &HistoryQuery) -> Result<Vec<HistoryEntry>> {
+        HistoryStore::query(self, q).await
+    }
+
+    async fn recent(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
+        HistoryStore::recent(self, limit).await
+    }
+
+    async fn write_metadata(&self, record_id: Uuid, metadata: &Metadata) -> Result<bool> {
+        HistoryStore::write_metadata(self, record_id, metadata).await
+    }
+
+    async fn record_receipt_terminal(
+        &self,
+        record_id: Uuid,
+        state: ReceiptStateLabel,
+        reason: Option<String>,
+    ) -> Result<bool> {
+        HistoryStore::record_receipt_terminal(self, record_id, state, reason).await
+    }
+
+    async fn iter_unfinished_receipts(&self) -> Result<Vec<HistoryEntry>> {
+        HistoryStore::iter_unfinished_receipts(self).await
+    }
+
+    async fn query_by_receipt(&self, receipt_id: Uuid) -> Result<Option<HistoryEntry>> {
+        HistoryStore::query_by_receipt(self, receipt_id).await
     }
 }
 
