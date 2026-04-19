@@ -235,6 +235,7 @@ async fn cross_rfc_smoke_001_002_003_end_to_end() {
         sha256: None,
         received_at: SystemTime::now(),
         sender_ip: None,
+        metadata: None,
     };
     let incoming = IncomingFile::new(
         received,

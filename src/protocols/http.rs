@@ -4,9 +4,13 @@ use crate::protocols::circuit_breaker::CircuitBreaker;
 use crate::protocols::ratelimit::RateLimiter;
 use crate::protocols::traits::{TransferProgress, TransferProtocol};
 use crate::protocols::utils::send_progress;
+use aerosync_proto::Metadata;
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as B64_STD;
+use base64::Engine;
 use bytes::Bytes;
 use memmap2::MmapOptions;
+use prost::Message as _;
 use rand::Rng;
 use reqwest::Client;
 use std::path::PathBuf;
@@ -18,6 +22,20 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
 use zeroize::Zeroizing;
+
+/// Canonical sender-side encoder for the
+/// `X-Aerosync-Metadata` HTTP header. Returns `None` when no
+/// envelope is attached to the task. Encoding: standard base64 (with
+/// padding) of the protobuf-encoded `Metadata` message; matches the
+/// receiver-side parser in `core::server::extract_metadata_header`.
+pub(crate) fn encode_metadata_header(meta: &Metadata) -> String {
+    let mut buf = Vec::with_capacity(meta.encoded_len());
+    // `encode` only fails when the buffer cannot accommodate the
+    // message; we just allocated `encoded_len()`, so this is
+    // infallible in practice.
+    let _ = meta.encode(&mut buf);
+    B64_STD.encode(&buf)
+}
 
 pub struct HttpTransfer {
     client: Arc<Client>,
@@ -199,12 +217,16 @@ impl HttpTransfer {
     ///
     /// `base_url`: 形如 `http://host:port`（不含路径）
     /// `state`:    ResumeState（含已完成分片，支持断点续传）
-    #[tracing::instrument(skip(self, state, progress_tx), fields(task_id = %state.task_id, total_chunks = state.total_chunks))]
+    /// `metadata`: 可选的 RFC-003 envelope，作为 `X-Aerosync-Metadata`
+    ///             header 附加到 *每个* chunk 请求（接收端只在最后一个
+    ///             chunk 时使用解析结果填入 `ReceivedFile`）。
+    #[tracing::instrument(skip(self, state, progress_tx, metadata), fields(task_id = %state.task_id, total_chunks = state.total_chunks))]
     pub async fn upload_chunked(
         &self,
         file_path: &std::path::Path,
         base_url: &str,
         state: &mut ResumeState,
+        metadata: Option<&Metadata>,
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
         const SMALL_FILE_THRESHOLD: u64 = 5 * 1024 * 1024; // 5 MB
@@ -218,15 +240,26 @@ impl HttpTransfer {
         let base_delay_ms = self.config.reconnect_base_delay_ms;
         let mut last_err = AeroSyncError::Network("upload_chunked: no attempts".to_string());
 
+        // Pre-encode once so each chunk request just clones a
+        // `String` instead of re-running prost + base64.
+        let metadata_header = metadata.map(encode_metadata_header);
+
         for attempt in 0..=max_reconnect {
             let result = if concurrency <= 1 {
-                self.upload_chunked_serial(file_path, base_url, state, progress_tx.clone())
-                    .await
+                self.upload_chunked_serial(
+                    file_path,
+                    base_url,
+                    state,
+                    metadata_header.as_deref(),
+                    progress_tx.clone(),
+                )
+                .await
             } else {
                 self.upload_chunked_concurrent(
                     file_path,
                     base_url,
                     state,
+                    metadata_header.as_deref(),
                     progress_tx.clone(),
                     concurrency,
                 )
@@ -270,6 +303,7 @@ impl HttpTransfer {
         file_path: &std::path::Path,
         base_url: &str,
         state: &mut ResumeState,
+        metadata_header: Option<&str>,
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
         let file_name = file_path
@@ -314,6 +348,7 @@ impl HttpTransfer {
                 chunk_index,
                 self.config.max_retries,
                 self.config.auth_token.as_deref().map(|s| s.as_str()),
+                metadata_header,
             )
             .await?;
 
@@ -344,6 +379,7 @@ impl HttpTransfer {
         file_path: &std::path::Path,
         base_url: &str,
         state: &mut ResumeState,
+        metadata_header: Option<&str>,
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
         concurrency: usize,
     ) -> Result<()> {
@@ -391,6 +427,7 @@ impl HttpTransfer {
             let auth_token = self.config.auth_token.as_deref().map(|s| s.to_string());
             let max_retries = self.config.max_retries;
             let tx = result_tx.clone();
+            let metadata_header_owned = metadata_header.map(|s| s.to_string());
             let chunk_url = format!(
                 "{}/upload/chunk?task_id={}&chunk_index={}&total_chunks={}&filename={}&total_size={}&chunk_size={}",
                 base_url, state.task_id, chunk_index, state.total_chunks,
@@ -409,6 +446,7 @@ impl HttpTransfer {
                     chunk_index,
                     max_retries,
                     auth_token.as_deref(),
+                    metadata_header_owned.as_deref(),
                 )
                 .await;
                 let _ = tx.send(result.map(|_| (chunk_index, size)));
@@ -449,12 +487,23 @@ impl HttpTransfer {
         chunk_index: u32,
         max_retries: u32,
         auth_token: Option<&str>,
+        metadata_header: Option<&str>,
     ) -> Result<()> {
         let mut last_err = None;
         for attempt in 0..=max_retries {
             let mut req = client.post(chunk_url).body(buf.clone());
             if let Some(token) = auth_token {
                 req = req.header("Authorization", format!("Bearer {}", token));
+            }
+            if let Some(meta) = metadata_header {
+                // Receiver only acts on the envelope when the
+                // final chunk lands, but we attach it to *every*
+                // chunk so a) any single chunk request is
+                // self-describing for proxy logs / replay tools
+                // and b) a malformed envelope fails fast on the
+                // first chunk instead of corrupting only the
+                // last record.
+                req = req.header("X-Aerosync-Metadata", meta);
             }
             match req.send().await {
                 Ok(resp) if resp.status().is_success() => return Ok(()),
@@ -541,12 +590,13 @@ impl HttpTransfer {
         }
     }
 
-    #[tracing::instrument(skip(self, progress_tx), fields(file = ?file_path))]
+    #[tracing::instrument(skip(self, progress_tx, metadata), fields(file = ?file_path))]
     async fn upload_with_progress(
         &self,
         file_path: &std::path::Path,
         url: &str,
         sha256: Option<&str>,
+        metadata: Option<&Metadata>,
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
         // 熔断器检查：如果电路已开路，快速失败
@@ -599,6 +649,15 @@ impl HttpTransfer {
             if let Some(hash) = sha256 {
                 request = request.header("X-File-Hash", hash);
                 request = request.header("X-Hash-Algorithm", "sha256");
+            }
+            if let Some(meta) = metadata {
+                // RFC-003 §8.4: the canonical wire format on HTTP is
+                // base64(protobuf-encoded Metadata) in a single
+                // `X-Aerosync-Metadata` header. Survives every
+                // axum/reqwest code path (single PUT, multipart,
+                // chunked) and matches what the QUIC transport will
+                // ferry on `TransferStart.metadata` in batch C.
+                request = request.header("X-Aerosync-Metadata", encode_metadata_header(meta));
             }
 
             match request.send().await {
@@ -745,8 +804,14 @@ impl TransferProtocol for HttpTransfer {
         task: &TransferTask,
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
-        self.upload_with_progress(&task.source_path, &task.destination, None, progress_tx)
-            .await
+        self.upload_with_progress(
+            &task.source_path,
+            &task.destination,
+            task.sha256.as_deref(),
+            task.metadata.as_ref(),
+            progress_tx,
+        )
+        .await
     }
 
     async fn download_file(
@@ -785,8 +850,14 @@ impl TransferProtocol for HttpTransfer {
             );
             state.completed_chunks = completed_chunks;
 
-            self.upload_chunked(&task.source_path, &base_url, &mut state, progress_tx)
-                .await
+            self.upload_chunked(
+                &task.source_path,
+                &base_url,
+                &mut state,
+                task.metadata.as_ref(),
+                progress_tx,
+            )
+            .await
         } else {
             // HTTP Range 请求续传
             use futures::StreamExt;
@@ -919,7 +990,9 @@ mod tests {
         let url = format!("http://{}/upload", addr);
         let ht = HttpTransfer::new(HttpConfig::default()).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
-        let result = ht.upload_with_progress(&file_path, &url, None, tx).await;
+        let result = ht
+            .upload_with_progress(&file_path, &url, None, None, tx)
+            .await;
         assert!(result.is_ok(), "upload should succeed: {:?}", result);
     }
 
@@ -954,7 +1027,13 @@ mod tests {
         let ht = HttpTransfer::new(cfg).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         let result = ht
-            .upload_with_progress(&file_path, &format!("http://{}/upload", addr), None, tx)
+            .upload_with_progress(
+                &file_path,
+                &format!("http://{}/upload", addr),
+                None,
+                None,
+                tx,
+            )
             .await;
         assert!(
             result.is_ok(),
@@ -990,6 +1069,7 @@ mod tests {
                 &file_path,
                 &format!("http://{}/upload", addr),
                 Some("deadbeef"),
+                None,
                 tx,
             )
             .await;
@@ -1018,7 +1098,13 @@ mod tests {
         let ht = HttpTransfer::new(HttpConfig::default()).unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         let result = ht
-            .upload_with_progress(&file_path, &format!("http://{}/upload", addr), None, tx)
+            .upload_with_progress(
+                &file_path,
+                &format!("http://{}/upload", addr),
+                None,
+                None,
+                tx,
+            )
             .await;
         assert!(result.is_err(), "upload should fail on 403");
     }
@@ -1105,6 +1191,7 @@ mod tests {
             is_upload: false,
             file_size: 100,
             sha256: None,
+            metadata: None,
         };
 
         let ht = HttpTransfer::new(HttpConfig::default()).unwrap();
@@ -1226,7 +1313,7 @@ mod tests {
         );
         let (tx, _rx) = mpsc::unbounded_channel();
         let base = format!("http://{}", addr);
-        let result = ht.upload_chunked(&file_path, &base, &mut state, tx).await;
+        let result = ht.upload_chunked(&file_path, &base, &mut state, None, tx).await;
         assert!(result.is_ok(), "serial upload should succeed: {:?}", result);
         assert_eq!(chunk_count.load(std::sync::atomic::Ordering::Relaxed), 4);
     }
@@ -1262,7 +1349,7 @@ mod tests {
         );
         let (tx, _rx) = mpsc::unbounded_channel();
         let base = format!("http://{}", addr);
-        let result = ht.upload_chunked(&file_path, &base, &mut state, tx).await;
+        let result = ht.upload_chunked(&file_path, &base, &mut state, None, tx).await;
         assert!(
             result.is_ok(),
             "concurrent upload should succeed: {:?}",
@@ -1305,7 +1392,7 @@ mod tests {
         }
         let (tx, _rx) = mpsc::unbounded_channel();
         let base = format!("http://{}", addr);
-        let result = ht.upload_chunked(&file_path, &base, &mut state, tx).await;
+        let result = ht.upload_chunked(&file_path, &base, &mut state, None, tx).await;
         assert!(
             result.is_ok(),
             "resumed upload should succeed: {:?}",
@@ -1431,7 +1518,7 @@ mod tests {
         );
         let (tx, _rx) = mpsc::unbounded_channel();
         let base = format!("http://{}", addr);
-        let result = ht.upload_chunked(&file_path, &base, &mut state, tx).await;
+        let result = ht.upload_chunked(&file_path, &base, &mut state, None, tx).await;
         // 503 被识别为网络错误 → 触发重连 → 第二次成功
         assert!(result.is_ok(), "reconnect should succeed: {:?}", result);
     }

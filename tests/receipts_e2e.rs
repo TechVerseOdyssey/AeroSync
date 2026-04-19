@@ -166,6 +166,7 @@ async fn e2e_quic_receipt_ack_happy_path() {
         sha256: None,
         received_at: SystemTime::now(),
         sender_ip: None,
+        metadata: None,
     };
     let incoming = IncomingFile::new(
         received,
@@ -266,6 +267,7 @@ async fn e2e_quic_receipt_nack_with_reason() {
         sha256: None,
         received_at: SystemTime::now(),
         sender_ip: None,
+        metadata: None,
     };
     let incoming = IncomingFile::new(
         received,

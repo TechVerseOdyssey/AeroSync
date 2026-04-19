@@ -288,6 +288,7 @@ mod tests {
             sha256: None,
             received_at: SystemTime::now(),
             sender_ip: None,
+            metadata: None,
         }
     }
 

@@ -59,6 +59,13 @@ pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 # Python binding is always in lock-step with the host engine.
 aerosync = { workspace = true }
 aerosync-proto = { workspace = true }
+# `prost` + `base64` power the test-only `_test_encode_metadata_header`
+# helper (RFC-003 §8.4 wire shape: base64-of-protobuf). The same
+# encoding is what the Rust HTTP sender adapter emits — using the
+# same crates here keeps the wire byte-identical between the two
+# encoders.
+prost = { workspace = true }
+base64 = "0.22"
 
 # Workspace common deps
 tokio = { workspace = true }

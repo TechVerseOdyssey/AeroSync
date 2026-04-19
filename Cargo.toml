@@ -167,6 +167,13 @@ memmap2 = { workspace = true }
 aerosync-proto = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
+# Used by `core::server` (HTTP receiver) and `protocols::http` (sender)
+# to encode the wire-format `Metadata` envelope into the
+# `X-Aerosync-Metadata` HTTP header, per RFC-003 §8.4. The proto
+# bytes are base64-standard with padding so the header survives the
+# strictest gateway intermediaries; we deliberately accept slightly
+# larger encoded sizes vs. URL-safe-no-padding for that property.
+base64 = "0.22"
 
 # Metadata envelope (RFC-003).
 # `infer` is a tiny zero-dep magic-number sniffer (~30 KiB) used by

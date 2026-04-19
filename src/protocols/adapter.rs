@@ -308,8 +308,14 @@ impl ProtocolAdapter for AutoAdapter {
             }
         });
 
-        ht.upload_chunked(&task.source_path, &base_url, state, tx)
-            .await
+        ht.upload_chunked(
+            &task.source_path,
+            &base_url,
+            state,
+            task.metadata.as_ref(),
+            tx,
+        )
+        .await
     }
 }
 
@@ -439,6 +445,7 @@ mod tests {
             is_upload: true,
             file_size: 4,
             sha256: None,
+            metadata: None,
         };
         let adapter = AutoAdapter::new(HttpConfig::default(), default_quic_config());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -478,6 +485,7 @@ mod tests {
             is_upload: false,
             file_size: 0,
             sha256: None,
+            metadata: None,
         };
         let adapter = AutoAdapter::new(HttpConfig::default(), default_quic_config());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

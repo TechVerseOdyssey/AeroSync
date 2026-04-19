@@ -97,6 +97,42 @@ pub struct ReceivedFile {
     pub sha256: Option<String>,
     pub received_at: std::time::SystemTime,
     pub sender_ip: Option<String>,
+    /// RFC-003 metadata envelope decoded from the wire (HTTP today,
+    /// QUIC `TransferStart.metadata` after batch C). `None` for
+    /// transfers that arrived without a metadata envelope (legacy
+    /// senders, smoke tests, the QUIC path until
+    /// `w3c-quic-receipt-wiring` lands). Skipped on serde when
+    /// absent so existing JSONL records and HTTP `/files` listings
+    /// stay byte-compatible with v0.2.0 clients.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "metadata_serde")]
+    pub metadata: Option<aerosync_proto::Metadata>,
+}
+
+/// Serde adapter for the optional [`aerosync_proto::Metadata`] field
+/// on [`ReceivedFile`]. The proto-generated type is not `serde`-aware,
+/// so we project through [`crate::core::metadata::MetadataJson`] which
+/// has stable field names matching the JSONL `HistoryStore` shape.
+mod metadata_serde {
+    use crate::core::metadata::MetadataJson;
+    use aerosync_proto::Metadata;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        v: &Option<Metadata>,
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match v {
+            Some(m) => MetadataJson::from_proto(m).serialize(s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<Option<Metadata>, D::Error> {
+        let opt: Option<MetadataJson> = Option::deserialize(d)?;
+        Ok(opt.map(|j| j.to_proto()))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -709,6 +745,93 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
 }
 
+/// HTTP wire-format header name carrying the RFC-003 metadata
+/// envelope. Value is `base64(standard, padded)` of the
+/// protobuf-encoded [`aerosync_proto::Metadata`] message. See
+/// `RFC-003 §8.4 (HTTP transport)` and `CHANGELOG.md` for the
+/// stability story. Lower-cased so axum's case-insensitive header
+/// lookup matches whatever case the client sent.
+pub(crate) const METADATA_HEADER: &str = "x-aerosync-metadata";
+
+/// Result of decoding the `X-Aerosync-Metadata` header off an
+/// inbound HTTP request. Returned by
+/// [`extract_metadata_header`].
+pub(crate) enum MetadataHeader {
+    /// Header was absent — legitimate for senders that don't set
+    /// metadata (smoke tests, pre-RFC-003 clients).
+    Absent,
+    /// Header parsed cleanly into a wire envelope. Boxed because
+    /// `aerosync_proto::Metadata` is ~376 bytes and `clippy::large_enum_variant`
+    /// would otherwise force every consumer of this enum to carry that
+    /// payload by value even on the common `Absent` / `Invalid` branches.
+    Present(Box<aerosync_proto::Metadata>),
+    /// Header was present but malformed: bad base64 or bad protobuf.
+    /// The handler MUST translate this into a 400 with a JSON body.
+    Invalid(String),
+}
+
+/// Extract and decode the `X-Aerosync-Metadata` HTTP header. Tries
+/// in order: header missing → `Absent`; header present + valid
+/// base64 + valid protobuf → `Present(meta)`; otherwise `Invalid`
+/// with a one-line diagnostic suitable for the 400 response body.
+///
+/// We accept either standard or URL-safe base64, padded or unpadded,
+/// to be lenient with proxies that re-encode header values. The
+/// canonical sender encoding is standard-with-padding (matches the
+/// `base64::engine::general_purpose::STANDARD` engine used in
+/// `protocols::http`).
+pub(crate) fn extract_metadata_header(headers: &HeaderMap) -> MetadataHeader {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    use base64::Engine;
+    use prost::Message;
+
+    let raw = match header_str(headers, METADATA_HEADER) {
+        Some(s) if !s.is_empty() => s,
+        _ => return MetadataHeader::Absent,
+    };
+
+    // RFC-003 §6 caps the *decoded* envelope at 64 KiB; base64 inflates
+    // by 4/3 so any header above ~88 KiB cannot decode to a valid
+    // envelope. Reject early to keep a misbehaving client from spending
+    // proxy CPU on the decode.
+    if raw.len() > 96 * 1024 {
+        return MetadataHeader::Invalid(format!(
+            "header value too large ({} bytes; max ~96 KiB)",
+            raw.len()
+        ));
+    }
+
+    let decoded = STANDARD
+        .decode(raw)
+        .or_else(|_| STANDARD_NO_PAD.decode(raw))
+        .or_else(|_| URL_SAFE.decode(raw))
+        .or_else(|_| URL_SAFE_NO_PAD.decode(raw));
+    let bytes = match decoded {
+        Ok(b) => b,
+        Err(e) => return MetadataHeader::Invalid(format!("base64 decode failed: {e}")),
+    };
+
+    match aerosync_proto::Metadata::decode(bytes.as_slice()) {
+        Ok(m) => MetadataHeader::Present(Box::new(m)),
+        Err(e) => MetadataHeader::Invalid(format!("protobuf decode failed: {e}")),
+    }
+}
+
+/// Build the canonical 400 JSON body returned when the
+/// `X-Aerosync-Metadata` header is malformed. Centralised so the
+/// chunked, batch, and per-file handlers all emit byte-identical
+/// error envelopes (the Python `test_metadata_propagation.py`
+/// negative test pins this shape).
+pub(crate) fn metadata_header_400(reason: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": format!("invalid metadata header: {reason}"),
+        })),
+    )
+        .into_response()
+}
+
 /// Build the axum router shared by HTTP and HTTPS servers.
 fn build_axum_router(state: AppState) -> axum::Router {
     let cors = CorsLayer::new()
@@ -944,6 +1067,14 @@ async fn handle_file_upload(
     let expected_hash = header_str(&headers, "x-file-hash").map(str::to_string);
     let tag = header_str(&headers, "x-aerosync-tag").map(str::to_string);
 
+    // RFC-003 §8.4: per-transfer envelope. Parsed up-front so a
+    // malformed header rejects the request before we touch disk.
+    let received_metadata = match extract_metadata_header(&headers) {
+        MetadataHeader::Absent => None,
+        MetadataHeader::Present(m) => Some(*m),
+        MetadataHeader::Invalid(reason) => return metadata_header_400(&reason),
+    };
+
     // Content-Length 预检：超出 max_file_size 直接 413（与 warp 版本完全一致）
     if let Some(len_str) = header_str(&headers, "content-length") {
         if let Ok(len) = len_str.parse::<u64>() {
@@ -1107,6 +1238,7 @@ async fn handle_file_upload(
             sha256: Some(actual_hash.clone()),
             received_at: std::time::SystemTime::now(),
             sender_ip: Some(client_ip.clone()),
+            metadata: received_metadata.clone(),
         };
         state.received_files.write().await.push(received_file);
 
@@ -1272,6 +1404,15 @@ async fn handle_batch_upload(
     let auth_header = header_str(&headers, "authorization").map(str::to_string);
     let client_ip = remote_addr.ip().to_string();
 
+    // One envelope per batch request, applied to every saved file.
+    // Per-file overrides via `X-Aerosync-Metadata-<filename>` are
+    // intentionally deferred (batch C / future work).
+    let received_metadata = match extract_metadata_header(&headers) {
+        MetadataHeader::Absent => None,
+        MetadataHeader::Present(m) => Some(*m),
+        MetadataHeader::Invalid(reason) => return metadata_header_400(&reason),
+    };
+
     if let Some(ref mw) = state.auth_mw {
         match mw.authenticate_http_request(auth_header.as_deref(), &client_ip) {
             Ok(true) => {}
@@ -1354,6 +1495,7 @@ async fn handle_batch_upload(
                     received_at: std::time::SystemTime::now(),
                     sender_ip: Some(client_ip.clone()),
                     saved_path: file_path.clone(),
+                    metadata: received_metadata.clone(),
                 };
                 state
                     .received_files
@@ -1413,6 +1555,19 @@ async fn handle_chunk_upload(
 
     let auth_header = header_str(&headers, "authorization").map(str::to_string);
     let client_ip = remote_addr.ip().to_string();
+
+    // Per-chunk metadata: the sender attaches the same envelope to
+    // every chunk in a single transfer, so any chunk's header is
+    // canonical. We only USE the parsed value on the final chunk
+    // (when we materialise the `ReceivedFile`); the rest are dropped
+    // on the floor. Malformed bytes still 400 the request even on
+    // intermediate chunks — clients that get this wrong should fail
+    // fast, not silently corrupt only the final record.
+    let received_metadata = match extract_metadata_header(&headers) {
+        MetadataHeader::Absent => None,
+        MetadataHeader::Present(m) => Some(*m),
+        MetadataHeader::Invalid(reason) => return metadata_header_400(&reason),
+    };
 
     if let Some(ref mw) = state.auth_mw {
         match mw.authenticate_http_request(auth_header.as_deref(), &client_ip) {
@@ -1564,6 +1719,7 @@ async fn handle_chunk_upload(
                 sha256: None,
                 received_at: std::time::SystemTime::now(),
                 sender_ip: Some(remote_addr.ip().to_string()),
+                metadata: received_metadata.clone(),
             };
             state.received_files.write().await.push(record);
             state.metrics.inc_files_received();
@@ -2152,6 +2308,12 @@ async fn handle_quic_file_upload(
         sha256: Some(actual_hash.clone()),
         received_at: std::time::SystemTime::now(),
         sender_ip: Some(sender_ip.to_string()),
+        // TODO(w0.2.1 batch C / w3c-quic-receipt-wiring): populate
+        // ReceivedFile.metadata from the TransferStart frame received
+        // on the bidi receipt stream. Today the QUIC receive path
+        // pre-dates RFC-002 §6.3 and only carries the bare file
+        // name + size header, so we have nothing to fold in here.
+        metadata: None,
     });
 
     if let Some(ref al) = audit_logger {

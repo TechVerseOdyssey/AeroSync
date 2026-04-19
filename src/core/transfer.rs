@@ -121,6 +121,17 @@ pub struct TransferTask {
     pub is_upload: bool,
     /// 预计算的 SHA-256（可选）
     pub sha256: Option<String>,
+    /// RFC-003 sealed metadata envelope, attached by
+    /// [`TransferEngine::send_with_metadata`] just before the task is
+    /// queued. `None` for legacy callers (`new_upload` / `new_download`
+    /// constructors and direct `add_transfer` callers) — the engine and
+    /// adapters MUST treat the absence as "no metadata" rather than
+    /// faulting. The HTTP adapter forwards this verbatim as the
+    /// base64-encoded `X-Aerosync-Metadata` header (RFC-003 §8.4); the
+    /// QUIC adapter will fold it into `TransferStart.metadata` once
+    /// the bidi receipt stream is wired (see batch C /
+    /// `w3c-quic-receipt-wiring`).
+    pub metadata: Option<Metadata>,
 }
 
 impl TransferTask {
@@ -132,6 +143,7 @@ impl TransferTask {
             file_size,
             is_upload: true,
             sha256: None,
+            metadata: None,
         }
     }
 
@@ -143,6 +155,7 @@ impl TransferTask {
             file_size,
             is_upload: false,
             sha256: None,
+            metadata: None,
         }
     }
 }
@@ -423,13 +436,19 @@ impl TransferEngine {
     #[tracing::instrument(skip(self, task, metadata), fields(task_id = %task.id))]
     pub async fn send_with_metadata(
         &self,
-        task: TransferTask,
+        mut task: TransferTask,
         metadata: Metadata,
     ) -> Result<Arc<Receipt<Sender>>> {
         let receipt_id = Uuid::new_v4();
         let sealed = self.seal_system_fields(&task, metadata, receipt_id).await?;
         validate_metadata(&sealed)
             .map_err(|e| AeroSyncError::InvalidConfig(format!("metadata validation: {e}")))?;
+        // Stash the sealed envelope on the task itself so the adapter
+        // (HTTP today, QUIC after batch C) can read it back without
+        // having to reach into the engine's `sealed_metadata` map. The
+        // map is still kept as the canonical store keyed by
+        // `receipt_id` for `metadata_for(...)` lookups.
+        task.metadata = Some(sealed.clone());
         self.sealed_metadata
             .write()
             .await

@@ -12,6 +12,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HTTP metadata propagation** (RFC-003 §8.4) — the sender now
+  encodes the sealed `Metadata` envelope as
+  `base64(protobuf(Metadata))` and attaches it to the
+  `X-Aerosync-Metadata` HTTP header on every `/upload`,
+  `/upload/batch`, and `/upload/chunk` request. The receiver
+  decodes the header back into `aerosync_proto::Metadata` and
+  surfaces it on the new `ReceivedFile.metadata` field. Malformed
+  headers (non-base64 bytes, non-protobuf payloads, or envelopes
+  exceeding the RFC-003 §6 64 KiB hard cap) are rejected with a
+  `400 Bad Request` carrying a structured JSON error body so
+  clients can fail fast. The QUIC transport currently leaves
+  `ReceivedFile.metadata` as `None` and ships a
+  `TODO(w3c-quic-receipt-wiring)` marker for batch C, when
+  `TransferStart.metadata` will carry the same envelope on the
+  bidi receipt stream. (P0.1, RFC-003)
+- **Python `IncomingFile` metadata accessors** — `IncomingFile.metadata`
+  is now populated from the sender's `user_metadata` map (was
+  always-empty in v0.2.0), and four new well-known field getters
+  expose the RFC-003 §3 system fields:
+  `IncomingFile.trace_id`, `.conversation_id`, `.correlation_id`,
+  and `.lifecycle` (returned as the `LIFECYCLE_*` string name, or
+  `None` when the sender did not set the field). All four are
+  `None` when the transfer arrived without an envelope.
 - **`FileReceiver::local_http_addr()` / `local_quic_addr()`** — public
   Rust accessors that return the OS-assigned `SocketAddr` once
   `start()` has bound the listener. `None` before start and after

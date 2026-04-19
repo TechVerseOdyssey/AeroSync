@@ -268,6 +268,7 @@ async fn test_auto_adapter_connection_refused_returns_network_error() {
         is_upload: true,
         file_size: 4,
         sha256: None,
+        metadata: None,
     };
     let adapter = Arc::new(AutoAdapter::new(
         HttpConfig::default(),

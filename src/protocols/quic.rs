@@ -373,6 +373,15 @@ impl TransferProtocol for QuicTransfer {
         task: &TransferTask,
         progress_tx: mpsc::UnboundedSender<TransferProgress>,
     ) -> Result<()> {
+        // TODO(w0.2.1 batch C / w3c-quic-receipt-wiring): populate
+        // ReceivedFile.metadata from the TransferStart frame received
+        // on the bidi receipt stream. Today the QUIC sender ignores
+        // `task.metadata` because the transport pre-dates RFC-002
+        // §6.3 control-stream wiring; once the receipt stream is in
+        // place, encode `task.metadata` into `TransferStart.metadata`
+        // here so the receiver can populate `ReceivedFile.metadata`
+        // from the wire instead of leaving it `None`.
+        let _ = task.metadata.as_ref();
         let connection = self.establish_connection().await?;
         self.upload_with_progress(
             &connection,

@@ -32,6 +32,9 @@ use aerosync::core::receipt::{Event, Receipt, Receiver as RxSide};
 #[cfg(test)]
 use aerosync::core::server::ServerConfig;
 use aerosync::core::server::{FileReceiver, WsEvent};
+use aerosync_proto::{Lifecycle, Metadata};
+use base64::engine::general_purpose::STANDARD as B64_STD;
+use base64::Engine as _;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -41,6 +44,19 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, Mutex};
+
+/// Project the optional, well-known [`Lifecycle`] enum value carried
+/// on a wire-decoded [`Metadata`] envelope into the
+/// `LIFECYCLE_*` string the Python SDK exposes (e.g.
+/// `"LIFECYCLE_TRANSIENT"`). Returns `None` when the field is absent
+/// or the integer doesn't decode to a known variant — callers
+/// surface that as `None` on the Python `IncomingFile.lifecycle`
+/// getter, NOT as a string like `"LIFECYCLE_UNSPECIFIED"`, so that
+/// `is None` is the canonical "sender didn't tell me" check.
+fn lifecycle_label(meta: &Metadata) -> Option<&'static str> {
+    let raw = meta.lifecycle?;
+    Lifecycle::try_from(raw).ok().map(|l| l.as_str_name())
+}
 
 /// Inbound `Receiver`. Constructed via the `aerosync.receiver(...)`
 /// sync factory; the returned object IS the async context manager.
@@ -175,13 +191,35 @@ impl PyReceiver {
                     let _ = rcpt.apply_event(Event::Close);
                     let _ = rcpt.apply_event(Event::Process);
                     registry.insert(Arc::clone(&rcpt));
+                    // Project the wire-decoded RFC-003 envelope into
+                    // the Python-facing snapshot. We deliberately
+                    // *clone* user_metadata + the well-known fields
+                    // rather than holding a reference to the
+                    // `ReceivedFile`, because `PyIncomingFile` is
+                    // surfaced to user code that may outlive the
+                    // engine's `received_files` Vec.
+                    let (user_metadata, trace_id, conversation_id, correlation_id, lifecycle) =
+                        match f.metadata.as_ref() {
+                            Some(m) => (
+                                m.user_metadata.clone(),
+                                m.trace_id.clone(),
+                                m.conversation_id.clone(),
+                                m.correlation_id.clone(),
+                                lifecycle_label(m),
+                            ),
+                            None => (HashMap::new(), None, None, None, None),
+                        };
                     return Ok(PyIncomingFile {
                         path: f.saved_path,
                         file_name: f.original_name,
                         size_bytes: f.size,
                         sha256: f.sha256,
                         receipt: Some(rcpt),
-                        user_metadata: HashMap::new(),
+                        user_metadata,
+                        trace_id,
+                        conversation_id,
+                        correlation_id,
+                        lifecycle,
                     });
                 }
 
@@ -221,7 +259,26 @@ pub struct PyIncomingFile {
     pub(crate) size_bytes: u64,
     pub(crate) sha256: Option<String>,
     pub(crate) receipt: Option<Arc<Receipt<RxSide>>>,
+    /// Free-form `user_metadata` map projected from the wire-decoded
+    /// [`Metadata`] envelope (RFC-003 §4 user fields). Empty when the
+    /// transfer arrived without an envelope (legacy senders, the
+    /// QUIC path until batch C wires `TransferStart.metadata`, or
+    /// envelope-less smoke tests).
     pub(crate) user_metadata: HashMap<String, String>,
+    /// Well-known optional metadata fields snapshot, populated from
+    /// [`Metadata`] at iterator yield time so the Python getters
+    /// don't need to drag the proto type through the binding. `None`
+    /// for any field the sender did not set, and *all* `None` when
+    /// no envelope was attached (in which case `metadata_present()`
+    /// would also be `False`, but we don't expose that flag yet).
+    pub(crate) trace_id: Option<String>,
+    pub(crate) conversation_id: Option<String>,
+    pub(crate) correlation_id: Option<String>,
+    /// Decoded `LIFECYCLE_*` string (e.g. `"LIFECYCLE_TRANSIENT"`).
+    /// `None` rather than `"LIFECYCLE_UNSPECIFIED"` when the sender
+    /// omitted the field, so `if f.lifecycle is None` is the
+    /// canonical "no preference" check.
+    pub(crate) lifecycle: Option<&'static str>,
 }
 
 #[pymethods]
@@ -299,16 +356,13 @@ impl PyIncomingFile {
         })
     }
 
-    /// Receiver-side `user_metadata` dict.
-    ///
-    /// Currently always empty: the engine does not yet expose the
-    /// sender-supplied [`Metadata`](aerosync_proto::Metadata)
-    /// envelope on the `ReceivedFile` produced by `FileReceiver`.
-    /// Wiring this requires plumbing the `Metadata` from the
-    /// `TransferStart` frame into `ReceivedFile`, which is engine
-    /// work tracked outside RFC-001 §15. The accessor exists today
-    /// so user code can write the killer-demo shape and not break
-    /// when the propagation lands.
+    /// Receiver-side `user_metadata` dict (RFC-003 §4 free-form
+    /// fields). Populated on the HTTP transport from the wire
+    /// `X-Aerosync-Metadata` header (`base64(protobuf(Metadata))`);
+    /// empty when the sender did not attach an envelope or when the
+    /// transfer arrived over a transport that doesn't yet propagate
+    /// metadata (the QUIC path until batch C wires
+    /// `TransferStart.metadata`).
     #[getter]
     fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
@@ -318,12 +372,75 @@ impl PyIncomingFile {
         Ok(d)
     }
 
+    /// RFC-003 well-known `trace_id`. `None` if the sender did not
+    /// set it or no envelope was attached.
+    #[getter]
+    fn trace_id(&self) -> Option<String> {
+        self.trace_id.clone()
+    }
+
+    /// RFC-003 well-known `conversation_id`. `None` if absent.
+    #[getter]
+    fn conversation_id(&self) -> Option<String> {
+        self.conversation_id.clone()
+    }
+
+    /// RFC-003 well-known `correlation_id`. `None` if absent.
+    #[getter]
+    fn correlation_id(&self) -> Option<String> {
+        self.correlation_id.clone()
+    }
+
+    /// RFC-003 well-known `lifecycle` projected to its
+    /// `LIFECYCLE_*` string name (e.g. `"LIFECYCLE_TRANSIENT"`).
+    /// `None` when the sender did not set the field — *not*
+    /// `"LIFECYCLE_UNSPECIFIED"`, so `is None` is the canonical
+    /// "no preference" check.
+    #[getter]
+    fn lifecycle(&self) -> Option<&'static str> {
+        self.lifecycle
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "IncomingFile(path={:?}, file_name={:?}, size_bytes={})",
             self.path, self.file_name, self.size_bytes
         )
     }
+}
+
+/// Test-only helper: encode a [`Metadata`] envelope into the
+/// canonical `X-Aerosync-Metadata` HTTP header value
+/// (`base64(protobuf(Metadata))` — RFC-003 §8.4). The argument
+/// shape mirrors the Python `Client.send(metadata=...)` map: a
+/// flat `dict[str, str]` whose well-known keys (`trace_id`,
+/// `conversation_id`, `correlation_id`, `lifecycle`) are lifted
+/// into the typed `Metadata` slots and everything else routed to
+/// `user_metadata`. Returns the ready-to-send header value as
+/// a UTF-8 string.
+///
+/// Test-only because production code never needs to build a wire
+/// header from Python — `Client.send` encodes it on the Rust side
+/// from the engine-sealed envelope. The pytest in
+/// `tests/test_metadata_propagation.py` uses this to drive the
+/// happy path through the receiver without depending on a fully-
+/// wired sender engine (the Python `Client` does not bring its own
+/// `ProtocolAdapter` in v0.2 — see `test_killer_demo.py` skip).
+#[pyfunction]
+#[pyo3(signature = (metadata=None))]
+pub fn _test_encode_metadata_header(
+    metadata: Option<HashMap<String, String>>,
+) -> PyResult<String> {
+    use crate::client::build_metadata;
+    use prost::Message as _;
+    let m = match metadata {
+        Some(m) if !m.is_empty() => build_metadata(m)?,
+        _ => Metadata::default(),
+    };
+    let mut buf = Vec::with_capacity(m.encoded_len());
+    m.encode(&mut buf)
+        .map_err(|e| PyValueError::new_err(format!("metadata encode: {e}")))?;
+    Ok(B64_STD.encode(&buf))
 }
 
 /// Test-only helper: build a [`PyIncomingFile`] with an attached
@@ -352,6 +469,10 @@ pub fn _test_make_incoming_file(
         sha256,
         receipt: Some(rcpt),
         user_metadata: user_metadata.unwrap_or_default(),
+        trace_id: None,
+        conversation_id: None,
+        correlation_id: None,
+        lifecycle: None,
     }
 }
 
@@ -394,6 +515,10 @@ mod tests {
             sha256: None,
             receipt: None,
             user_metadata: HashMap::new(),
+            trace_id: None,
+            conversation_id: None,
+            correlation_id: None,
+            lifecycle: None,
         };
         let r = f.__repr__();
         assert!(r.contains("x.bin"));

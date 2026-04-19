@@ -164,6 +164,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(make_receiver, m)?)?;
     m.add_function(wrap_pyfunction!(discover, m)?)?;
     m.add_function(wrap_pyfunction!(receiver::_test_make_incoming_file, m)?)?;
+    m.add_function(wrap_pyfunction!(receiver::_test_encode_metadata_header, m)?)?;
 
     m.add_class::<PyClient>()?;
     m.add_class::<PyReceipt>()?;
