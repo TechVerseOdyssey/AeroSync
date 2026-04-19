@@ -76,6 +76,14 @@ pub struct PyReceiver {
     /// sync and has to remain non-blocking. `None` until the
     /// `FileReceiver` has actually bound the listener.
     pub(crate) bound_http_addr: Arc<StdMutex<Option<SocketAddr>>>,
+    /// Sibling of `bound_http_addr` for the QUIC endpoint
+    /// (Batch C / w0.2.1 P0.2). `Some(addr)` once `start()` has bound
+    /// the QUIC UDP socket; `None` while the listener is stopped.
+    /// The Python wheel is always built with the host engine's `quic`
+    /// feature on (it is in `aerosync`'s default feature set), so we
+    /// don't conditionally compile the field — keeping it
+    /// unconditionally simplifies the builder and the getter.
+    pub(crate) bound_quic_addr: Arc<StdMutex<Option<SocketAddr>>>,
     pub(crate) ws_rx: Arc<Mutex<Option<broadcast::Receiver<WsEvent>>>>,
     pub(crate) yielded: Arc<AtomicUsize>,
     pub(crate) started: Arc<AtomicBool>,
@@ -84,11 +92,13 @@ pub struct PyReceiver {
 impl PyReceiver {
     pub fn new(inner: FileReceiver, name: Option<String>, address: String) -> Self {
         let bound_http_addr = inner.local_http_addr_handle();
+        let bound_quic_addr = inner.local_quic_addr_handle();
         Self {
             inner: Arc::new(Mutex::new(inner)),
             name,
             address,
             bound_http_addr,
+            bound_quic_addr,
             ws_rx: Arc::new(Mutex::new(None)),
             yielded: Arc::new(AtomicUsize::new(0)),
             started: Arc::new(AtomicBool::new(false)),
@@ -118,6 +128,20 @@ impl PyReceiver {
             return addr.to_string();
         }
         self.address.clone()
+    }
+
+    /// Returns the OS-assigned QUIC `host:port` once the underlying
+    /// `FileReceiver` has bound its UDP socket; `None` before
+    /// `__aenter__` resolves or when the receiver was started with
+    /// QUIC disabled in `ServerConfig`. Used by tests (and by
+    /// callers that want to hand a `quic://` URL to a sender) to
+    /// discover the actual port without parsing log output.
+    #[getter]
+    fn quic_address(&self) -> Option<String> {
+        self.bound_quic_addr
+            .lock()
+            .unwrap()
+            .map(|addr| addr.to_string())
     }
 
     /// Async context manager entry — subscribes to the WS broadcast

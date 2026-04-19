@@ -69,9 +69,26 @@ use prost::Message;
 use thiserror::Error;
 use tracing::{debug, trace, warn};
 
-use aerosync_proto::{receipt_frame, ReceiptFrame};
+use aerosync_proto::{control_frame, receipt_frame, ControlFrame, ReceiptFrame, TransferStart};
 
 use crate::core::receipt::{Event, Receipt, Receiver, Sender};
+
+// ─────────────────────────────────────────────────────────────────────
+// Control-stream multiplexing sentinel (Batch C / w0.2.1 P0.2)
+// ─────────────────────────────────────────────────────────────────────
+
+/// First byte the QUIC sender writes on a bidi stream to mark it as
+/// the **control stream** (RFC-002 §6.3 stream 0): a length-delimited
+/// [`ControlFrame`] follows immediately. This sentinel multiplexes the
+/// new control stream over the same `aerosync/1` ALPN as the legacy
+/// data stream without bumping the protocol version.
+///
+/// Backward compatibility: v0.2.0 senders never write this byte —
+/// they open one bidi per transfer that begins with the ASCII
+/// `UPLOAD:` (0x55) or `DOWNLOAD:` (0x44) header. Receivers in v0.2.1+
+/// dispatch on the first byte: `0x00` → control stream, anything
+/// printable-ASCII → legacy data stream.
+pub const CONTROL_STREAM_SENTINEL: u8 = 0x00;
 
 // ─────────────────────────────────────────────────────────────────────
 // Codec errors
@@ -150,19 +167,14 @@ pub fn decode_frame(mut buf: &[u8]) -> Result<ReceiptFrame, CodecError> {
 // QUIC read/write helpers
 // ─────────────────────────────────────────────────────────────────────
 
-/// Read one length-delimited [`ReceiptFrame`] from a `quinn::RecvStream`.
-///
-/// Implementation detail: we manually decode the protobuf varint
-/// length prefix one byte at a time (a varint is at most 10 bytes for
-/// a u64), then read exactly `len` body bytes. This is necessary
-/// because `prost::decode_length_delimited` needs the entire
-/// frame in memory; QUIC delivers bytes asynchronously so we have to
-/// collect them ourselves.
-#[tracing::instrument(level = "trace", skip(stream))]
-pub async fn read_frame_from_stream(
+/// Internal: read a single length-delimited protobuf body from a
+/// `quinn::RecvStream`. Returns the body bytes (without the varint
+/// prefix). Used by both [`read_frame_from_stream`] (ReceiptFrame) and
+/// [`read_control_frame_from_stream`] (ControlFrame) so the varint
+/// decoder lives in one place.
+async fn read_length_delimited_body(
     stream: &mut quinn::RecvStream,
-) -> Result<ReceiptFrame, CodecError> {
-    // Step 1: read the varint length prefix one byte at a time.
+) -> Result<Vec<u8>, CodecError> {
     let mut len: u64 = 0;
     let mut shift: u32 = 0;
     let mut byte_buf = [0u8; 1];
@@ -196,7 +208,6 @@ pub async fn read_frame_from_stream(
         }
     }
 
-    // Step 2: bounds check the declared length.
     let len_usize = usize::try_from(len)
         .map_err(|_| CodecError::BadLength(format!("length {len} doesn't fit usize")))?;
     if len_usize > FRAME_SIZE_CAP {
@@ -206,7 +217,6 @@ pub async fn read_frame_from_stream(
         });
     }
 
-    // Step 3: read exactly `len` body bytes.
     let mut body = vec![0u8; len_usize];
     let mut offset = 0;
     while offset < len_usize {
@@ -220,7 +230,22 @@ pub async fn read_frame_from_stream(
             Some(read) => offset += read,
         }
     }
+    Ok(body)
+}
 
+/// Read one length-delimited [`ReceiptFrame`] from a `quinn::RecvStream`.
+///
+/// Implementation detail: we manually decode the protobuf varint
+/// length prefix one byte at a time (a varint is at most 10 bytes for
+/// a u64), then read exactly `len` body bytes. This is necessary
+/// because `prost::decode_length_delimited` needs the entire
+/// frame in memory; QUIC delivers bytes asynchronously so we have to
+/// collect them ourselves.
+#[tracing::instrument(level = "trace", skip(stream))]
+pub async fn read_frame_from_stream(
+    stream: &mut quinn::RecvStream,
+) -> Result<ReceiptFrame, CodecError> {
+    let body = read_length_delimited_body(stream).await?;
     let frame = ReceiptFrame::decode(&body[..])?;
     Ok(frame)
 }
@@ -236,6 +261,67 @@ pub async fn write_frame_to_stream(
         .write_all(&buf)
         .await
         .map_err(|e| CodecError::Transport(e.to_string()))
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// ControlFrame codec (Batch C / w0.2.1 P0.2)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Encode a single [`ControlFrame`] into a length-delimited buffer
+/// ready to be written on the QUIC control stream.
+pub fn encode_control_frame(frame: &ControlFrame) -> Vec<u8> {
+    frame.encode_length_delimited_to_vec()
+}
+
+/// Read one length-delimited [`ControlFrame`] from a `quinn::RecvStream`.
+///
+/// Mirrors [`read_frame_from_stream`] but decodes the protobuf body
+/// as a [`ControlFrame`] (carrying `Handshake` / `TransferStart` /
+/// `Cancel` / `Heartbeat`).
+#[tracing::instrument(level = "trace", skip(stream))]
+pub async fn read_control_frame_from_stream(
+    stream: &mut quinn::RecvStream,
+) -> Result<ControlFrame, CodecError> {
+    let body = read_length_delimited_body(stream).await?;
+    let frame = ControlFrame::decode(&body[..])?;
+    Ok(frame)
+}
+
+/// Encode and write a single [`ControlFrame`] to a `quinn::SendStream`.
+#[tracing::instrument(level = "trace", skip(stream, frame))]
+pub async fn write_control_frame_to_stream(
+    stream: &mut quinn::SendStream,
+    frame: &ControlFrame,
+) -> Result<(), CodecError> {
+    let buf = encode_control_frame(frame);
+    stream
+        .write_all(&buf)
+        .await
+        .map_err(|e| CodecError::Transport(e.to_string()))
+}
+
+/// Build a [`ControlFrame`] carrying a [`TransferStart`] body. This is
+/// the **first** frame the QUIC sender emits on every control stream
+/// (after the [`CONTROL_STREAM_SENTINEL`] byte) so the receiver can
+/// register the metadata envelope before the data stream completes.
+pub fn build_transfer_start_control_frame(
+    receipt_id: impl Into<String>,
+    file_name: impl Into<String>,
+    size_bytes: u64,
+    sha256: impl Into<String>,
+    metadata: Option<aerosync_proto::Metadata>,
+    chunk_size: u32,
+) -> ControlFrame {
+    ControlFrame {
+        body: Some(control_frame::Body::TransferStart(TransferStart {
+            receipt_id: receipt_id.into(),
+            file_name: file_name.into(),
+            size_bytes,
+            sha256: sha256.into(),
+            metadata,
+            chunk_size,
+        })),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -622,6 +708,52 @@ mod codec_tests {
         let f = build_acked_frame("rid-7");
         assert_eq!(f.receipt_id, "rid-7");
         assert!(f.at.is_some());
+    }
+
+    // ── ControlFrame codec smoke (Batch C / w0.2.1 P0.2) ──────────────
+
+    #[test]
+    fn control_frame_transfer_start_roundtrips_through_codec() {
+        use prost::Message as _;
+        let cf = build_transfer_start_control_frame(
+            "rid-c-1",
+            "demo.bin",
+            1024,
+            "ab".repeat(32),
+            Some(aerosync_proto::Metadata {
+                trace_id: Some("trace-c-1".into()),
+                ..Default::default()
+            }),
+            65_536,
+        );
+        let buf = encode_control_frame(&cf);
+        // Round-trip through the same length-delimited prost decoder
+        // the wire reader uses, so we exercise the *exact* shape that
+        // crosses the QUIC stream.
+        let back = ControlFrame::decode_length_delimited(buf.as_slice()).expect("decode");
+        match back.body.expect("body") {
+            control_frame::Body::TransferStart(ts) => {
+                assert_eq!(ts.receipt_id, "rid-c-1");
+                assert_eq!(ts.file_name, "demo.bin");
+                assert_eq!(ts.size_bytes, 1024);
+                assert_eq!(ts.chunk_size, 65_536);
+                let md = ts.metadata.expect("metadata");
+                assert_eq!(md.trace_id.as_deref(), Some("trace-c-1"));
+            }
+            other => panic!("unexpected body variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn control_stream_sentinel_is_zero_byte() {
+        // Sanity: the sentinel must NOT collide with the printable
+        // ASCII bytes legacy (v0.2.0) senders write at the start of a
+        // data stream (`U` for UPLOAD, `D` for DOWNLOAD). 0x00 is
+        // outside printable ASCII so the receiver's first-byte
+        // dispatch is unambiguous.
+        assert_eq!(CONTROL_STREAM_SENTINEL, 0x00);
+        assert_ne!(CONTROL_STREAM_SENTINEL, b'U');
+        assert_ne!(CONTROL_STREAM_SENTINEL, b'D');
     }
 }
 

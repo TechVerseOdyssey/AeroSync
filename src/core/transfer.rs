@@ -127,10 +127,10 @@ pub struct TransferTask {
     /// constructors and direct `add_transfer` callers) — the engine and
     /// adapters MUST treat the absence as "no metadata" rather than
     /// faulting. The HTTP adapter forwards this verbatim as the
-    /// base64-encoded `X-Aerosync-Metadata` header (RFC-003 §8.4); the
-    /// QUIC adapter will fold it into `TransferStart.metadata` once
-    /// the bidi receipt stream is wired (see batch C /
-    /// `w3c-quic-receipt-wiring`).
+    /// base64-encoded `X-Aerosync-Metadata` header (RFC-003 §8.4);
+    /// the QUIC adapter folds it into
+    /// `ControlFrame::TransferStart.metadata` on the bidi receipt
+    /// control stream (RFC-002 §6.3, wired in v0.2.1 batch C).
     pub metadata: Option<Metadata>,
 }
 

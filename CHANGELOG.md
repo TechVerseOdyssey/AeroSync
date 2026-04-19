@@ -12,6 +12,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **QUIC receipt control stream + metadata propagation**
+  (RFC-002 §6.3 / RFC-003 §8.4) — every QUIC transfer now opens a
+  *second* bidirectional stream alongside the data stream,
+  prefixed with a `0x00` sentinel byte and carrying length-prefixed
+  protobuf control / receipt frames. The sender writes a
+  `ControlFrame { TransferStart { transfer_id, metadata, ... } }`
+  as the first frame; the receiver decodes it, stashes the
+  envelope onto the matching `ReceivedFile.metadata`, and writes
+  back `ReceiptFrame::Received` + `ReceiptFrame::Acked` after the
+  data stream finishes and the SHA-256 checksum verifies. The
+  sender's `QuicTransfer::with_receipt_sink` builder lets callers
+  observe the inbound receipt frames as a `tokio::mpsc` stream —
+  the canonical hook used by `aerosync-py` to surface QUIC
+  receipts to user code. The Python `IncomingFile.metadata` /
+  `.trace_id` / `.lifecycle` getters now populate identically on
+  HTTP and QUIC. Closes the Batch B `TODO(w3c-quic-receipt-wiring)`
+  marker that previously lived at `src/protocols/quic.rs:376-381`
+  and `src/core/server.rs:2311-2316` — both deletions land in this
+  release. **Backward compatibility**: stays on the existing
+  `aerosync/1` ALPN. v0.2.0 senders that open only the data stream
+  continue to work; the receiver tolerates the absence of the
+  control stream and `ReceivedFile.metadata` simply stays `None`
+  for those transfers (logged at DEBUG via
+  `wait_for_control_entry`'s 2 s budget). The data-stream
+  `UPLOAD:` header gains an optional fifth `:`-separated
+  `receipt_id` field; legacy 3- and 4-field headers still parse.
+  The QUIC receiver also now emits `WsEvent::Completed` after each
+  successful upload, so Python `Receiver.__anext__` wakes up
+  symmetrically with the HTTP path. (P0.2, RFC-002 §6.3,
+  RFC-003 §8.4)
+- **`Receiver.quic_address` (Python SDK)** — new property that
+  returns the QUIC listener's bound `host:port` once the receiver
+  has finished its `__aenter__` handshake, or `None` when the QUIC
+  listener has not (yet) bound. Mirrors `Receiver.address` for
+  HTTP and unblocks Python integration tests that need to
+  cross-process a QUIC sender against an in-process Python
+  receiver (see `aerosync-py/tests/test_quic_metadata_propagation.py`).
+  (P0.2 / RFC-001 §5.3 follow-up)
 - **HTTP metadata propagation** (RFC-003 §8.4) — the sender now
   encodes the sealed `Metadata` envelope as
   `base64(protobuf(Metadata))` and attaches it to the
@@ -22,11 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headers (non-base64 bytes, non-protobuf payloads, or envelopes
   exceeding the RFC-003 §6 64 KiB hard cap) are rejected with a
   `400 Bad Request` carrying a structured JSON error body so
-  clients can fail fast. The QUIC transport currently leaves
-  `ReceivedFile.metadata` as `None` and ships a
-  `TODO(w3c-quic-receipt-wiring)` marker for batch C, when
-  `TransferStart.metadata` will carry the same envelope on the
-  bidi receipt stream. (P0.1, RFC-003)
+  clients can fail fast. (P0.1, RFC-003)
 - **Python `IncomingFile` metadata accessors** — `IncomingFile.metadata`
   is now populated from the sender's `user_metadata` map (was
   always-empty in v0.2.0), and four new well-known field getters

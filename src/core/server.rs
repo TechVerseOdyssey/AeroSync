@@ -97,13 +97,16 @@ pub struct ReceivedFile {
     pub sha256: Option<String>,
     pub received_at: std::time::SystemTime,
     pub sender_ip: Option<String>,
-    /// RFC-003 metadata envelope decoded from the wire (HTTP today,
-    /// QUIC `TransferStart.metadata` after batch C). `None` for
-    /// transfers that arrived without a metadata envelope (legacy
-    /// senders, smoke tests, the QUIC path until
-    /// `w3c-quic-receipt-wiring` lands). Skipped on serde when
-    /// absent so existing JSONL records and HTTP `/files` listings
-    /// stay byte-compatible with v0.2.0 clients.
+    /// RFC-003 metadata envelope decoded from the wire — populated
+    /// from the `X-Aerosync-Metadata` header on the HTTP path and
+    /// from `ControlFrame::TransferStart.metadata` on the QUIC
+    /// receipt control stream (RFC-002 §6.3, wired in v0.2.1
+    /// batch C). `None` for transfers that arrived without an
+    /// envelope: legacy v0.2.0 senders that never opened the QUIC
+    /// receipt stream, smoke tests, and any HTTP request that
+    /// omitted the header. Skipped on serde when absent so existing
+    /// JSONL records and HTTP `/files` listings stay byte-compatible
+    /// with v0.2.0 clients.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "metadata_serde")]
     pub metadata: Option<aerosync_proto::Metadata>,
 }
@@ -266,6 +269,16 @@ impl FileReceiver {
         Arc::clone(&self.local_http_addr)
     }
 
+    /// Internal: same as [`local_http_addr_handle`](Self::local_http_addr_handle)
+    /// but for the QUIC endpoint. Used by the Python `Receiver.quic_address`
+    /// getter (Batch C / w0.2.1 P0.2) to surface the OS-assigned QUIC port
+    /// without contending the outer tokio mutex. Gated on the `quic`
+    /// Cargo feature — when off the underlying field doesn't exist.
+    #[cfg(feature = "quic")]
+    pub fn local_quic_addr_handle(&self) -> Arc<Mutex<Option<SocketAddr>>> {
+        Arc::clone(&self.local_quic_addr)
+    }
+
     /// Expose the WebSocket broadcast sender so callers can subscribe
     pub fn ws_sender(&self) -> WsBroadcast {
         self.ws_tx.clone()
@@ -402,6 +415,7 @@ impl FileReceiver {
             let auth = auth_manager.clone();
             let audit_quic = audit_logger.clone();
 
+            let ws_tx_quic = self.ws_tx.clone();
             let handle = tokio::spawn(async move {
                 if let Err(e) = run_quic_server(
                     endpoint,
@@ -410,6 +424,7 @@ impl FileReceiver {
                     received_files,
                     auth,
                     audit_quic,
+                    ws_tx_quic,
                 )
                 .await
                 {
@@ -1975,6 +1990,7 @@ async fn run_quic_server(
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_manager: Option<Arc<AuthManager>>,
     audit_logger: Option<Arc<AuditLogger>>,
+    ws_tx: WsBroadcast,
 ) -> Result<()> {
     let bound = endpoint
         .local_addr()
@@ -1999,6 +2015,7 @@ async fn run_quic_server(
         let auth = auth_manager.clone();
         let audit_quic_conn = audit_logger.clone();
         let _status = status.clone();
+        let ws_tx_conn = ws_tx.clone();
 
         tokio::spawn(async move {
             if let Err(e) = handle_quic_connection(
@@ -2009,6 +2026,7 @@ async fn run_quic_server(
                 files,
                 auth,
                 audit_quic_conn,
+                ws_tx_conn,
             )
             .await
             {
@@ -2112,6 +2130,160 @@ fn load_tls_from_pem(
     Ok((certs, key))
 }
 
+/// Per-connection state shared between the QUIC control-stream and
+/// data-stream handlers (Batch C / w0.2.1 P0.2). New v0.2.1+ senders
+/// open two bidi streams per transfer — a control stream carrying the
+/// `TransferStart` envelope (and later `Received`/`Acked` replies) and
+/// the legacy data stream carrying the file bytes. The two streams
+/// arrive in undefined order, so we coordinate through this shared
+/// map keyed by `receipt_id` and a `Notify` to wake the data handler
+/// when the control entry lands.
+#[cfg(feature = "quic")]
+struct QuicConnState {
+    pending: tokio::sync::Mutex<std::collections::HashMap<String, QuicControlEntry>>,
+    notify: tokio::sync::Notify,
+}
+
+#[cfg(feature = "quic")]
+struct QuicControlEntry {
+    metadata: Option<aerosync_proto::Metadata>,
+    /// The control stream's send half — taken by the data handler when
+    /// it pops this entry so it can write `Received` + `Acked` frames
+    /// back to the sender.
+    send: quinn::SendStream,
+}
+
+/// Wait for a control entry keyed by `receipt_id` to appear in the
+/// per-connection map. Polls every 25 ms up to `total_wait` so the
+/// data handler does not race with a control stream that quinn
+/// happens to dispatch second. Returns `None` if the wait expires —
+/// the data handler then falls back to legacy behaviour (no metadata,
+/// no receipt frames sent back).
+#[cfg(feature = "quic")]
+async fn wait_for_control_entry(
+    state: &QuicConnState,
+    receipt_id: &str,
+    total_wait: std::time::Duration,
+) -> Option<QuicControlEntry> {
+    let deadline = tokio::time::Instant::now() + total_wait;
+    loop {
+        {
+            let mut map = state.pending.lock().await;
+            if let Some(entry) = map.remove(receipt_id) {
+                return Some(entry);
+            }
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        let remaining = deadline - now;
+        let slice = std::cmp::min(remaining, std::time::Duration::from_millis(25));
+        let _ = tokio::time::timeout(slice, state.notify.notified()).await;
+    }
+}
+
+#[cfg(feature = "quic")]
+#[allow(clippy::too_many_arguments)]
+async fn handle_quic_control_stream(
+    send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    initial_buf: Vec<u8>,
+    initial_len: usize,
+    state: Arc<QuicConnState>,
+    remote_ip: String,
+) {
+    use crate::protocols::quic_receipt::{read_control_frame_from_stream, CodecError};
+    use aerosync_proto::control_frame;
+    use prost::Message;
+
+    // Drop the leading sentinel byte. Anything after it on this first
+    // chunk is the start of the length-delimited ControlFrame; we
+    // decode whatever fits in `initial_buf[1..initial_len]` and only
+    // fall back to the streaming reader when the prefix straddled the
+    // recv buffer.
+    let body_buf = &initial_buf[1..initial_len];
+    let frame_result = if !body_buf.is_empty() {
+        // Try a one-shot decode on what we already have.
+        match aerosync_proto::ControlFrame::decode_length_delimited(body_buf) {
+            Ok(f) => Ok(f),
+            Err(_) => {
+                // Probably truncated; fall back to the streaming
+                // reader which will pull more bytes from the wire.
+                read_control_frame_from_stream(&mut recv).await
+            }
+        }
+    } else {
+        read_control_frame_from_stream(&mut recv).await
+    };
+
+    let frame = match frame_result {
+        Ok(f) => f,
+        Err(CodecError::StreamClosed) => {
+            tracing::debug!(
+                "QUIC: control stream from {} closed before TransferStart",
+                remote_ip
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "QUIC: failed to decode ControlFrame from {}: {}",
+                remote_ip,
+                e
+            );
+            return;
+        }
+    };
+
+    let transfer_start = match frame.body {
+        Some(control_frame::Body::TransferStart(ts)) => ts,
+        Some(other) => {
+            tracing::warn!(
+                "QUIC: first control frame from {} was not TransferStart: {:?}",
+                remote_ip,
+                std::mem::discriminant(&other)
+            );
+            return;
+        }
+        None => {
+            tracing::warn!(
+                "QUIC: empty ControlFrame body from {} — ignoring",
+                remote_ip
+            );
+            return;
+        }
+    };
+
+    let receipt_id = transfer_start.receipt_id.clone();
+    if receipt_id.is_empty() {
+        tracing::warn!(
+            "QUIC: ControlFrame TransferStart from {} carried empty receipt_id; \
+             receiver cannot match it to the data stream",
+            remote_ip
+        );
+        return;
+    }
+
+    {
+        let mut map = state.pending.lock().await;
+        map.insert(
+            receipt_id.clone(),
+            QuicControlEntry {
+                metadata: transfer_start.metadata,
+                send,
+            },
+        );
+    }
+    state.notify.notify_waiters();
+    tracing::debug!(
+        "QUIC: registered control entry for receipt_id={} from {}",
+        receipt_id,
+        remote_ip
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 #[cfg(feature = "quic")]
 async fn handle_quic_connection(
     connection: quinn::Connection,
@@ -2121,12 +2293,15 @@ async fn handle_quic_connection(
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     auth_manager: Option<Arc<AuthManager>>,
     audit_logger: Option<Arc<AuditLogger>>,
+    ws_tx: WsBroadcast,
 ) -> Result<()> {
     let remote_ip = connection.remote_address().ip().to_string();
+    let state = Arc::new(QuicConnState {
+        pending: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        notify: tokio::sync::Notify::new(),
+    });
 
-    // QUIC 连接层认证：读取第一条消息作为 Token
     if let Some(ref _auth) = auth_manager {
-        // Auth will be validated per-stream below
         tracing::debug!("QUIC: Auth enabled for connection from {}", remote_ip);
     }
 
@@ -2137,11 +2312,44 @@ async fn handle_quic_connection(
             .await
             .map_err(|e| AeroSyncError::Network(e.to_string()))?
             .unwrap_or(0);
+        if header_len == 0 {
+            continue;
+        }
 
-        let header = String::from_utf8_lossy(&header_buf[..header_len]);
-        let header_str = header.trim_end_matches('\n').trim_end_matches('\r');
+        // ── Dispatch on the first byte: 0x00 → control stream
+        //    (Batch C / w0.2.1 P0.2), printable ASCII → legacy data
+        //    stream (UPLOAD/DOWNLOAD header).
+        if header_buf[0] == crate::protocols::quic_receipt::CONTROL_STREAM_SENTINEL {
+            let state_clone = Arc::clone(&state);
+            let remote_ip_clone = remote_ip.clone();
+            tokio::spawn(async move {
+                handle_quic_control_stream(
+                    send,
+                    recv,
+                    header_buf,
+                    header_len,
+                    state_clone,
+                    remote_ip_clone,
+                )
+                .await;
+            });
+            continue;
+        }
 
-        // 格式: UPLOAD:<filename>:<size>[:<token>]
+        // CRITICAL: only the bytes up to the first '\n' belong to the
+        // UPLOAD header line; everything after is part of the file
+        // body and must NOT bleed into header parsing (otherwise the
+        // 5th field — receipt_id — gets concatenated with body bytes
+        // and the receiver fails to match it to the control entry).
+        let line_end = header_buf[..header_len]
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(header_len);
+        let header = String::from_utf8_lossy(&header_buf[..line_end]);
+        let header_str = header.trim_end_matches('\r');
+
+        // 格式 (legacy): UPLOAD:<filename>:<size>[:<token>]
+        // 格式 (v0.2.1+): UPLOAD:<filename>:<size>:<token>:<receipt_id>
         if !header_str.starts_with("UPLOAD:") {
             tracing::warn!(
                 "QUIC: Unknown command: {}",
@@ -2158,7 +2366,15 @@ async fn handle_quic_connection(
 
         let filename = parts[1];
         let file_size: u64 = parts[2].trim().parse().unwrap_or(0);
-        let token = parts.get(3).copied();
+        // Only treat the 4th field as a token when it is non-empty.
+        // v0.2.1+ senders emit `UPLOAD:fn:size::receipt_id` when no
+        // token is configured (empty 4th field) so the colon count is
+        // stable and the receipt_id always lands at parts[4].
+        let token = parts.get(3).copied().filter(|t| !t.is_empty());
+        let receipt_id = parts
+            .get(4)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         // 认证（若启用）
         if let Some(ref auth) = auth_manager {
@@ -2191,7 +2407,6 @@ async fn handle_quic_connection(
             continue;
         }
 
-        // 找到 header 结束位置，保存 header 后的初始数据
         let header_end_in_buf = header_buf[..header_len]
             .iter()
             .position(|&b| b == b'\n')
@@ -2203,39 +2418,57 @@ async fn handle_quic_connection(
             None
         };
 
-        match handle_quic_file_upload(
-            &mut recv,
-            filename,
-            file_size,
-            &receive_dir,
-            allow_overwrite,
-            received_files.clone(),
-            initial_data,
-            &remote_ip,
-            audit_logger.clone(),
-        )
-        .await
-        {
-            Ok(_) => {
-                let _ = send.write_all(b"SUCCESS").await;
-                tracing::info!("QUIC: Sent SUCCESS response for '{}'", filename);
-            }
-            Err(e) => {
-                if let Some(ref al) = audit_logger {
-                    al.log_failed(
-                        Direction::Receive,
-                        "quic",
-                        filename,
-                        file_size,
-                        Some(&remote_ip),
-                        &e.to_string(),
-                    )
-                    .await;
+        // Spawn the data-stream handler so the accept loop can keep
+        // dispatching new streams concurrently — critical when the
+        // sender opens the data stream BEFORE the control stream
+        // (quinn does not guarantee accept order matches open order).
+        let receive_dir_clone = receive_dir.clone();
+        let received_files_clone = Arc::clone(&received_files);
+        let audit_logger_clone = audit_logger.clone();
+        let state_clone = Arc::clone(&state);
+        let remote_ip_clone = remote_ip.clone();
+        let filename_owned = filename.to_string();
+        let ws_tx_clone = ws_tx.clone();
+        tokio::spawn(async move {
+            let mut recv = recv;
+            let mut send = send;
+            match handle_quic_file_upload(
+                &mut recv,
+                &filename_owned,
+                file_size,
+                &receive_dir_clone,
+                allow_overwrite,
+                received_files_clone,
+                initial_data,
+                &remote_ip_clone,
+                audit_logger_clone.clone(),
+                receipt_id.clone(),
+                state_clone,
+                ws_tx_clone,
+            )
+            .await
+            {
+                Ok(_) => {
+                    let _ = send.write_all(b"SUCCESS").await;
+                    tracing::info!("QUIC: Sent SUCCESS response for '{}'", filename_owned);
                 }
-                let _ = send.write_all(format!("ERROR:{}", e).as_bytes()).await;
+                Err(e) => {
+                    if let Some(ref al) = audit_logger_clone {
+                        al.log_failed(
+                            Direction::Receive,
+                            "quic",
+                            &filename_owned,
+                            file_size,
+                            Some(&remote_ip_clone),
+                            &e.to_string(),
+                        )
+                        .await;
+                    }
+                    let _ = send.write_all(format!("ERROR:{}", e).as_bytes()).await;
+                }
             }
-        }
-        let _ = send.finish();
+            let _ = send.finish();
+        });
     }
 
     Ok(())
@@ -2253,7 +2486,13 @@ async fn handle_quic_file_upload(
     initial_data: Option<Vec<u8>>,
     sender_ip: &str,
     audit_logger: Option<Arc<AuditLogger>>,
+    receipt_id: Option<String>,
+    conn_state: Arc<QuicConnState>,
+    ws_tx: WsBroadcast,
 ) -> Result<()> {
+    use crate::protocols::quic_receipt::{
+        build_acked_frame, build_received_frame, write_frame_to_stream,
+    };
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncWriteExt;
 
@@ -2266,7 +2505,6 @@ async fn handle_quic_file_upload(
     let mut hasher = Sha256::new();
     let mut total = 0u64;
 
-    // 先写入 header buffer 中剩余的初始数据
     if let Some(data) = initial_data {
         if !data.is_empty() {
             hasher.update(&data);
@@ -2300,6 +2538,28 @@ async fn handle_quic_file_upload(
         );
     }
 
+    // ── Match the data stream to its sibling control stream (if any)
+    //    and pop the metadata envelope off the per-connection map.
+    //    v0.2.0 senders never opened a control stream; for those the
+    //    `receipt_id` is `None` and the lookup is skipped, so
+    //    `ReceivedFile.metadata` stays `None`.
+    let mut metadata: Option<aerosync_proto::Metadata> = None;
+    let mut control_send: Option<quinn::SendStream> = None;
+    if let Some(ref rid) = receipt_id {
+        if let Some(entry) =
+            wait_for_control_entry(&conn_state, rid, std::time::Duration::from_secs(2)).await
+        {
+            metadata = entry.metadata;
+            control_send = Some(entry.send);
+        } else {
+            tracing::debug!(
+                "QUIC: no control entry for receipt_id={} after data stream completed; \
+                 treating as a v0.2.0-style transfer (no receipt frames sent back)",
+                rid
+            );
+        }
+    }
+
     received_files.write().await.push(ReceivedFile {
         id: file_id,
         original_name: filename.to_string(),
@@ -2308,13 +2568,48 @@ async fn handle_quic_file_upload(
         sha256: Some(actual_hash.clone()),
         received_at: std::time::SystemTime::now(),
         sender_ip: Some(sender_ip.to_string()),
-        // TODO(w0.2.1 batch C / w3c-quic-receipt-wiring): populate
-        // ReceivedFile.metadata from the TransferStart frame received
-        // on the bidi receipt stream. Today the QUIC receive path
-        // pre-dates RFC-002 §6.3 and only carries the bare file
-        // name + size header, so we have nothing to fold in here.
-        metadata: None,
+        metadata,
     });
+
+    // Broadcast on the WS event channel so any subscriber — including
+    // the Python `Receiver.__anext__` iterator which blocks on
+    // `WsEvent::Completed` between backlog drains — wakes up and
+    // surfaces the freshly-arrived file. The HTTP path has emitted
+    // this event since v0.1 (see chunked-upload finaliser around
+    // server.rs:1888); the QUIC path was silent until now, which is
+    // why `async for f in recv:` would hang on QUIC transfers even
+    // though `received_files` had been populated.
+    let _ = ws_tx.send(WsEvent::Completed {
+        filename: filename.to_string(),
+        size: total,
+        sha256: actual_hash.clone(),
+    });
+
+    // Send `Received` + `Acked` frames back to the sender on the
+    // control stream so the sender's drainer can surface a terminal
+    // receipt event. We auto-ack on successful checksum here because
+    // RFC-002's application-level `ack()` API is not yet wired all the
+    // way through to the QUIC receive path in v0.2.1; that piece
+    // lands with the IncomingFile.ack() bridge in a follow-up batch.
+    if let (Some(ref rid), Some(mut send)) = (receipt_id.as_ref(), control_send) {
+        let received = build_received_frame(rid, actual_hash.clone());
+        if let Err(e) = write_frame_to_stream(&mut send, &received).await {
+            tracing::debug!(
+                "QUIC: failed to write Received frame for receipt_id={}: {}",
+                rid,
+                e
+            );
+        }
+        let acked = build_acked_frame(rid);
+        if let Err(e) = write_frame_to_stream(&mut send, &acked).await {
+            tracing::debug!(
+                "QUIC: failed to write Acked frame for receipt_id={}: {}",
+                rid,
+                e
+            );
+        }
+        let _ = send.finish();
+    }
 
     if let Some(ref al) = audit_logger {
         al.log_completed(
