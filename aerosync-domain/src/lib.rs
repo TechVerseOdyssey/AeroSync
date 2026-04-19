@@ -61,7 +61,17 @@ pub mod error;
 #[allow(missing_docs)]
 pub mod metadata;
 
-// pub mod receipt;   // Phase 1f
+// `receipt` (state machine extraction) — DEFERRED to Phase 3 because
+// `TransferSession` (the Phase 3 aggregate root) will reorganize
+// receipt logic anyway. Doing the split twice is wasteful.
+
+// ── Phase 2 modules ───────────────────────────────────────────────────
+
+/// Storage abstractions ([`ResumeStorage`], plus [`HistoryStorage`]
+/// added in a follow-up sub-commit) and the pure-data value objects
+/// they transit. See `storage.rs` for the rationale of splitting
+/// data ↔ trait ↔ impl across three crates.
+pub mod storage;
 
 // ── Crate-root re-exports ─────────────────────────────────────────────
 //

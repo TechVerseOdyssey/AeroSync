@@ -3,138 +3,30 @@
 //! 状态文件存储路径：`{state_dir}/.aerosync/{task_id}.json`
 //! 每个传输任务对应一个 JSON 文件，记录已完成的分片列表。
 //! 完成后删除文件；重启后自动检测并恢复。
+//!
+//! ## v0.3.0 Phase 2.1 migration
+//!
+//! The pure-data types ([`ChunkState`], [`ResumeState`]) and the
+//! [`DEFAULT_CHUNK_SIZE`] constant moved to
+//! [`aerosync_domain::storage`] so the new
+//! [`aerosync_domain::storage::ResumeStorage`] async trait can
+//! reference them. This module re-exports them under their original
+//! paths so every existing caller (`aerosync::core::resume::ResumeState`,
+//! `aerosync::core::ResumeState`, `aerosync::ResumeState`) keeps
+//! resolving without source changes.
+//!
+//! The [`ResumeStore`] file-backed impl below stays here for now —
+//! Phase 2.2 will move it to `aerosync-infra::resume` and have it
+//! `impl aerosync_domain::storage::ResumeStorage`.
+
+pub use aerosync_domain::storage::{ChunkState, ResumeState, DEFAULT_CHUNK_SIZE};
 
 use crate::{AeroSyncError, Result};
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-// ──────────────────────────── 常量 ────────────────────────────────────────────
-
-/// 默认分片大小：32 MB
-pub const DEFAULT_CHUNK_SIZE: u64 = 32 * 1024 * 1024;
-
 /// 状态文件存放子目录名
 const STATE_SUBDIR: &str = ".aerosync";
-
-// ──────────────────────────── 数据结构 ────────────────────────────────────────
-
-/// 单个分片的状态
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ChunkState {
-    /// 分片序号（0-based）
-    pub index: u32,
-    /// 该分片在文件中的起始字节偏移
-    pub offset: u64,
-    /// 该分片的实际大小（最后一片可能 < chunk_size）
-    pub size: u64,
-    /// 该分片的 SHA-256（可选，用于单分片校验）
-    pub sha256: Option<String>,
-}
-
-/// 整个传输任务的续传状态
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResumeState {
-    /// 任务唯一 ID
-    pub task_id: Uuid,
-    /// 本地源文件绝对路径
-    pub source_path: PathBuf,
-    /// 目标地址（URL）
-    pub destination: String,
-    /// 文件总大小（bytes）
-    pub total_size: u64,
-    /// 分片大小（bytes）
-    pub chunk_size: u64,
-    /// 总分片数
-    pub total_chunks: u32,
-    /// 已成功完成的分片序号列表
-    pub completed_chunks: Vec<u32>,
-    /// 整文件 SHA-256（预计算，用于最终校验）
-    pub sha256: Option<String>,
-    /// 创建时间（Unix timestamp seconds）
-    pub created_at: u64,
-    /// 最后更新时间（Unix timestamp seconds）
-    pub updated_at: u64,
-    /// 协议特定的扩展元数据（如 S3 UploadId、已完成 parts）
-    #[serde(default)]
-    pub metadata: std::collections::HashMap<String, String>,
-}
-
-impl ResumeState {
-    /// 根据文件大小和分片大小计算分片列表
-    pub fn new(
-        task_id: Uuid,
-        source_path: PathBuf,
-        destination: String,
-        total_size: u64,
-        chunk_size: u64,
-        sha256: Option<String>,
-    ) -> Self {
-        let total_chunks = if total_size == 0 {
-            1
-        } else {
-            total_size.div_ceil(chunk_size) as u32
-        };
-        let now = now_secs();
-        Self {
-            task_id,
-            source_path,
-            destination,
-            total_size,
-            chunk_size,
-            total_chunks,
-            completed_chunks: Vec::new(),
-            sha256,
-            created_at: now,
-            updated_at: now,
-            metadata: std::collections::HashMap::new(),
-        }
-    }
-
-    /// 返回尚未完成的分片序号（按顺序）
-    pub fn pending_chunks(&self) -> Vec<u32> {
-        (0..self.total_chunks)
-            .filter(|i| !self.completed_chunks.contains(i))
-            .collect()
-    }
-
-    /// 标记分片完成
-    pub fn mark_chunk_done(&mut self, index: u32) {
-        if !self.completed_chunks.contains(&index) {
-            self.completed_chunks.push(index);
-            self.completed_chunks.sort_unstable();
-            self.updated_at = now_secs();
-        }
-    }
-
-    /// 是否全部完成
-    pub fn is_complete(&self) -> bool {
-        self.completed_chunks.len() == self.total_chunks as usize
-    }
-
-    /// 已传输字节数（估算，基于已完成分片）
-    pub fn bytes_transferred(&self) -> u64 {
-        self.completed_chunks
-            .iter()
-            .map(|&i| self.chunk_size_of(i))
-            .sum()
-    }
-
-    /// 计算指定分片的实际大小
-    pub fn chunk_size_of(&self, index: u32) -> u64 {
-        let last = self.total_chunks.saturating_sub(1);
-        if index == last && !self.total_size.is_multiple_of(self.chunk_size) {
-            self.total_size % self.chunk_size
-        } else {
-            self.chunk_size
-        }
-    }
-
-    /// 计算指定分片的文件偏移
-    pub fn chunk_offset(&self, index: u32) -> u64 {
-        index as u64 * self.chunk_size
-    }
-}
 
 // ──────────────────────────── ResumeStore ─────────────────────────────────────
 
@@ -240,15 +132,6 @@ impl ResumeStore {
             .into_iter()
             .find(|s| s.source_path == source_path && s.destination == destination))
     }
-}
-
-// ──────────────────────────── 辅助函数 ────────────────────────────────────────
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 // ──────────────────────────── 测试 ────────────────────────────────────────────
