@@ -182,9 +182,13 @@ def test_quic_upload_propagates_metadata_envelope(tmp_path: Path) -> None:
     assert isinstance(metadata, dict)
     assert metadata.get("tenant") == "acme"
     assert metadata.get("agent_id") == "qa-1"
-    # Well-known fields are NOT mirrored into user_metadata — the
-    # typed getter is the canonical access path. Same contract the
-    # HTTP test enforces, so the two transports stay symmetric.
-    assert "trace_id" not in metadata
-    assert "lifecycle" not in metadata
+    # Per RFC-001 §1 killer-demo contract, well-known fields are
+    # also mirrored into the flat `metadata` dict so
+    # `incoming.metadata.get("trace_id")` from the README quickstart
+    # works without the user having to know which keys are typed.
+    # The typed getters remain canonical and keep their semantics;
+    # the HTTP test enforces the same shape so the two transports
+    # stay symmetric.
+    assert metadata.get("trace_id") == "py-qt-1"
+    assert metadata.get("lifecycle") == "LIFECYCLE_DURABLE"
     assert received["lifecycle"] == "LIFECYCLE_DURABLE"

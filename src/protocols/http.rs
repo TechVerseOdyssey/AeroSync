@@ -21,7 +21,66 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
+use uuid::Uuid;
 use zeroize::Zeroizing;
+
+/// Application-level decision the receiver communicates back to the
+/// sender via the HTTP response envelope (RFC-002 §6.4 application-
+/// level ACK on the HTTP transport — the equivalent of the
+/// `ReceiptFrame::Acked` / `Nacked` frame the QUIC receipt control
+/// stream carries).
+///
+/// `Ack` is the only variant the v0.2.x receiver currently emits on
+/// the success path (`HTTP 200`). `Nack` is reserved for the SHA-256
+/// mismatch failure branch and any future structured rejection paths;
+/// the on-the-wire JSON envelope is forward-compatible (see
+/// [`HttpReceiptAck`]).
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum HttpReceiptDecision {
+    Ack,
+    Nack,
+}
+
+/// Receiver-side application verdict for one in-flight HTTP transfer,
+/// parsed off the JSON response body's `receipt_ack` field. Carries
+/// the receipt id (matching `Metadata.id` the sender stamped on the
+/// outbound request) so the engine bridge can drive the right
+/// `Receipt<Sender>` to its terminal state.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct HttpReceiptAck {
+    pub receipt_id: Uuid,
+    pub decision: HttpReceiptDecision,
+    pub reason: Option<String>,
+}
+
+/// Best-effort parse of a JSON response body into an [`HttpReceiptAck`].
+///
+/// Returns `None` when the body is not JSON, the `receipt_ack` key is
+/// absent, the `receipt_id` does not parse as a UUID, or the
+/// `decision` value is unrecognised. This is the canonical
+/// backward-compat path: a v0.2.0 receiver (which does not emit
+/// `receipt_ack` at all) leaves the sender's receipt parked at
+/// `Processing`, exactly the legacy behaviour.
+pub(crate) fn parse_receipt_ack_from_body(body: &[u8]) -> Option<HttpReceiptAck> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let ack = value.get("receipt_ack")?;
+    let receipt_id_str = ack.get("receipt_id").and_then(|v| v.as_str())?;
+    let receipt_id = Uuid::parse_str(receipt_id_str).ok()?;
+    let decision = match ack.get("decision").and_then(|v| v.as_str())? {
+        "ack" => HttpReceiptDecision::Ack,
+        "nack" => HttpReceiptDecision::Nack,
+        _ => return None,
+    };
+    let reason = ack
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Some(HttpReceiptAck {
+        receipt_id,
+        decision,
+        reason,
+    })
+}
 
 /// Canonical sender-side encoder for the
 /// `X-Aerosync-Metadata` HTTP header. Returns `None` when no
@@ -43,6 +102,19 @@ pub struct HttpTransfer {
     circuit_breaker: Arc<CircuitBreaker>,
     /// 可选的断点续传状态持久化存储，每完成一个分片后保存进度
     resume_store: Option<Arc<ResumeStore>>,
+    /// Optional sink for application-level [`HttpReceiptAck`] messages
+    /// parsed off the receiver's `/upload` JSON response body
+    /// (`receipt_ack` field, RFC-002 §6.4 application-level ACK on
+    /// the HTTP transport). Mirrors [`crate::protocols::quic::QuicTransfer::with_receipt_sink`]:
+    /// when set, every `upload_with_progress` response — success or
+    /// failure — is best-effort-parsed and forwarded so the engine
+    /// bridge can drive the matching `Receipt<Sender>` past
+    /// `Processing` to a terminal state. `None` (default) preserves
+    /// the legacy behaviour where the receipt parks at `Processing`
+    /// — used by the test-only `SuccessAdapter` and by callers that
+    /// don't need per-transfer ack propagation (e.g. `cargo run`
+    /// CLI uploads).
+    receipt_sink: Option<mpsc::UnboundedSender<HttpReceiptAck>>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +207,7 @@ impl HttpTransfer {
             config,
             circuit_breaker: Arc::new(CircuitBreaker::with_defaults()),
             resume_store: None,
+            receipt_sink: None,
         })
     }
 
@@ -145,6 +218,7 @@ impl HttpTransfer {
             config,
             circuit_breaker: Arc::new(CircuitBreaker::with_defaults()),
             resume_store: None,
+            receipt_sink: None,
         }
     }
 
@@ -159,7 +233,17 @@ impl HttpTransfer {
             config,
             circuit_breaker: Arc::new(CircuitBreaker::with_defaults()),
             resume_store: Some(store),
+            receipt_sink: None,
         }
+    }
+
+    /// Builder: install a sink that receives every [`HttpReceiptAck`]
+    /// parsed off `/upload` response bodies. See the field-level docs
+    /// on [`HttpTransfer::receipt_sink`] for the full contract.
+    /// Mirrors [`crate::protocols::quic::QuicTransfer::with_receipt_sink`].
+    pub fn with_receipt_sink(mut self, tx: mpsc::UnboundedSender<HttpReceiptAck>) -> Self {
+        self.receipt_sink = Some(tx);
+        self
     }
 
     /// 判断错误是否属于网络级别故障（连接拒绝、超时、DNS 等），
@@ -661,25 +745,41 @@ impl HttpTransfer {
             }
 
             match request.send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    send_progress(&progress_tx, file_size, &start_time);
-                    let elapsed = start_time.elapsed().as_secs_f64();
-                    let mb_per_sec = if elapsed > 0.0 {
-                        file_size as f64 / elapsed / (1024.0 * 1024.0)
-                    } else {
-                        0.0
-                    };
-                    tracing::info!(
-                        "HTTP: Upload completed: {} bytes at {:.2} MB/s",
-                        file_size,
-                        mb_per_sec
-                    );
-                    self.circuit_breaker.record_success();
-                    return Ok(());
-                }
                 Ok(resp) => {
                     let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
+                    // Always read the body once so we can both surface
+                    // it on the error path AND best-effort-parse the
+                    // RFC-002 §6.4 `receipt_ack` envelope on either
+                    // path. Body sizes here are tiny JSON (~200 B for
+                    // success, KB-scale for errors) — the extra read
+                    // is a no-op next to the upload itself.
+                    let body_bytes = resp.bytes().await.unwrap_or_default();
+                    if let Some(sink) = &self.receipt_sink {
+                        if let Some(ack) = parse_receipt_ack_from_body(&body_bytes) {
+                            // Best-effort: a closed sink (engine
+                            // forwarder task gone) is silently
+                            // dropped — sender-observed receipt
+                            // events are best-effort by RFC-002 §7.
+                            let _ = sink.send(ack);
+                        }
+                    }
+                    if status.is_success() {
+                        send_progress(&progress_tx, file_size, &start_time);
+                        let elapsed = start_time.elapsed().as_secs_f64();
+                        let mb_per_sec = if elapsed > 0.0 {
+                            file_size as f64 / elapsed / (1024.0 * 1024.0)
+                        } else {
+                            0.0
+                        };
+                        tracing::info!(
+                            "HTTP: Upload completed: {} bytes at {:.2} MB/s",
+                            file_size,
+                            mb_per_sec
+                        );
+                        self.circuit_breaker.record_success();
+                        return Ok(());
+                    }
+                    let body = String::from_utf8_lossy(&body_bytes).to_string();
                     tracing::warn!(
                         "Upload attempt {}/{} failed: {} - {}",
                         attempt + 1,

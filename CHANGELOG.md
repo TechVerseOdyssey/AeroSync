@@ -132,33 +132,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in `protocols::quic_receipt` were updated. No behaviour change
   for default builds. (P2.2)
 
-### Known limitations
+### Fixed
 
-- **Python SDK killer demo (`aerosync-py/tests/test_killer_demo.py`)**
-  is shipped as `xfail(strict=True)` rather than a passing test.
-  Two architectural gaps surface on the README quickstart's verbatim
-  HTTP round-trip and require a deliberate cross-cut decision rather
-  than a rushed Batch-D patch:
-  1. `aerosync.client()` constructs a `TransferEngine` but never calls
-     `engine.start(adapter)`, so queued `TransferTask`s sit in
-     `Pending` indefinitely. (`aerosync-py/src/lib.rs::make_client` →
-     `aerosync-py/src/client.rs::from_transfer_config`.)
-  2. Even with the engine started, the HTTP path has no wire-level
-     application-acknowledgement from receiver to sender; the engine
-     bridge in `src/core/transfer.rs::send_with_metadata` parks the
-     sender-side receipt at `Processing` and the Python receiver's
-     `IncomingFile.ack()` only walks a *local* synthetic receipt
-     (see the "Linkage caveat" in `aerosync-py/src/receiver.rs`).
-     Auto-acking on HTTP 200 in the bridge would close the Python
-     gap but break `tests/receipts_e2e.rs::e2e_quic_receipt_nack_with_reason`,
-     which is an RFC-002 §6 semantic decision tracked for the
-     v0.3.0 receipt-control-plane unification (see
-     `docs/v0.3.0-refactor-plan.md`). When that lands, the `xfail`
-     flips to `XPASS` and CI yells at us to remove the marker.
-  Batches B + C closed the *underlying* HTTP-metadata and QUIC-
-  receipt gaps that originally blocked the demo on
-  `w3c-quic-receipt-wiring`; these two remaining items are
-  Python-SDK-side and live on the v0.3.0 backlog.
+- **Python SDK killer demo
+  (`aerosync-py/tests/test_killer_demo.py`)** — now passes end-to-end
+  in v0.2.1 (was `xfail(strict=True)` in the Batch D drop). Two
+  architectural gaps blocked the README quickstart's verbatim HTTP
+  round-trip; both are closed in this release without breaking
+  `tests/receipts_e2e.rs::e2e_quic_receipt_nack_with_reason` (the
+  RFC-002 §6 semantics that originally forced the deferral):
+  1. **`PyClient` engine lifecycle** — `aerosync.client()` built a
+     `TransferEngine` but never called `engine.start(adapter)`, so
+     queued `TransferTask`s sat in `Pending` indefinitely. The
+     `PyClient` `__aenter__` now lazily builds an `AutoAdapter` and
+     calls `engine.start(adapter)` exactly once via a `OnceCell`
+     guard, so `async with aerosync.client() as c:` is a real
+     working context manager. `__aexit__` is a best-effort no-op —
+     the engine's `Drop` already closes `task_sender` and joins the
+     worker. (`aerosync-py/src/client.rs::{__aenter__, __aexit__,
+     ensure_started, build_default_adapter}`.)
+  2. **HTTP wire-level receipt ack** (RFC-002 §6.4) — the receiver
+     now echoes the inbound `metadata.id` back as a `receipt_ack`
+     JSON object on the HTTP response (success → `decision: "ack"`
+     in 200 OK, SHA-256 mismatch → `decision: "nack",
+     reason: "sha256 mismatch"` in 400). The sender's `HttpTransfer`
+     gains an opt-in `with_receipt_sink(tx)` builder that parses
+     `receipt_ack` out of the response body and forwards typed
+     `HttpReceiptAck { receipt_id, decision, reason }` events
+     through an unbounded `mpsc` channel. `AutoAdapter` exposes a
+     mirroring `with_engine_receipt_inbox(tx)` builder; the
+     `TransferEngine` exposes `http_receipt_inbox()` whose drainer
+     looks up the `Receipt<Sender>` by id, waits for it to reach
+     `Processing` (so we never race the bridge's `Open → Close →
+     Process` walk in `send_with_metadata`), then applies
+     `Event::Ack` or `Event::Nack { reason }`. Test-only
+     `SuccessAdapter` does not flow through this path — its receipt
+     stays parked at `Processing` exactly as
+     `e2e_quic_receipt_nack_with_reason` requires. Hand-rolled HTTP
+     uploads without the `X-Aerosync-Metadata` header continue to
+     get an unchanged 200 OK body (no `receipt_ack` key) and parse
+     fine on legacy senders. New round-trip coverage in
+     `tests/http_receipt_ack_e2e.rs`.
+  Bonus: `PyIncomingFile.metadata` now mirrors the well-known
+  fields (`trace_id`, `conversation_id`, `correlation_id`,
+  `lifecycle`) into the flat dict alongside `user_metadata`, so the
+  README quickstart's `incoming.metadata.get("trace_id")` works
+  without users having to learn which keys are typed. The typed
+  getters (`incoming.trace_id`, `.lifecycle`, ...) keep their
+  semantics. `tests/test_metadata_propagation.py` and
+  `tests/test_quic_metadata_propagation.py` were updated in lockstep
+  so HTTP and QUIC stay symmetric on this contract.
 
 
 ## [v0.2.0] - 2026-04-18

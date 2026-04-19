@@ -212,15 +212,20 @@ def test_http_metadata_propagation_end_to_end(tmp_path: Path) -> None:
     # `as_str_name` form.
     assert rec["lifecycle"] == "LIFECYCLE_DURABLE"
 
-    # Free-form user_metadata survives verbatim. Well-known fields
-    # are NOT mirrored into user_metadata — the typed getter is
-    # the canonical access path for them.
+    # Free-form user_metadata survives verbatim. Per RFC-001 §1
+    # killer-demo contract (`incoming.metadata.get("trace_id")`)
+    # well-known fields are *also* mirrored into the flat
+    # `metadata` dict so the README quickstart works without the
+    # user having to know which keys are typed and which aren't —
+    # the typed getters (`incoming.trace_id`, `incoming.lifecycle`,
+    # …) remain the canonical typed access path and they keep
+    # their original semantics (return `None` when unset).
     metadata = rec["metadata"]
     assert isinstance(metadata, dict)
     assert metadata.get("tenant") == "acme"
     assert metadata.get("agent_id") == "indexer"
-    assert "trace_id" not in metadata
-    assert "lifecycle" not in metadata
+    assert metadata.get("trace_id") == "trace-py-1"
+    assert metadata.get("lifecycle") == "LIFECYCLE_DURABLE"
 
 
 # ── 2. Absent header ────────────────────────────────────────────────

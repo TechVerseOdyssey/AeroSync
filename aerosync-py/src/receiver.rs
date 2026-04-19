@@ -390,6 +390,26 @@ impl PyIncomingFile {
     #[getter]
     fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
+        // Lift the RFC-003 §4 well-known fields into the same flat
+        // dict so the README quickstart's
+        // `incoming.metadata.get("trace_id")` works without the
+        // user having to know which keys are "well-known" vs
+        // user-supplied. Mirrors the sender-side
+        // `Client.send(metadata={...})` shape, which accepts both
+        // flavours in a single `dict[str, str]` and lifts the
+        // well-known keys to the typed `Metadata` slots.
+        if let Some(v) = &self.trace_id {
+            d.set_item("trace_id", v)?;
+        }
+        if let Some(v) = &self.conversation_id {
+            d.set_item("conversation_id", v)?;
+        }
+        if let Some(v) = &self.correlation_id {
+            d.set_item("correlation_id", v)?;
+        }
+        if let Some(v) = self.lifecycle {
+            d.set_item("lifecycle", v)?;
+        }
         for (k, v) in &self.user_metadata {
             d.set_item(k, v)?;
         }

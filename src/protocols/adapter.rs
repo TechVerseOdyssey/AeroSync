@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 #[cfg(feature = "ftp")]
 use crate::protocols::ftp::{FtpConfig, FtpTransfer};
-use crate::protocols::http::{HttpConfig, HttpTransfer};
+use crate::protocols::http::{HttpConfig, HttpReceiptAck, HttpTransfer};
 #[cfg(feature = "quic")]
 use crate::protocols::quic::{QuicConfig, QuicTransfer};
 #[cfg(feature = "s3")]
@@ -30,6 +30,18 @@ pub struct AutoAdapter {
     ftp_config: Option<FtpConfig>,
     /// 可选的断点续传持久化存储，注入后每完成一个分片自动保存进度
     resume_store: Option<Arc<ResumeStore>>,
+    /// Optional inbox stitched into every HTTP `HttpTransfer` this
+    /// adapter constructs (via [`HttpTransfer::with_receipt_sink`])
+    /// so receiver-side application acks parsed off the `/upload`
+    /// JSON response (`receipt_ack` field, RFC-002 §6.4) are
+    /// forwarded to the engine's
+    /// [`crate::core::transfer::TransferEngine::http_receipt_inbox`]
+    /// forwarder task, which in turn drives the matching
+    /// `Receipt<Sender>` to its terminal state. `None` (default)
+    /// keeps the legacy behaviour where the receipt parks at
+    /// `Processing` and a separate orchestration layer is expected
+    /// to apply the terminal event by hand.
+    engine_receipt_inbox: Option<mpsc::UnboundedSender<HttpReceiptAck>>,
 }
 
 impl AutoAdapter {
@@ -49,6 +61,7 @@ impl AutoAdapter {
             #[cfg(feature = "ftp")]
             ftp_config: None,
             resume_store: None,
+            engine_receipt_inbox: None,
         }
     }
 
@@ -69,6 +82,7 @@ impl AutoAdapter {
             #[cfg(feature = "ftp")]
             ftp_config: None,
             resume_store: None,
+            engine_receipt_inbox: None,
         }
     }
 
@@ -76,6 +90,51 @@ impl AutoAdapter {
     pub fn with_resume_store(mut self, store: Arc<ResumeStore>) -> Self {
         self.resume_store = Some(store);
         self
+    }
+
+    /// Builder: stitch the engine's HTTP receipt inbox (obtained from
+    /// [`crate::core::transfer::TransferEngine::http_receipt_inbox`])
+    /// into every `HttpTransfer` this adapter constructs. See
+    /// [`AutoAdapter::engine_receipt_inbox`] for the full contract.
+    /// This is the canonical hook the Python `Client.__aenter__` uses
+    /// to wire receiver→sender ack propagation on the HTTP transport.
+    pub fn with_engine_receipt_inbox(
+        mut self,
+        tx: mpsc::UnboundedSender<HttpReceiptAck>,
+    ) -> Self {
+        self.engine_receipt_inbox = Some(tx);
+        self
+    }
+
+    /// Internal: build an [`HttpTransfer`] off the shared reqwest
+    /// client + the adapter's HTTP config, optionally stitching in
+    /// the resume store and the engine receipt inbox sink. Centralised
+    /// so every upload path picks up both knobs uniformly without
+    /// repeating the construction boilerplate at each call site.
+    fn build_http_transfer(&self, with_resume: bool) -> HttpTransfer {
+        let mut ht = if with_resume {
+            if let Some(store) = &self.resume_store {
+                HttpTransfer::new_with_client_and_resume(
+                    Arc::clone(&self.shared_client),
+                    self.http_config.clone(),
+                    Arc::clone(store),
+                )
+            } else {
+                HttpTransfer::new_with_client(
+                    Arc::clone(&self.shared_client),
+                    self.http_config.clone(),
+                )
+            }
+        } else {
+            HttpTransfer::new_with_client(
+                Arc::clone(&self.shared_client),
+                self.http_config.clone(),
+            )
+        };
+        if let Some(inbox) = &self.engine_receipt_inbox {
+            ht = ht.with_receipt_sink(inbox.clone());
+        }
+        ht
     }
 
     /// Builder: 配置 S3 协议支持（MinIO 或 AWS S3）
@@ -166,10 +225,7 @@ impl ProtocolAdapter for AutoAdapter {
         // fallback when a quic://, s3://, or ftp:// URL arrives but
         // the corresponding feature was compiled out (the request will
         // simply fail at the HTTP layer with an unparseable URL).
-        let ht = HttpTransfer::new_with_client(
-            Arc::clone(&self.shared_client),
-            self.http_config.clone(),
-        );
+        let ht = self.build_http_transfer(false);
         let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
         let ptx = progress_tx.clone();
         tokio::spawn(async move {
@@ -180,7 +236,8 @@ impl ProtocolAdapter for AutoAdapter {
                 });
             }
         });
-        ht.upload_file(task, tx).await
+        let normalized = normalize_http_upload_task(task);
+        ht.upload_file(&normalized, tx).await
     }
 
     async fn download(
@@ -262,6 +319,8 @@ impl ProtocolAdapter for AutoAdapter {
             }
         });
         ht.download_file(task, tx).await
+        // NB: download path deliberately doesn't wire the receipt
+        // sink — receipt acks are an upload-side concept (RFC-002 §6).
     }
 
     fn protocol_name(&self) -> &'static str {
@@ -287,15 +346,7 @@ impl ProtocolAdapter for AutoAdapter {
 
         // 从完整 URL 中提取 base_url（scheme + host + port）
         let base_url = extract_base_url(&task.destination)?;
-        let ht = if let Some(store) = &self.resume_store {
-            HttpTransfer::new_with_client_and_resume(
-                Arc::clone(&self.shared_client),
-                self.http_config.clone(),
-                Arc::clone(store),
-            )
-        } else {
-            HttpTransfer::new_with_client(Arc::clone(&self.shared_client), self.http_config.clone())
-        };
+        let ht = self.build_http_transfer(true);
 
         let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
         let ptx = progress_tx.clone();
@@ -317,6 +368,27 @@ impl ProtocolAdapter for AutoAdapter {
         )
         .await
     }
+}
+
+/// Normalise the [`TransferTask::destination`] into a fully-qualified
+/// HTTP `/upload` URL when the caller provided a bare `host:port` (the
+/// shape that `aerosync.receiver(listen=...).address` exposes to the
+/// Python SDK and that the README quickstart uses verbatim). Existing
+/// destinations that already carry an `http://` / `https://` scheme
+/// are returned untouched, so callers who construct full URLs by hand
+/// (e.g. `tests/metadata_http_propagation.rs`) keep their semantics.
+///
+/// The returned task is a shallow clone with only `destination`
+/// rewritten — the engine bridge keys off `task.id` and reads
+/// `task.metadata`, both of which we preserve.
+fn normalize_http_upload_task(task: &TransferTask) -> TransferTask {
+    let dest = &task.destination;
+    if dest.starts_with("http://") || dest.starts_with("https://") {
+        return task.clone();
+    }
+    let mut normalized = task.clone();
+    normalized.destination = format!("http://{}/upload", dest.trim_start_matches('/'));
+    normalized
 }
 
 fn extract_base_url(url: &str) -> Result<String> {

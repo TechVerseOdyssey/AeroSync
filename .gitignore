@@ -58,3 +58,8 @@ aerosync-py/python/aerosync/_native*.pyd
 # checklist) — strictly local, never committed.
 .venv/
 **/.venv/
+# `uv` lockfile under aerosync-py is generated incidentally by
+# contributor `uv run pytest` invocations and is not the canonical
+# resolver for the SDK (pip + maturin is). Keep it untracked so a
+# clean `git status` after a local test run stays clean.
+aerosync-py/uv.lock

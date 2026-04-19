@@ -12,6 +12,9 @@ use aerosync::core::metadata::MetadataBuilder;
 use aerosync::core::progress::TransferStatus;
 use aerosync::core::receipt::{Receipt, Sender};
 use aerosync::core::transfer::{TransferConfig, TransferEngine, TransferTask};
+use aerosync::protocols::adapter::AutoAdapter;
+use aerosync::protocols::http::HttpConfig;
+use aerosync::protocols::quic::QuicConfig;
 use aerosync_proto::Lifecycle;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -20,6 +23,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 /// Outbound `Client`. Constructed via the `aerosync.client()` async
@@ -35,6 +39,17 @@ pub struct PyClient {
     pub(crate) engine: Arc<TransferEngine>,
     pub(crate) chunk_size_default: Option<usize>,
     pub(crate) timeout_default: Option<f64>,
+    /// Lazily-initialised transport adapter. Populated on the first
+    /// `__aenter__` call by [`Self::ensure_started`], which builds an
+    /// [`AutoAdapter`], wires it to the engine's
+    /// [`TransferEngine::http_receipt_inbox`] (so HTTP `/upload`
+    /// responses bearing the RFC-002 §6.4 `receipt_ack` envelope drive
+    /// the sender-side `Receipt<Sender>` to a terminal state), and
+    /// hands it to [`TransferEngine::start`] so the worker loop is
+    /// running before the user issues their first `send()`. Held in
+    /// an [`Arc<OnceCell<…>>`] so the future returned by `__aenter__`
+    /// can capture a cheap clone without taking the GIL.
+    pub(crate) adapter: Arc<OnceCell<Arc<AutoAdapter>>>,
 }
 
 impl PyClient {
@@ -47,6 +62,7 @@ impl PyClient {
             engine: Arc::new(TransferEngine::new(TransferConfig::default())),
             chunk_size_default: None,
             timeout_default: None,
+            adapter: Arc::new(OnceCell::new()),
         }
     }
 
@@ -62,8 +78,41 @@ impl PyClient {
             engine: Arc::new(TransferEngine::new(cfg)),
             chunk_size_default,
             timeout_default,
+            adapter: Arc::new(OnceCell::new()),
         }
     }
+}
+
+/// Build a fresh [`AutoAdapter`] off the engine's defaults and wire
+/// the engine receipt inbox so HTTP `/upload` `receipt_ack` envelopes
+/// drive the sender-side receipt past `Processing`. The `aerosync`
+/// workspace dependency in this crate always pulls the `quic`
+/// feature in via the default feature set, so we use the dual-config
+/// `AutoAdapter::new` shape unconditionally — there is no `quic`
+/// feature on the `aerosync-py` crate itself to gate on.
+fn build_default_adapter(engine: &TransferEngine) -> Arc<AutoAdapter> {
+    let adapter = AutoAdapter::new(HttpConfig::default(), QuicConfig::default());
+    let inbox = engine.http_receipt_inbox();
+    Arc::new(adapter.with_engine_receipt_inbox(inbox))
+}
+
+/// Idempotent: build (if not already built) the [`AutoAdapter`] and
+/// hand it to [`TransferEngine::start`] so the worker loop is up
+/// before any `send()` runs. Subsequent calls are no-ops because
+/// [`OnceCell::get_or_try_init`] caches the first successful result.
+async fn ensure_started(
+    engine: Arc<TransferEngine>,
+    cell: Arc<OnceCell<Arc<AutoAdapter>>>,
+) -> PyResult<()> {
+    cell.get_or_try_init::<PyErr, _, _>(|| async {
+        let adapter = build_default_adapter(&engine);
+        let dyn_adapter: Arc<dyn aerosync::core::transfer::ProtocolAdapter> =
+            adapter.clone();
+        engine.start(dyn_adapter).await.map_err(engine_err_to_py)?;
+        Ok(adapter)
+    })
+    .await?;
+    Ok(())
 }
 
 /// Materialised source for a `Client.send` call.
@@ -336,15 +385,38 @@ pub(crate) fn build_metadata(
 
 #[pymethods]
 impl PyClient {
-    /// Async context-manager `__aenter__` — returns `self`.
-    /// We do not open any sockets eagerly; the connection cache is
-    /// implicit per RFC-001 §11 Q1.
+    /// Async context-manager `__aenter__` — boots the transport
+    /// adapter (idempotent) so the engine worker is running before
+    /// the user issues their first `send()`, then returns `self`.
+    ///
+    /// The adapter is built once per `PyClient` (held in a tokio
+    /// [`OnceCell`]) and stitched to
+    /// [`TransferEngine::http_receipt_inbox`] so receiver-side HTTP
+    /// `receipt_ack` envelopes (RFC-002 §6.4) flow back to the
+    /// sender-side receipt without a dedicated wire. Sockets are
+    /// **not** opened eagerly here — the underlying reqwest client +
+    /// QUIC endpoint dial on first use, per RFC-001 §11 Q1.
     fn __aenter__<'py>(slf: Py<Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        future_into_py(py, async move { Ok(slf) })
+        // Pull the engine + adapter cell out under the GIL so the
+        // returned future doesn't need to re-attach.
+        let (engine, cell) = Python::attach(|py| -> PyResult<_> {
+            let inner = slf.borrow(py);
+            Ok((Arc::clone(&inner.engine), Arc::clone(&inner.adapter)))
+        })?;
+        future_into_py(py, async move {
+            ensure_started(engine, cell).await?;
+            Ok(slf)
+        })
     }
 
-    /// Async context-manager `__aexit__` — currently a no-op.
-    /// Resource teardown lives in `Drop`.
+    /// Async context-manager `__aexit__` — drops the engine handle's
+    /// adapter reference so the transport pool can wind down once
+    /// every in-flight `send()` future settles. The engine itself
+    /// stays alive as long as the user keeps the `Client` reference;
+    /// real teardown of the worker channel lives in [`Drop`] (when
+    /// the last `Arc<TransferEngine>` is released, the
+    /// `task_sender` is dropped, the worker's `recv()` returns
+    /// `None`, and the worker task exits).
     #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
     fn __aexit__<'py>(
         &self,
@@ -353,6 +425,14 @@ impl PyClient {
         _exc_value: Option<Py<PyAny>>,
         _traceback: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        // Best-effort: there is no public engine-shutdown surface in
+        // v0.2 and the engine worker holds the adapter `Arc`
+        // independently — we deliberately do not block here. The
+        // killer-demo round-trip awaits the receipt's terminal state
+        // before unwinding the `async with`, so any in-flight bytes
+        // have already drained by the time we land here. Future
+        // work: a `TransferEngine::shutdown(timeout)` that closes
+        // `task_sender` and joins the worker.
         future_into_py(py, async move { Ok(false) })
     }
 

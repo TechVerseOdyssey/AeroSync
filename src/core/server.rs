@@ -1233,15 +1233,29 @@ async fn handle_file_upload(
                     )
                     .await;
                 }
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "SHA-256 mismatch",
-                        "expected": expected,
-                        "actual": actual_hash
-                    })),
-                )
-                    .into_response();
+                let mut body = serde_json::json!({
+                    "error": "SHA-256 mismatch",
+                    "expected": expected,
+                    "actual": actual_hash,
+                });
+                // RFC-002 §6.4 application-level NACK: when the
+                // sender stamped a `Metadata.id` parseable as UUID we
+                // echo it back with a structured `receipt_ack` so the
+                // sender's `Receipt<Sender>` flips to
+                // `Failed(Nacked { reason })` rather than silently
+                // timing out. Backward-compat: legacy senders posting
+                // without metadata get the old shape (no
+                // `receipt_ack` key).
+                if let Some(meta) = received_metadata.as_ref() {
+                    if let Ok(receipt_id) = Uuid::parse_str(&meta.id) {
+                        body["receipt_ack"] = serde_json::json!({
+                            "receipt_id": receipt_id,
+                            "decision": "nack",
+                            "reason": "sha256 mismatch",
+                        });
+                    }
+                }
+                return (StatusCode::BAD_REQUEST, Json(body)).into_response();
             }
         }
 
@@ -1285,17 +1299,32 @@ async fn handle_file_upload(
             client_ip
         );
 
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "success": true,
-                "file_id": file_id,
-                "filename": safe_name,
-                "size": size,
-                "sha256": actual_hash,
-            })),
-        )
-            .into_response();
+        let mut body = serde_json::json!({
+            "success": true,
+            "file_id": file_id,
+            "filename": safe_name,
+            "size": size,
+            "sha256": actual_hash,
+        });
+        // RFC-002 §6.4 application-level ACK on the HTTP transport:
+        // when the sender stamped a `Metadata.id` parseable as UUID
+        // (i.e. they went through `TransferEngine::send_with_metadata`)
+        // we echo it back with a structured `receipt_ack` so the
+        // sender's `Receipt<Sender>` advances from `Processing` to
+        // `Completed(Acked)` without needing the QUIC bidi receipt
+        // stream. Backward-compat: legacy senders posting without
+        // metadata get the old shape (no `receipt_ack` key) and their
+        // receipt parks at `Processing` exactly as before.
+        if let Some(meta) = received_metadata.as_ref() {
+            if let Ok(receipt_id) = Uuid::parse_str(&meta.id) {
+                body["receipt_ack"] = serde_json::json!({
+                    "receipt_id": receipt_id,
+                    "decision": "ack",
+                    "reason": serde_json::Value::Null,
+                });
+            }
+        }
+        return (StatusCode::OK, Json(body)).into_response();
     }
 
     // No "file" part found

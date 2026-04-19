@@ -5,8 +5,9 @@ use crate::core::metadata::{
     datetime_to_proto_ts, empty_metadata, validate_sealed as validate_metadata,
 };
 use crate::core::progress::TransferStatus;
-use crate::core::receipt::{Event, Receipt, Sender};
+use crate::core::receipt::{Event, Receipt, Sender, State};
 use crate::core::receipt_registry::ReceiptRegistry;
+use crate::protocols::http::{HttpReceiptAck, HttpReceiptDecision};
 use crate::core::resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
 use crate::core::sniff::{sniff_content_type, SNIFF_PEEK_BYTES};
 use crate::core::{AeroSyncError, ProgressMonitor, Result, TransferProgress};
@@ -295,6 +296,97 @@ impl TransferEngine {
     /// look up live receipts by id.
     pub fn receipt_registry(&self) -> Arc<ReceiptRegistry<Sender>> {
         Arc::clone(&self.receipt_registry)
+    }
+
+    /// Returns an inbox channel that consumes [`HttpReceiptAck`]
+    /// frames parsed off the receiver's `/upload` JSON response and
+    /// applies the corresponding [`Event::Ack`] / [`Event::Nack`] to
+    /// the matching `Receipt<Sender>` in [`Self::receipt_registry`].
+    ///
+    /// The HTTP path's parallel to the QUIC bidi receipt control
+    /// stream (RFC-002 §6.3 / §6.4): `AutoAdapter::with_engine_receipt_inbox`
+    /// stitches the returned sender into every `HttpTransfer` it
+    /// constructs so the engine bridge can drive the sender-side
+    /// receipt past `Processing` to a terminal state without a
+    /// dedicated wire.
+    ///
+    /// Each call spawns a fresh forwarder task on the current tokio
+    /// runtime; the task lives until the returned sender (and all
+    /// its clones) are dropped, at which point the channel closes
+    /// and the task exits naturally. Apply-event errors (terminal
+    /// race, invalid transition) are logged at `tracing::debug!` and
+    /// dropped — the contract here is best-effort, mirroring the
+    /// QUIC drain loop in `protocols::quic::drain_receipt_stream`.
+    ///
+    /// **Must be called from inside a tokio runtime context** (the
+    /// implementation uses `tokio::spawn`). Calling it from a
+    /// non-tokio thread panics; in practice every caller routes
+    /// through the engine's own tokio runtime (the Python binding's
+    /// shared runtime, or the `#[tokio::test]` runtime in
+    /// integration tests).
+    pub fn http_receipt_inbox(&self) -> mpsc::UnboundedSender<HttpReceiptAck> {
+        let (tx, mut rx) = mpsc::unbounded_channel::<HttpReceiptAck>();
+        let registry = Arc::clone(&self.receipt_registry);
+        tokio::spawn(async move {
+            while let Some(ack) = rx.recv().await {
+                let HttpReceiptAck {
+                    receipt_id,
+                    decision,
+                    reason,
+                } = ack;
+                let Some(receipt) = registry.get(receipt_id) else {
+                    tracing::debug!(
+                        %receipt_id,
+                        "http_receipt_inbox: no receipt registered (likely already pruned), dropping ack"
+                    );
+                    continue;
+                };
+                let event = match decision {
+                    HttpReceiptDecision::Ack => Event::Ack,
+                    HttpReceiptDecision::Nack => Event::Nack {
+                        reason: reason.unwrap_or_default(),
+                    },
+                };
+                // Race: `HttpTransfer` parses `receipt_ack` off the
+                // `/upload` response body **before** the upload-side
+                // worker reports `TransferStatus::Completed` to the
+                // progress monitor — and therefore before the engine
+                // bridge in `send_with_metadata` walks the receipt
+                // through `Open → Close → Close → Process`. Applying
+                // `Event::Ack` while the receipt is still in
+                // `StreamOpened` / `DataTransferred` / `StreamClosed`
+                // would be rejected as `InvalidTransition` and the
+                // ack would be silently lost. Spawn a per-ack task
+                // that awaits the bridge to land the receipt in
+                // `Processing` (or any terminal — handles the
+                // double-ack and engine-already-failed cases) and
+                // then applies the event. Bounded by a 30 s cap so a
+                // wedged engine bridge can't leak the task.
+                let receipt_clone = Arc::clone(&receipt);
+                tokio::spawn(async move {
+                    let wait = receipt_clone.await_state(|s| {
+                        matches!(s, State::Processing) || s.is_terminal()
+                    });
+                    let waited = tokio::time::timeout(Duration::from_secs(30), wait).await;
+                    if waited.is_err() {
+                        tracing::debug!(
+                            %receipt_id,
+                            "http_receipt_inbox: precondition wait timed out (engine bridge stuck), dropping ack"
+                        );
+                        return;
+                    }
+                    if let Err(e) = receipt_clone.apply_event(event) {
+                        tracing::debug!(
+                            %receipt_id,
+                            error = ?e,
+                            "http_receipt_inbox: apply_event rejected (likely terminal-state race), dropping ack"
+                        );
+                    }
+                });
+            }
+            tracing::debug!("http_receipt_inbox: forwarder task exiting (sender dropped)");
+        });
+        tx
     }
 
     /// 启动引擎，注入协议适配器
