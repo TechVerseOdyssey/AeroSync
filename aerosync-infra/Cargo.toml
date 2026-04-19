@@ -1,0 +1,61 @@
+[package]
+name = "aerosync-infra"
+description = "AeroSync infrastructure layer — TLS bootstrap, JSON/JSONL storage, audit logger. Concrete impls of the `aerosync-domain` traits. Internal crate; API may break in v0.4."
+keywords = ["aerosync", "infrastructure", "storage", "tls"]
+categories = ["network-programming"]
+readme = "README.md"
+# Published alongside `aerosync` from v0.3.0. Depends on
+# `aerosync-domain` for trait shapes; consumed by the root `aerosync`
+# crate which wires concrete impls into `TransferEngine` /
+# `FileReceiver`. Publish order: aerosync-proto → aerosync-domain →
+# aerosync-infra → aerosync → aerosync-mcp (see
+# `docs/v0.3.0-frozen-api.md` §1.6).
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "aerosync_infra"
+path = "src/lib.rs"
+
+[dependencies]
+# Trait shapes + value objects for the impls in this crate.
+aerosync-domain = { workspace = true }
+aerosync-proto = { workspace = true }
+
+# Core async runtime — `tokio::fs` powers JSON/JSONL persistence,
+# `tokio::sync` powers the audit logger sink. Full feature set retained
+# because this crate is always linked against the binary, never
+# embedded in a no-runtime context.
+tokio = { workspace = true }
+
+# Cryptography primitives for the TLS bootstrap (formerly
+# `src/core/tls.rs`). `rustls` for the provider install,
+# `rustls-pki-types` for parsing PEM + DER cert/key material in the
+# Storage layer's helper functions.
+rustls = { workspace = true }
+rustls-pki-types = "1"
+
+# Error / serialization — `serde` for storage round-trips, `thiserror`
+# for typed error variants from the `Storage` impls.
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# `async_trait` because the storage traits in `aerosync-domain` use it
+# (refactor plan §4 D4). Same major version pin as the domain crate.
+async-trait = "0.1"
+
+# `dirs-next` mirrors the `~/.config/aerosync` resolution that
+# `core::resume::ResumeStore` and `core::history::HistoryStore` perform
+# today. Promoted to a direct dep here once those modules migrate.
+dirs-next = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }

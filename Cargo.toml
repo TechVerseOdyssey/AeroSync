@@ -203,6 +203,8 @@ aerosync-mcp = { path = "aerosync-mcp" }
 
 [workspace]
 members = [
+    "aerosync-domain",
+    "aerosync-infra",
     "aerosync-mcp",
     "aerosync-proto",
     "aerosync-py",
@@ -223,6 +225,14 @@ rust-version = "1.89"
 # Inter-crate deps within this workspace.
 aerosync = { path = ".", version = "0.2.1" }
 aerosync-proto = { path = "aerosync-proto", version = "0.2.1" }
+# v0.3.0 DDD layering. `aerosync-domain` owns pure business logic
+# (TransferSession, Receipt state machine, Storage traits);
+# `aerosync-infra` owns concrete IO impls (TLS bootstrap, JSON/JSONL
+# storage, audit logger). Both are skeleton-only at v0.2.1; bodies
+# migrate in via `git mv` during v0.3.0 Phases 1-2. See
+# `docs/v0.3.0-refactor-plan.md` and `docs/v0.3.0-frozen-api.md` §1.6.
+aerosync-domain = { path = "aerosync-domain", version = "0.2.1" }
+aerosync-infra = { path = "aerosync-infra", version = "0.2.1" }
 # Wire-protocol stack (RFC-002). prost / prost-build are pinned at the
 # workspace level so aerosync-proto and any future consumer (e.g. the
 # Python binding crate) reference the same versions.

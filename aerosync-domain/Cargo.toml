@@ -1,0 +1,61 @@
+[package]
+name = "aerosync-domain"
+description = "AeroSync domain layer — pure business logic (TransferSession, FileManifest, Receipt state machine, Storage traits). No IO networking. Internal crate; API may break in v0.4."
+keywords = ["aerosync", "domain", "ddd", "transfer"]
+categories = ["network-programming"]
+readme = "README.md"
+# Published alongside `aerosync` from v0.3.0. Both `aerosync` (root crate)
+# and downstream `aerosync-infra` depend on the domain types here, so it
+# MUST publish before either of them — see `docs/v0.3.0-frozen-api.md` §1.6.
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "aerosync_domain"
+path = "src/lib.rs"
+
+[dependencies]
+# Wire-format types (RFC-002). Domain layer reads `Metadata`, `State`,
+# `ErrorCode` enums directly from here so we don't duplicate definitions.
+aerosync-proto = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+# Sync / async primitives. Per `docs/v0.3.0-refactor-plan.md` §4 D1, the
+# domain crate is allowed to depend on `tokio::sync::{watch, mpsc}` for
+# receipt change notifications — full tokio runtime is NOT pulled in
+# (no `rt-multi-thread`, no `fs`, no `net`).
+tokio = { workspace = true }
+
+# Error model + serialization. `serde` is needed because the domain
+# value objects (HistoryEntry, Metadata projections) round-trip through
+# JSON in `aerosync-infra`. `thiserror` keeps error variant boilerplate
+# manageable without an extra runtime cost.
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# UUID v7 for `SessionId` / `TaskId`. v7 = time-sorted, globally unique;
+# matches the receipt id minting strategy used by `core::receipt`.
+uuid = { workspace = true }
+
+# `chrono` for typed `expires_at` / `created_at` accessors mirroring the
+# wire `google.protobuf.Timestamp`. Same minimal feature set as the root
+# crate to keep the dependency footprint tight.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+
+# `async_trait` for the `ResumeStorage` / `HistoryStorage` trait
+# abstractions defined here. Per refactor plan §4 D4, both traits are
+# async (tokio::fs is the most likely impl in `aerosync-infra`); a sync
+# trait would force `spawn_blocking` wrappers throughout, hurting
+# performance on the hot resume / history paths.
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

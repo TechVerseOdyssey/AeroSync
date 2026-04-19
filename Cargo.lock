@@ -73,6 +73,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "aerosync-domain"
+version = "0.2.1"
+dependencies = [
+ "aerosync-proto",
+ "async-trait",
+ "chrono",
+ "prost",
+ "prost-types",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "aerosync-infra"
+version = "0.2.1"
+dependencies = [
+ "aerosync-domain",
+ "aerosync-proto",
+ "async-trait",
+ "dirs-next",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "aerosync-mcp"
 version = "0.2.1"
 dependencies = [
