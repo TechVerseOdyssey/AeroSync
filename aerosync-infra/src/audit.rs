@@ -14,10 +14,13 @@
 //! # 使用示例
 //!
 //! ```no_run
-//! use aerosync::core::audit::{AuditLogger, AuditEntry, AuditEvent, Direction, AuditResult};
+//! // v0.3.0+ canonical import path. The legacy
+//! // `aerosync::core::audit::*` path also resolves via the root
+//! // crate's `pub use aerosync_infra::audit` re-export.
+//! use aerosync_infra::audit::{AuditLogger, AuditEntry, AuditEvent, Direction, AuditResult};
 //! use std::path::Path;
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # async fn example() -> aerosync_domain::Result<()> {
 //! let logger = AuditLogger::new(Path::new("/var/log/aerosync/audit.log")).await?;
 //!
 //! logger.log(AuditEntry {
@@ -42,8 +45,12 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-use crate::core::error::Result;
-use crate::AeroSyncError;
+// v0.3.0 Phase 1d migration: this file moved verbatim from
+// `aerosync::core::audit` to `aerosync_infra::audit`. The error type
+// imports now reach into `aerosync-domain` directly (no longer behind
+// the root crate's `core::error` shim) since both crates live below
+// the root in the workspace dependency graph.
+use aerosync_domain::{AeroSyncError, Result};
 
 // ──────────────────────────────── types ─────────────────────────────────────
 

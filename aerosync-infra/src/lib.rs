@@ -50,9 +50,14 @@
 
 // ── Phase 1 modules ───────────────────────────────────────────────────
 
+// `audit` migrated verbatim from `src/core/audit.rs` in Phase 1d.
+// The original module did not enforce `missing_docs`; rustdoc cleanup
+// is deferred to Phase 4 (documentation closure) per the refactor
+// plan §3 Phase 4. Until then, suppress the lint locally so the
+// move stays a pure rename.
+#[allow(missing_docs)]
+pub mod audit;
 pub mod tls;
-
-// pub mod audit;     // Phase 1d (next commit)
 
 // ── Phase 2 modules ───────────────────────────────────────────────────
 //

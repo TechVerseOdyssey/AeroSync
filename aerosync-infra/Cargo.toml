@@ -56,6 +56,11 @@ async-trait = "0.1"
 # today. Promoted to a direct dep here once those modules migrate.
 dirs-next = "2"
 
+# Logging — used by `audit::AuditLogger` to emit structured records
+# at debug level when an entry hits disk. Same workspace pin as the
+# root crate so log filter syntax stays uniform.
+tracing = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }

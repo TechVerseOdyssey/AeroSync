@@ -1,4 +1,11 @@
-pub mod audit;
+// `audit` migrated to `aerosync-infra` in v0.3.0 Phase 1d. The
+// `pub use` re-export keeps `crate::core::audit::*` and
+// `aerosync::core::audit::*` resolving for every existing caller
+// (mcp/server.rs, src/main.rs, src/core/transfer.rs, src/core/server.rs)
+// without needing import-site updates. The downstream
+// `pub use audit::{AuditEntry, AuditEvent, ...}` line below still
+// works because `audit` is now in scope as an alias.
+pub use aerosync_infra::audit;
 pub mod auth;
 pub mod capabilities;
 #[cfg(feature = "mdns")]

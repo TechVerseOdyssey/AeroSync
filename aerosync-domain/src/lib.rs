@@ -58,6 +58,16 @@ pub mod error;
 // pub mod metadata;  // Phase 1e (next commit)
 // pub mod receipt;   // Phase 1f
 
+// ── Crate-root re-exports ─────────────────────────────────────────────
+//
+// Mirrors what the root `aerosync` crate already exposes via
+// `pub use crate::core::error::{AeroSyncError, Result}`. Lifting the
+// most-used names to the domain crate root lets infra-layer callers
+// write `use aerosync_domain::{AeroSyncError, Result}` instead of
+// the longer `use aerosync_domain::error::{AeroSyncError, Result}`.
+
+pub use error::{AeroSyncError, Result};
+
 // ── Phase 2 modules ───────────────────────────────────────────────────
 //
 // pub mod storage;
