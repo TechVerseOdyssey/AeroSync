@@ -7,11 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> v0.2.1 development. Targets quality-of-life fixes around the v0.2.0
-> Python SDK + a leaner default Cargo build. No wire-format changes.
+> Next development cycle. Empty for now — see
+> [`docs/v0.3.0-refactor-plan.md`](docs/v0.3.0-refactor-plan.md) for
+> the v0.3.0 DDD refactor scope.
+
+## [0.2.1] - 2026-04-19
+
+> Honesty release. Closes the v0.2.0-known-limitations list:
+> HTTP+QUIC metadata propagation is wired end-to-end (RFC-003 §8.4),
+> RFC-002 §6.4 receipt streams are live on both transports, the MCP
+> server gains a symmetric `request_file` pull tool, and the Python
+> killer demo finally runs against the verbatim README quickstart.
+> Per-protocol Cargo features ship a leaner default build for
+> embedders. No wire-format breaking changes — v0.2.0 senders /
+> receivers continue to interop. Single semver-patch bump.
 
 ### Added
 
+- **`Receiver.idle_timeout` (Python SDK)** — new optional float-
+  seconds keyword on `aerosync.receiver(...)` that bounds the
+  `async for f in receiver:` wait window. `None` (default)
+  preserves the v0.2.0 "block forever" behaviour; `> 0.0` makes
+  `__anext__` raise `StopAsyncIteration` after that many seconds
+  of silence (measured from the last yielded file or from
+  `__aenter__` for the first one); `0.0` / negative / non-finite
+  raise `ValueError` at the factory. Closes the v0.2.0 deferral
+  "empty-iter timeout on `async for f in receiver` blocks
+  indefinitely; engine needs an idle-timeout knob"
+  (RFC-001 §13 #18 follow-up). 5 new pytest tests +
+  1 unskipped lifecycle smoke. (Batch E / P2.1)
 - **`aerosync-mcp` `request_file` tool** — symmetric pull-side counterpart
   to `send_file`. Opens a one-shot HTTP receiver bound to `listen`
   (default `127.0.0.1:0`), generates a fresh HMAC bearer token (unless
@@ -629,6 +653,7 @@ purposes.
 
 Initial public release.
 
-[Unreleased]: https://github.com/TechVerseOdyssey/AeroSync/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/TechVerseOdyssey/AeroSync/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/TechVerseOdyssey/AeroSync/compare/v0.2.0...v0.2.1
 [v0.2.0]: https://github.com/TechVerseOdyssey/AeroSync/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/TechVerseOdyssey/AeroSync/releases/tag/v0.1.0

@@ -23,15 +23,15 @@
 
 Designed for the use case nothing else covers cleanly: **one agent on machine A asks another agent on machine B "send me that 30 GB dataset"**, and it just works — over LAN (QUIC, mDNS-discovered) or WAN (HTTP fallback), resumable, with a single binary on each side.
 
-## Status (v0.2.0)
+## Status (v0.2.1)
 
-- **Rust crate** (`aerosync`, `aerosync-mcp`, `aerosync-proto`) — production-shaped APIs, 540+ tests, MIT.
-- **Python SDK** (`aerosync` on PyPI) — async-first PyO3 binding, abi3-py39 wheels for macOS / Linux glibc+musl / Windows. **New in v0.2.0**.
-- **Receipt protocol** ([RFC-002](docs/rfcs/RFC-002-receipt-protocol.md)) — sender knows when receiver actually processed; 7-state machine, HTTP SSE control plane (`GET /v1/receipts/:id/events`), idempotent ack/nack/cancel.
-- **Metadata envelope** ([RFC-003](docs/rfcs/RFC-003-metadata-envelope.md)) — every transfer carries structured metadata (`trace_id`, `lifecycle`, free-form `user_metadata`); persisted, queryable. See [`docs/protocol/metadata-v1.md`](docs/protocol/metadata-v1.md).
-- **Known limitations** — the QUIC bidi receipt-stream wiring is implemented as a codec + registry but is **not yet auto-opened** by the transport; cross-process QUIC peers must use the HTTP SSE control plane to observe receipt state. The `ResumeStore` is JSON-file based; in-flight receipts may be lost on crash. Both ship in v0.2.1 — see [`CHANGELOG.md`](CHANGELOG.md) "Known limitations" for details.
+- **Rust crate** (`aerosync`, `aerosync-mcp`, `aerosync-proto`) — production-shaped APIs, 560+ tests, MIT.
+- **Python SDK** (`aerosync` on PyPI) — async-first PyO3 binding, abi3-py39 wheels for macOS / Linux glibc+musl / Windows. First stable in v0.2.0; v0.2.1 hardens HTTP+QUIC metadata propagation, adds `Receiver.idle_timeout`, and lights up the killer-demo round-trip end-to-end.
+- **Receipt protocol** ([RFC-002](docs/rfcs/RFC-002-receipt-protocol.md)) — sender knows when receiver actually processed; 7-state machine, HTTP SSE control plane (`GET /v1/receipts/:id/events`), idempotent ack/nack/cancel. v0.2.1 wires the QUIC bidi receipt stream end-to-end (`w3c-quic-receipt-wiring` closed) and adds HTTP wire-level `receipt_ack` echo (RFC-002 §6.4).
+- **Metadata envelope** ([RFC-003](docs/rfcs/RFC-003-metadata-envelope.md)) — every transfer carries structured metadata (`trace_id`, `lifecycle`, free-form `user_metadata`); persisted, queryable, propagated identically over HTTP and QUIC. See [`docs/protocol/metadata-v1.md`](docs/protocol/metadata-v1.md).
+- **MCP** — 9 tools for AI agents (push, pull, history, receipts). New in v0.2.1: `request_file` symmetric pull tool. See [`docs/mcp-integration.md`](docs/mcp-integration.md).
 
-## Python SDK quickstart (v0.2.0)
+## Python SDK quickstart (v0.2.1)
 
 ```bash
 pip install aerosync
@@ -47,11 +47,11 @@ async def main():
     async with aerosync.client() as c:
         receipt = await c.send(
             "report.csv",
-            to="data-cleaner",
+            to="127.0.0.1:7788",  # or a peer name resolved via aerosync.discover()
             metadata={"trace_id": "run-123", "agent_id": "scraper"},
         )
-        outcome = await receipt.processed()
-        print(f"sent: {outcome['status']}")
+        outcome = await receipt.processed()  # waits for receiver-side ack
+        print(f"sent: {outcome['status']}")  # → "acked"
 
 asyncio.run(main())
 ```
@@ -63,18 +63,21 @@ import asyncio
 import aerosync
 
 async def main():
-    async with aerosync.receiver(name="data-cleaner", save_dir="./inbox") as r:
+    async with aerosync.receiver(
+        name="data-cleaner",
+        listen="127.0.0.1:7788",
+        save_dir="./inbox",
+        idle_timeout=30.0,  # exit the loop after 30 s of silence (v0.2.1+)
+    ) as r:
         async for incoming in r:
             print(f"got {incoming.file_name} ({incoming.size_bytes} B)")
             print(f"trace_id: {incoming.metadata.get('trace_id')}")
-            await incoming.ack()
+            await incoming.ack()  # flips the sender's receipt to acked
 
 asyncio.run(main())
 ```
 
-The full Python reference lives under [`aerosync-py/python/aerosync/`](aerosync-py/python/aerosync/) (PEP 561 `py.typed`, hand-maintained `_native.pyi` stubs, `mypy --strict` clean). Design rationale: [`docs/rfcs/RFC-001-python-sdk.md`](docs/rfcs/RFC-001-python-sdk.md). Wire metadata schema: [`docs/protocol/metadata-v1.md`](docs/protocol/metadata-v1.md). Release / publish dance: [`docs/python/RELEASE-CHECKLIST.md`](docs/python/RELEASE-CHECKLIST.md).
-
-> **Honest caveat**: the cross-process Python `await receipt.processed()` round-trip currently relies on the HTTP SSE control plane while the QUIC receipt-stream wiring lands in v0.2.1 (`w3c-quic-receipt-wiring`). Single-process tests (Rust `tests/cross_rfc_smoke.rs`) exercise the full lifecycle today; the Python killer-demo test is shipped-but-skipped pending that wiring (`aerosync-py/tests/test_killer_demo.py`).
+The full Python reference lives under [`aerosync-py/python/aerosync/`](aerosync-py/python/aerosync/) (PEP 561 `py.typed`, hand-maintained `_native.pyi` stubs, `mypy --strict` clean). The verbatim end-to-end round-trip of these two snippets is exercised by [`aerosync-py/tests/test_killer_demo.py`](aerosync-py/tests/test_killer_demo.py) — if that test fails, this README is a lie. Design rationale: [`docs/rfcs/RFC-001-python-sdk.md`](docs/rfcs/RFC-001-python-sdk.md). Wire metadata schema: [`docs/protocol/metadata-v1.md`](docs/protocol/metadata-v1.md). Release / publish dance: [`docs/python/RELEASE-CHECKLIST.md`](docs/python/RELEASE-CHECKLIST.md).
 
 ## Features
 

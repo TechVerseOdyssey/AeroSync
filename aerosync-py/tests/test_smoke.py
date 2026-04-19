@@ -15,7 +15,7 @@ def test_module_imports() -> None:
     assert isinstance(v, str)
     assert v == aerosync.__version__
     # Cargo package version pin from `aerosync-py/Cargo.toml`.
-    assert v == "0.2.0"
+    assert v == "0.2.1"
 
 
 def test_public_surface_contains_factories() -> None:
