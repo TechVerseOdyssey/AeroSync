@@ -1,41 +1,68 @@
 """RFC-001 §1 — the "killer demo" round-trip, end-to-end through the
 public Python SDK surface.
 
-This test ships **shipped-but-skipped** in v0.2.0. The intent is for it
-to flip to passing automatically once `w3c-quic-receipt-wiring` lands
-(see `TODO.local.md` v0.2.1 backlog). Until then it documents the exact
-shape the SDK promises in `README.md` and RFC-001 §1, and the precise
-deferral that blocks it.
+# Status (v0.2.1, Batch D)
 
-# Why skipped (pre-v0.2.1)
+Marked ``xfail(strict=True)`` pending two follow-ups whose fixes
+overlap and require a deliberate cross-cut decision rather than a
+rushed patch in the closing batch of the v0.2.1 honesty release.
 
-The Python SDK demo from RFC-001 §1 requires three pieces working
-together cross-process:
+# Why xfail (post-Batch-C)
+
+The Python SDK demo from `README.md` requires three pieces working
+together in one process (a Python sender talking to a Python
+receiver bound at `127.0.0.1:0`):
 
 1. `aerosync.client().send(...)` building a `Metadata` envelope and
-   handing it to the engine — works today (covered by
-   `test_receipt.py::test_metadata_pass_through_*`).
-2. `aerosync.receiver(...)` accepting the file over QUIC and surfacing
-   the metadata on `IncomingFile.metadata` — receiver-side metadata
-   surface works today; what is missing is the **wire-side** ferrying
-   of the envelope from sender to receiver.
-3. `await receipt.processed()` resolving to a non-failed `Outcome`
-   once the receiver `await incoming.ack()`s — requires the sender's
-   Receipt to observe the receiver-side `Ack` over the QUIC bidi
-   receipt stream.
+   actually delivering bytes — currently fails because the Python
+   `Client` constructs a `TransferEngine` but never calls
+   `engine.start(adapter)`. Without a worker the queued
+   `TransferTask` sits in `Pending` forever, `ProgressMonitor` never
+   reports `Completed`, and the engine bridge never advances the
+   sender-side receipt past `StreamOpened`. (`aerosync-py/src/lib.rs`
+   `make_client` → `aerosync-py/src/client.rs` `from_transfer_config`.)
+2. Even if (1) is wired, `await receipt.processed()` still hangs:
+   the engine bridge in `src/core/transfer.rs::send_with_metadata`
+   walks `Open → Close → Close → Process` on the sender-side
+   `Receipt<Sender>` and **stops at `Processing`**. The terminal
+   `Acked` transition has to come from somewhere — the QUIC path
+   (Batch C) takes it from the inbound `ReceiptFrame::Acked`
+   on the receipt stream; the HTTP path has no equivalent wire
+   for ack-from-receiver in v0.2.x. RFC-002 §6.4 documents the
+   `POST /v1/receipts/:id/ack` endpoint but the Python receiver's
+   `IncomingFile.ack()` only walks its locally-constructed
+   *receiver-side* synthetic receipt (see the "Linkage caveat" in
+   `aerosync-py/src/receiver.rs`); it does not know the sender's
+   address, so it cannot post the ack.
+3. Auto-acking the sender's HTTP receipt at the engine bridge on
+   `TransferStatus::Completed` would close the Python gap in one
+   line — but it would also break the
+   `tests/receipts_e2e.rs::e2e_quic_receipt_nack_with_reason` flow
+   (which fakes a "completed transfer" via `SuccessAdapter` and
+   then expects the receipt to remain in `Processing` while the
+   receiver-side application decides ack vs nack). That trade-off
+   is an RFC-002 §6 semantic decision — "is HTTP 200 application-
+   level Ack?" — and belongs to v0.3.0's transport-vs-application
+   split (see `docs/v0.3.0-refactor-plan.md`), not a closing batch
+   of v0.2.1.
 
-Items (2) and (3) are the **same** missing wiring: the QUIC adapter
-does not yet open the bidi receipt stream alongside chunk transfer
-(see `tests/cross_rfc_smoke.rs` "Honesty clause" + `CHANGELOG.md`
-"Known limitations" → `w3c-quic-receipt-wiring`). The Rust-side cross-
-RFC smoke test bridges this manually; the Python-side test cannot,
-because the Python binding does not expose the internal Receipt /
-ReceiptRegistry handles needed to apply `Event::Ack` on the sender
-side directly. Doing so would leak transport plumbing into the public
-API surface.
+# When this test should flip back to passing
 
-When `w3c-quic-receipt-wiring` lands, remove the `pytest.mark.skip`
-decorator and verify the demo from `README.md` works as printed.
+Either of:
+
+- **v0.3.0 Plan §"Receipt control plane unification"** wires the
+  Python `Client` to start an `AutoAdapter` and adds explicit
+  receiver→sender ack propagation for the HTTP path (parallel to
+  the QUIC receipt stream). Once that lands, remove the `xfail`
+  and the demo round-trips end-to-end.
+- **OR** a deliberate v0.2.x patch decides `HTTP 200 = Ack` is the
+  right semantic for the sender-side receipt and updates the
+  receipts_e2e expectations accordingly. (Not the call to make in
+  Batch D.)
+
+The body of the test below is the verbatim `README.md` quickstart;
+when ``xfail`` flips to `XPASS` CI will hard-fail and prompt us to
+remove the marker.
 """
 
 from __future__ import annotations
@@ -47,15 +74,25 @@ import aerosync
 import pytest
 
 
-@pytest.mark.skip(
+@pytest.mark.xfail(
+    strict=True,
     reason=(
-        "blocked on w3c-quic-receipt-wiring (v0.2.1 backlog): the QUIC "
-        "transport does not yet open the bidi receipt stream automatically, "
-        "so a cross-process Python sender/receiver pair cannot complete the "
-        "ack round-trip end-to-end. The Rust-side smoke test bridges this "
-        "manually in `tests/cross_rfc_smoke.rs`; see also CHANGELOG.md "
-        "'Known limitations' for the full deferral statement."
-    )
+        "v0.2.1 honesty deferral: the Python `aerosync.client()` factory "
+        "does not yet call `engine.start(adapter)`, so queued transfers "
+        "never run; even once started, the engine bridge in "
+        "`src/core/transfer.rs::send_with_metadata` parks the sender's "
+        "receipt at `Processing` because the HTTP transport has no "
+        "ack-from-receiver wire (RFC-002 §6.4 endpoint exists but the "
+        "Python receiver's `IncomingFile.ack()` only walks a synthetic "
+        "local receipt — see `aerosync-py/src/receiver.rs` 'Linkage "
+        "caveat'). Auto-acking on HTTP 200 in the bridge would close "
+        "the Python gap but break `tests/receipts_e2e.rs` "
+        "`e2e_quic_receipt_nack_with_reason`, which is an RFC-002 §6 "
+        "semantic decision tracked for the v0.3.0 receipt-control-plane "
+        "unification (see `docs/v0.3.0-refactor-plan.md`). When that "
+        "lands, this xfail flips to XPASS and CI yells at us to remove "
+        "the marker."
+    ),
 )
 def test_killer_demo_round_trip(tmp_path: Path) -> None:
     """The verbatim RFC-001 §1 / README.md Python quickstart demo.

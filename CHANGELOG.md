@@ -12,6 +12,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`aerosync-mcp` `request_file` tool** — symmetric pull-side counterpart
+  to `send_file`. Opens a one-shot HTTP receiver bound to `listen`
+  (default `127.0.0.1:0`), generates a fresh HMAC bearer token (unless
+  the caller supplies their own pre-arranged secret via `auth_token`),
+  and returns the bound address + token so an agent on the other side
+  can target it with their own `send_file`. Auto-tears down after the
+  first received file (`one_shot=true`, default) or after
+  `idle_timeout_secs` (default 300 s) — whichever comes first. Tracked
+  in the same single-slot receiver state as `start_receiver`, so
+  `stop_receiver` and `get_receiver_status` continue to work
+  unchanged. The "notify the peer" half of pull-mode is intentionally
+  out of scope for v0.2.1 — the LLM (or human) on the far side wires
+  the two tools together by reading `address` + `auth_token` out of
+  this tool's response and pasting them into their own `send_file`.
+  Pinned-cert QUIC pull is deferred to v0.4.0 (it requires
+  pre-arranged trust which `request_file` cannot bootstrap without
+  the RFC-004 rendezvous). Audit-logged as
+  `tool_call("request_file", …)`. (P1.3)
 - **QUIC receipt control stream + metadata propagation**
   (RFC-002 §6.3 / RFC-003 §8.4) — every QUIC transfer now opens a
   *second* bidirectional stream alongside the data stream,
@@ -113,6 +131,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both call sites in `core::server` and the QUIC integration tests
   in `protocols::quic_receipt` were updated. No behaviour change
   for default builds. (P2.2)
+
+### Known limitations
+
+- **Python SDK killer demo (`aerosync-py/tests/test_killer_demo.py`)**
+  is shipped as `xfail(strict=True)` rather than a passing test.
+  Two architectural gaps surface on the README quickstart's verbatim
+  HTTP round-trip and require a deliberate cross-cut decision rather
+  than a rushed Batch-D patch:
+  1. `aerosync.client()` constructs a `TransferEngine` but never calls
+     `engine.start(adapter)`, so queued `TransferTask`s sit in
+     `Pending` indefinitely. (`aerosync-py/src/lib.rs::make_client` →
+     `aerosync-py/src/client.rs::from_transfer_config`.)
+  2. Even with the engine started, the HTTP path has no wire-level
+     application-acknowledgement from receiver to sender; the engine
+     bridge in `src/core/transfer.rs::send_with_metadata` parks the
+     sender-side receipt at `Processing` and the Python receiver's
+     `IncomingFile.ack()` only walks a *local* synthetic receipt
+     (see the "Linkage caveat" in `aerosync-py/src/receiver.rs`).
+     Auto-acking on HTTP 200 in the bridge would close the Python
+     gap but break `tests/receipts_e2e.rs::e2e_quic_receipt_nack_with_reason`,
+     which is an RFC-002 §6 semantic decision tracked for the
+     v0.3.0 receipt-control-plane unification (see
+     `docs/v0.3.0-refactor-plan.md`). When that lands, the `xfail`
+     flips to `XPASS` and CI yells at us to remove the marker.
+  Batches B + C closed the *underlying* HTTP-metadata and QUIC-
+  receipt gaps that originally blocked the demo on
+  `w3c-quic-receipt-wiring`; these two remaining items are
+  Python-SDK-side and live on the v0.3.0 backlog.
 
 
 ## [v0.2.0] - 2026-04-18

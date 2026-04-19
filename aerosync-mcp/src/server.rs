@@ -7,7 +7,7 @@ use zeroize::Zeroizing;
 
 use aerosync::core::{
     audit::AuditLogger,
-    auth::AuthConfig,
+    auth::{AuthConfig, TokenManager},
     discovery::AeroSyncMdns,
     history::HistoryQuery,
     metadata::MetadataBuilder,
@@ -232,6 +232,68 @@ pub struct StartReceiverParams {
     /// HTTPS listen port (default: 7790).
     pub https_port: Option<u16>,
     /// Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.
+    #[serde(default, alias = "_auth_token")]
+    pub mcp_auth_token: Option<String>,
+}
+
+// ── `request_file` defaults ────────────────────────────────────────────────
+//
+// Stand-alone `fn` defaults rather than `Default`-trait derives because
+// `serde(default = "...")` requires a callable, and we want each field to
+// have a documented sentinel rather than an opaque `bool::default()` /
+// `u64::default()` zero-valued default.
+fn default_one_shot() -> bool {
+    true
+}
+
+fn default_idle_timeout_secs() -> u64 {
+    300
+}
+
+/// Parameters for `request_file` — the symmetric pull-side counterpart to
+/// `send_file`. The tool opens a one-shot HTTP receiver bound to `listen`
+/// (default `127.0.0.1:0`), generates an HMAC bearer token (unless one is
+/// supplied), and returns the bound address + token so an agent on the
+/// other end can `send_file` into it.
+///
+/// The "notify the peer" half of pull-mode is intentionally out of scope
+/// for v0.2.1 — that requires either a pre-existing channel or the
+/// v0.3.0+ rendezvous (RFC-004). Today the LLM (or human) on the other
+/// side wires the two tools together by pasting `address` + `auth_token`
+/// into their own `send_file` call.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RequestFileParams {
+    /// Logical name of the peer expected to push (informational; surfaced
+    /// in the audit log and in the human-readable `instructions` field of
+    /// the response).
+    pub from_peer: String,
+    /// Local directory where the incoming file(s) will be saved. Created
+    /// if it does not exist.
+    pub save_dir: String,
+    /// Listen address for the one-shot receiver, e.g. `"127.0.0.1:0"`
+    /// (default — let the OS pick a free port). Pass an explicit port
+    /// like `"0.0.0.0:7790"` only when the peer cannot reach localhost
+    /// (e.g. cross-host within a trusted LAN).
+    #[serde(default)]
+    pub listen: Option<String>,
+    /// Optional HMAC secret the peer must use to mint the bearer token.
+    /// If omitted (the common case), the tool generates a fresh ephemeral
+    /// secret + signed bearer and returns the bearer in `auth_token`.
+    /// Distinct from `mcp_auth_token` which protects this MCP channel.
+    #[serde(default)]
+    pub auth_token: Option<String>,
+    /// Auto-shutdown the receiver after the first received file
+    /// (default: true). Set to `false` for batch pulls (the receiver
+    /// will then live until `idle_timeout_secs` elapses or
+    /// `stop_receiver` is called).
+    #[serde(default = "default_one_shot")]
+    pub one_shot: bool,
+    /// Maximum time (seconds) to wait for the peer's push before tearing
+    /// down the receiver (default: 300). Guards against stuck handles.
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    /// Local MCP auth token. Required only when the server has
+    /// `AEROSYNC_MCP_SECRET` set.
     #[serde(default, alias = "_auth_token")]
     pub mcp_auth_token: Option<String>,
 }
@@ -1079,6 +1141,251 @@ impl AeroSyncMcpServer {
         }
     }
 
+    /// 一次性接收端：开端口等对端推一个文件
+    ///
+    /// `request_file` is the symmetric pull-side counterpart to `send_file`:
+    /// it spins up a one-shot HTTP receiver bound to `listen`
+    /// (default `127.0.0.1:0`), generates an HMAC bearer token (unless
+    /// caller supplied one), then returns the bound address + token so
+    /// the peer can target it with their own `send_file`.
+    ///
+    /// v0.2.1 ships HTTP only. Pinned-cert QUIC pull requires
+    /// pre-arranged trust which `request_file` cannot bootstrap without
+    /// rendezvous (RFC-004); when v0.4.0 lands, this tool can opt into
+    /// QUIC by toggling `enable_quic = true` on the inner `ServerConfig`.
+    #[tool(
+        description = "Open a one-shot receiver for an incoming file from a known peer. Returns the receiver address + bearer token; the agent on the other side must invoke send_file targeting this address. For full pull-mode (where this MCP server contacts the peer directly) use the v0.3.0 rendezvous (RFC-004)."
+    )]
+    pub async fn request_file(
+        &self,
+        rmcp::handler::server::wrapper::Parameters(params): rmcp::handler::server::wrapper::Parameters<RequestFileParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if let Some(audit) = &self.audit {
+            audit
+                .log_tool_call(
+                    "request_file",
+                    &format!(
+                        "from_peer={:?} save_dir={:?} listen={:?} one_shot={} idle_timeout_secs={}",
+                        params.from_peer,
+                        params.save_dir,
+                        params.listen,
+                        params.one_shot,
+                        params.idle_timeout_secs
+                    ),
+                )
+                .await;
+        }
+        if !self.check_auth(params.mcp_auth_token.as_deref()) {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Unauthorized: invalid or missing mcp_auth_token"}).to_string()
+            )]));
+        }
+
+        let mut lock = self.receiver.lock().await;
+        if lock.is_some() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({"success": false, "error": "Receiver is already running. Call stop_receiver first."}).to_string()
+            )]));
+        }
+
+        // ── parse listen address ────────────────────────────────────────
+        let listen_str = params.listen.as_deref().unwrap_or("127.0.0.1:0");
+        let listen_addr: std::net::SocketAddr = match listen_str.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    json!({
+                        "success": false,
+                        "error": format!("Invalid listen address '{}': {}", listen_str, e)
+                    })
+                    .to_string(),
+                )]));
+            }
+        };
+
+        let save_dir = std::path::PathBuf::from(&params.save_dir);
+
+        // ── secret + bearer token ───────────────────────────────────────
+        // The receiver's `AuthConfig.secret_key` is the HMAC secret; the
+        // bearer the peer presents is a `{uuid}.{ts}.{exp}.{sig}` token
+        // signed by that secret. Caller can pre-arrange the secret via
+        // `auth_token` (e.g. when both sides share a long-lived key); if
+        // omitted we mint a fresh one per request.
+        let secret = params
+            .auth_token
+            .clone()
+            .unwrap_or_else(|| format!("aerosync-req-{}", Uuid::new_v4().simple()));
+        let token_mgr = match TokenManager::new(secret.clone()) {
+            Ok(m) => m,
+            Err(e) => {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    json!({
+                        "success": false,
+                        "error": format!("Failed to init TokenManager: {}", e)
+                    })
+                    .to_string(),
+                )]));
+            }
+        };
+        let bearer = match token_mgr.generate_token() {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    json!({
+                        "success": false,
+                        "error": format!("Failed to generate bearer token: {}", e)
+                    })
+                    .to_string(),
+                )]));
+            }
+        };
+
+        let auth_cfg = AuthConfig {
+            enable_auth: true,
+            secret_key: secret,
+            token_lifetime_hours: 24,
+            allowed_ips: vec![],
+        };
+
+        // TODO(v0.4.0): once RFC-004 rendezvous + identity-pinned QUIC
+        // lands, expose an `enable_quic: bool` knob on `RequestFileParams`
+        // and wire it through here. v0.2.1 stays HTTP-only because pinned-
+        // cert QUIC requires pre-arranged trust which `request_file`
+        // cannot bootstrap on its own.
+        let config = ServerConfig {
+            http_port: listen_addr.port(),
+            quic_port: 0,
+            bind_address: listen_addr.ip().to_string(),
+            receive_directory: save_dir.clone(),
+            allow_overwrite: false,
+            auth: Some(auth_cfg),
+            enable_http: true,
+            enable_quic: false,
+            enable_metrics: false,
+            enable_ws: false,
+            enable_https: false,
+            ..ServerConfig::default()
+        };
+
+        let mut receiver = FileReceiver::new(config);
+        if let Err(e) = receiver.start().await {
+            return Ok(CallToolResult::success(vec![Content::text(
+                json!({
+                    "success": false,
+                    "error": format!("Failed to start receiver: {}", e)
+                })
+                .to_string(),
+            )]));
+        }
+
+        let bound_addr = match receiver.local_http_addr() {
+            Some(a) => a,
+            None => {
+                let _ = receiver.stop().await;
+                return Ok(CallToolResult::success(vec![Content::text(
+                    json!({
+                        "success": false,
+                        "error": "Receiver started but local_http_addr was not populated"
+                    })
+                    .to_string(),
+                )]));
+            }
+        };
+
+        *lock = Some(receiver);
+        drop(lock);
+
+        // ── spawn the idle-timeout / one-shot watcher ───────────────────
+        // Polls every 500 ms for a received file when `one_shot=true`,
+        // and unconditionally tears down at `idle_timeout_secs`. The slot
+        // is checked on every tick so an external `stop_receiver` cleanly
+        // breaks the loop instead of leaking a task that races with a
+        // future receiver instance.
+        let receiver_slot = Arc::clone(&self.receiver);
+        let idle_secs = params.idle_timeout_secs;
+        let one_shot = params.one_shot;
+        let request_id = Uuid::new_v4();
+        tokio::spawn(async move {
+            let deadline =
+                tokio::time::sleep(std::time::Duration::from_secs(idle_secs.max(1)));
+            tokio::pin!(deadline);
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+            tick.tick().await; // skip the immediate first tick
+            loop {
+                tokio::select! {
+                    _ = &mut deadline => {
+                        tracing::info!(
+                            request_id = %request_id,
+                            idle_secs,
+                            "request_file: idle timeout elapsed, stopping receiver"
+                        );
+                        let mut g = receiver_slot.lock().await;
+                        if let Some(mut r) = g.take() {
+                            let _ = r.stop().await;
+                        }
+                        break;
+                    }
+                    _ = tick.tick() => {
+                        let mut g = receiver_slot.lock().await;
+                        match g.as_ref() {
+                            None => {
+                                // Externally torn down (stop_receiver) — exit.
+                                break;
+                            }
+                            Some(r) if one_shot => {
+                                let files = r.get_received_files().await;
+                                if !files.is_empty() {
+                                    tracing::info!(
+                                        request_id = %request_id,
+                                        files = files.len(),
+                                        "request_file: one-shot file received, stopping receiver"
+                                    );
+                                    if let Some(mut r) = g.take() {
+                                        let _ = r.stop().await;
+                                    }
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        });
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let expires_at_secs = now_secs.saturating_add(idle_secs);
+        let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(expires_at_secs as i64, 0)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| format!("+{}s", idle_secs));
+
+        let instructions = format!(
+            "Tell agent '{}' to invoke `send_file` with destination=\"http://{}/upload\" and token=\"{}\".",
+            params.from_peer, bound_addr, bearer
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(
+            json!({
+                "success": true,
+                "data": {
+                    "request_id": request_id.to_string(),
+                    "from_peer": params.from_peer,
+                    "address": bound_addr.to_string(),
+                    "auth_token": bearer,
+                    "save_dir": save_dir.display().to_string(),
+                    "expires_at": expires_at,
+                    "one_shot": one_shot,
+                    "idle_timeout_secs": idle_secs,
+                    "instructions": instructions,
+                }
+            })
+            .to_string(),
+        )]))
+    }
+
     /// 停止当前运行的接收端服务器
     #[tool(description = "Stop the currently running file receiver server.")]
     async fn stop_receiver(
@@ -1613,7 +1920,7 @@ fn describe_receipt_state(state: &ReceiptState) -> serde_json::Value {
 
 #[tool_handler(
     name = "aerosync-mcp",
-    instructions = "AeroSync file transfer tools. Use send_file or send_directory to transfer files (returns task_id immediately). Use get_transfer_status to poll progress. Use start_receiver to listen for incoming files, get_receiver_status to check received files, and stop_receiver when done. Use discover_receivers to find AeroSync peers on the local network. Use list_history to view past transfers."
+    instructions = "AeroSync file transfer tools. Use send_file or send_directory to transfer files (returns task_id immediately). Use get_transfer_status to poll progress. Use start_receiver to listen for incoming files (long-lived), or request_file to open a one-shot pull-mode receiver and get back an address+bearer-token to hand to the peer's send_file. Use get_receiver_status to check received files and stop_receiver when done. Use discover_receivers to find AeroSync peers on the local network. Use list_history to view past transfers."
 )]
 impl ServerHandler for AeroSyncMcpServer {}
 
@@ -2259,6 +2566,241 @@ mod tests {
                 "got: {err}"
             );
         }
+    }
+
+    // ── P1.3: request_file (Batch D) ─────────────────────────────────
+    //
+    // The four tests below exercise the pull-side tool end-to-end:
+    //   1. shape of the response JSON (request_id, address, token, ...)
+    //   2. a real reqwest multipart upload using the returned
+    //      address + bearer actually lands a file on disk
+    //   3. wrong bearer is rejected with HTTP 401
+    //   4. idle_timeout_secs actually tears down the receiver
+    //
+    // Each test takes the shared single-slot `self.receiver` mutex via
+    // `make_server()`, so they're scoped to their own server instance
+    // and do not collide with the other receiver-touching tests.
+
+    fn extract_data(payload: &serde_json::Value) -> &serde_json::Value {
+        assert_eq!(
+            payload["success"],
+            serde_json::Value::Bool(true),
+            "expected success=true, got: {payload}"
+        );
+        &payload["data"]
+    }
+
+    #[tokio::test]
+    async fn request_file_returns_address_and_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = make_server();
+        let result = server
+            .request_file(Parameters(RequestFileParams {
+                from_peer: "agent-bob".into(),
+                save_dir: dir.path().to_string_lossy().to_string(),
+                listen: Some("127.0.0.1:0".into()),
+                auth_token: None,
+                one_shot: true,
+                idle_timeout_secs: 30,
+                mcp_auth_token: None,
+            }))
+            .await
+            .unwrap();
+        let payload = extract_text_payload(&result);
+        let data = extract_data(&payload);
+
+        // request_id parses as UUID.
+        let request_id = data["request_id"].as_str().expect("request_id");
+        assert!(Uuid::parse_str(request_id).is_ok());
+
+        // address parses as a SocketAddr with non-zero port (OS-assigned).
+        let addr_str = data["address"].as_str().expect("address");
+        let addr: std::net::SocketAddr = addr_str.parse().expect("address parses");
+        assert_ne!(addr.port(), 0, "OS-assigned port must be non-zero");
+
+        // bearer is non-empty and shaped like the TokenManager output
+        // (`{uuid}.{ts}.{exp}.{sig}`, four dot-separated parts).
+        let token = data["auth_token"].as_str().expect("auth_token");
+        assert!(!token.is_empty());
+        assert_eq!(
+            token.split('.').count(),
+            4,
+            "expected 4-segment HMAC token, got: {token}"
+        );
+
+        // Echoed metadata.
+        assert_eq!(data["from_peer"], "agent-bob");
+        assert_eq!(data["one_shot"], true);
+        assert_eq!(data["idle_timeout_secs"], 30);
+        assert_eq!(
+            data["save_dir"].as_str().unwrap(),
+            dir.path().to_string_lossy()
+        );
+        assert!(data["expires_at"].as_str().is_some());
+        let instr = data["instructions"].as_str().unwrap_or("");
+        assert!(instr.contains("send_file"));
+        assert!(instr.contains("agent-bob"));
+        assert!(instr.contains(addr_str));
+
+        // Cleanup so the next test can take the receiver slot.
+        let _ = server
+            .stop_receiver(Parameters(NoParams::default()))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_file_actually_accepts_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = make_server();
+
+        let result = server
+            .request_file(Parameters(RequestFileParams {
+                from_peer: "agent-alice".into(),
+                save_dir: dir.path().to_string_lossy().to_string(),
+                listen: Some("127.0.0.1:0".into()),
+                auth_token: None,
+                // Disable one_shot so we can deterministically inspect
+                // the saved file before the watcher tears the receiver
+                // down.
+                one_shot: false,
+                idle_timeout_secs: 30,
+                mcp_auth_token: None,
+            }))
+            .await
+            .unwrap();
+        let payload = extract_text_payload(&result);
+        let data = extract_data(&payload);
+        let addr = data["address"].as_str().unwrap().to_string();
+        let token = data["auth_token"].as_str().unwrap().to_string();
+
+        let part = reqwest::multipart::Part::bytes(b"hello pull-mode".to_vec())
+            .file_name("pulled.bin")
+            .mime_str("application/octet-stream")
+            .unwrap();
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/upload", addr))
+            .header("Authorization", format!("Bearer {}", token))
+            .multipart(form)
+            .send()
+            .await
+            .expect("upload send");
+        assert!(
+            resp.status().is_success(),
+            "expected 2xx, got {} (body: {:?})",
+            resp.status(),
+            resp.text().await
+        );
+
+        // The server's get_received_files() lags the HTTP response
+        // by a tokio yield; poll briefly.
+        let saved = dir.path().join("pulled.bin");
+        for _ in 0..20 {
+            if saved.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(saved.exists(), "expected file to be saved at {saved:?}");
+        let body = tokio::fs::read(&saved).await.unwrap();
+        assert_eq!(body, b"hello pull-mode");
+
+        let _ = server
+            .stop_receiver(Parameters(NoParams::default()))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_file_unauthorized_when_wrong_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = make_server();
+
+        let result = server
+            .request_file(Parameters(RequestFileParams {
+                from_peer: "agent-mallory".into(),
+                save_dir: dir.path().to_string_lossy().to_string(),
+                listen: Some("127.0.0.1:0".into()),
+                auth_token: None,
+                one_shot: false,
+                idle_timeout_secs: 30,
+                mcp_auth_token: None,
+            }))
+            .await
+            .unwrap();
+        let payload = extract_text_payload(&result);
+        let data = extract_data(&payload);
+        let addr = data["address"].as_str().unwrap().to_string();
+
+        let part = reqwest::multipart::Part::bytes(b"forbidden".to_vec())
+            .file_name("nope.bin")
+            .mime_str("application/octet-stream")
+            .unwrap();
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/upload", addr))
+            .header("Authorization", "Bearer not-the-real-token")
+            .multipart(form)
+            .send()
+            .await
+            .expect("upload send");
+        assert_eq!(
+            resp.status().as_u16(),
+            401,
+            "expected 401 with wrong bearer, got {}",
+            resp.status()
+        );
+
+        // No file written.
+        let mut entries = tokio::fs::read_dir(dir.path()).await.unwrap();
+        assert!(
+            entries.next_entry().await.unwrap().is_none(),
+            "save_dir must remain empty after rejected upload"
+        );
+
+        let _ = server
+            .stop_receiver(Parameters(NoParams::default()))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_file_idle_timeout_kills_receiver() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = make_server();
+
+        let result = server
+            .request_file(Parameters(RequestFileParams {
+                from_peer: "agent-ghost".into(),
+                save_dir: dir.path().to_string_lossy().to_string(),
+                listen: Some("127.0.0.1:0".into()),
+                auth_token: None,
+                one_shot: false,
+                idle_timeout_secs: 1,
+                mcp_auth_token: None,
+            }))
+            .await
+            .unwrap();
+        let payload = extract_text_payload(&result);
+        extract_data(&payload);
+
+        // Receiver is currently running.
+        {
+            let g = server.receiver.lock().await;
+            assert!(g.is_some(), "receiver must be running immediately after request_file");
+        }
+
+        // Wait past the idle deadline + a generous polling slack.
+        tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+
+        let g = server.receiver.lock().await;
+        assert!(
+            g.is_none(),
+            "receiver should have been torn down by the idle-timeout watcher"
+        );
     }
 
     /// `list_history` with valid metadata filters and an empty

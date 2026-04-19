@@ -890,6 +890,7 @@ mod e2e {
             "send_file",
             "send_directory",
             "start_receiver",
+            "request_file",
             "stop_receiver",
             "get_receiver_status",
             "list_history",
