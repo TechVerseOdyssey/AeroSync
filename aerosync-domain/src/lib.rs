@@ -71,12 +71,13 @@ pub mod metadata;
 /// the pure-data value objects they transit. See `storage.rs` for the
 /// rationale of splitting data ↔ trait ↔ impl across three crates.
 ///
-/// `missing_docs` is locally suppressed: a few field doc comments
-/// were never written for the original `HistoryEntry` (id, filename,
-/// size, sha256) in `src/core/history.rs`, and Phase 2.1b is a pure
-/// rename — adding fresh docs now would conflate moves with content
-/// changes. Phase 4 (documentation closure) retires this attribute.
-#[allow(missing_docs)]
+/// All field-level docs are now in place — the temporary
+/// `#[allow(missing_docs)]` introduced in Phase 2.1b was retired by
+/// the v0.3.0 Phase 4 doc-closure follow-up that backfilled
+/// `HistoryEntry::{id, filename, size, sha256}`. The audit + metadata
+/// modules in `aerosync-infra` still carry the lint suppression and
+/// will be retired by the same Phase 4 task once their fields are
+/// likewise documented.
 pub mod storage;
 
 // ── Crate-root re-exports ─────────────────────────────────────────────

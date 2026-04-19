@@ -286,11 +286,25 @@ impl ReceiptStateLabel {
 /// 单条传输历史记录
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistoryEntry {
+    /// History-record UUID. Distinct from `receipt_id`; one history
+    /// record corresponds to exactly one transferred file but may or
+    /// may not have been issued a [`crate::receipt::Receipt`]. New
+    /// records get a fresh `Uuid::new_v4()` from the
+    /// [`HistoryEntry::success`] / [`HistoryEntry::failure`] ctors.
     pub id: Uuid,
+    /// File-system basename of the transferred file (e.g.
+    /// `"report.pdf"`). For directory transfers, each contained file
+    /// gets its own [`HistoryEntry`] keyed by the file's basename.
     pub filename: String,
     /// 接收方保存路径（可选，发送方为 None）
     pub saved_path: Option<PathBuf>,
+    /// Total file size in bytes as observed at the start of the
+    /// transfer. For zero-byte files this is `0` and the transfer is
+    /// still recorded.
     pub size: u64,
+    /// Hex-encoded SHA-256 of the file body (lowercase, no prefix).
+    /// `None` when the transfer skipped hashing (e.g. directory
+    /// metadata-only sync, or the transport disabled hashing).
     pub sha256: Option<String>,
     /// 对端 IP
     pub remote_ip: Option<String>,
