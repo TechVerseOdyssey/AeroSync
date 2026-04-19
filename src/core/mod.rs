@@ -19,7 +19,13 @@ pub mod resume;
 pub mod routing;
 pub mod server;
 pub mod sniff;
-pub(crate) mod tls;
+// `tls` migrated to `aerosync-infra` in v0.3.0 Phase 1b. The
+// `pub(crate) use` keeps the canonical in-crate path
+// `crate::core::tls::ensure_rustls_provider_installed` working
+// without forcing every caller (server.rs, quic_receipt.rs) to
+// update its imports. External visibility unchanged — the original
+// module was `pub(crate)`.
+pub(crate) use aerosync_infra::tls;
 pub mod transfer;
 
 pub use audit::{

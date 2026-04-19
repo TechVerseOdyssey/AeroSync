@@ -165,6 +165,11 @@ memmap2 = { workspace = true }
 # Wire protocol types (RFC-002). The proto crate owns the .proto file
 # and the generated bindings; we just consume them.
 aerosync-proto = { workspace = true }
+# v0.3.0 DDD layering — concrete IO impls (TLS bootstrap today; JSON
+# storage / audit logger / atomic-write resume in Phase 2). The root
+# crate re-exports these via `pub use aerosync_infra::*` in
+# `src/core/mod.rs` so existing import paths keep resolving.
+aerosync-infra = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 # Used by `core::server` (HTTP receiver) and `protocols::http` (sender)

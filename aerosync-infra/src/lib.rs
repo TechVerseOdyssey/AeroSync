@@ -48,10 +48,11 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
-// ── Phase 1 modules (skeleton; bodies migrated in follow-up commits) ──
-//
-// pub mod tls;
-// pub mod audit;
+// ── Phase 1 modules ───────────────────────────────────────────────────
+
+pub mod tls;
+
+// pub mod audit;     // Phase 1d (next commit)
 
 // ── Phase 2 modules ───────────────────────────────────────────────────
 //
