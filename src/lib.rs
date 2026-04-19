@@ -13,12 +13,17 @@
 
 pub mod core;
 pub mod protocols;
+pub mod wan;
 
 // Convenience re-exports for the most common types so callers can write
 // `use aerosync::TransferEngine` without remembering the sub-module path.
 pub use crate::core::{
-    AeroSyncError, AeroSyncMdns, AuditLogger, AuthConfig, AuthManager, FileManager, FileReceiver,
-    HistoryStore, ProgressMonitor, Result, ResumeStore, ServerConfig, TlsConfig, TransferConfig,
-    TransferEngine, TransferTask,
+    AeroSyncError, AuditLogger, AuthConfig, AuthManager, FileManager, FileReceiver, HistoryStore,
+    ProgressMonitor, Result, ResumeStore, ServerConfig, TlsConfig, TransferConfig, TransferEngine,
+    TransferTask,
 };
-pub use crate::protocols::{AutoAdapter, HttpConfig, HttpTransfer, QuicConfig, QuicTransfer};
+#[cfg(feature = "mdns")]
+pub use crate::core::AeroSyncMdns;
+pub use crate::protocols::{AutoAdapter, HttpConfig, HttpTransfer};
+#[cfg(feature = "quic")]
+pub use crate::protocols::{QuicConfig, QuicTransfer};

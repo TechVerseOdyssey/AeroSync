@@ -10,23 +10,30 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+#[cfg(feature = "ftp")]
 use crate::protocols::ftp::{FtpConfig, FtpTransfer};
 use crate::protocols::http::{HttpConfig, HttpTransfer};
+#[cfg(feature = "quic")]
 use crate::protocols::quic::{QuicConfig, QuicTransfer};
+#[cfg(feature = "s3")]
 use crate::protocols::s3::{S3Config, S3Transfer};
 use crate::protocols::traits::{TransferProgress as ProtoProgress, TransferProtocol};
 
 pub struct AutoAdapter {
     http_config: HttpConfig,
+    #[cfg(feature = "quic")]
     quic_config_base: QuicConfig,
     shared_client: Arc<Client>,
+    #[cfg(feature = "s3")]
     s3_config: Option<S3Config>,
+    #[cfg(feature = "ftp")]
     ftp_config: Option<FtpConfig>,
     /// 可选的断点续传持久化存储，注入后每完成一个分片自动保存进度
     resume_store: Option<Arc<ResumeStore>>,
 }
 
 impl AutoAdapter {
+    #[cfg(feature = "quic")]
     pub fn new(http_config: HttpConfig, quic_config_base: QuicConfig) -> Self {
         // 构建一个共享的 reqwest::Client，连接池在所有上传/下载请求间复用
         let client = Client::builder()
@@ -37,7 +44,29 @@ impl AutoAdapter {
             http_config,
             quic_config_base,
             shared_client: Arc::new(client),
+            #[cfg(feature = "s3")]
             s3_config: None,
+            #[cfg(feature = "ftp")]
+            ftp_config: None,
+            resume_store: None,
+        }
+    }
+
+    /// HTTP-only constructor (used when the `quic` feature is disabled).
+    /// Mirrors [`Self::new`] but omits the QUIC base config since the
+    /// QUIC transport types are not compiled in.
+    #[cfg(not(feature = "quic"))]
+    pub fn new(http_config: HttpConfig) -> Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(http_config.timeout_seconds))
+            .build()
+            .unwrap_or_default();
+        Self {
+            http_config,
+            shared_client: Arc::new(client),
+            #[cfg(feature = "s3")]
+            s3_config: None,
+            #[cfg(feature = "ftp")]
             ftp_config: None,
             resume_store: None,
         }
@@ -50,12 +79,14 @@ impl AutoAdapter {
     }
 
     /// Builder: 配置 S3 协议支持（MinIO 或 AWS S3）
+    #[cfg(feature = "s3")]
     pub fn with_s3(mut self, cfg: S3Config) -> Self {
         self.s3_config = Some(cfg);
         self
     }
 
     /// Builder: 配置 FTP 协议支持
+    #[cfg(feature = "ftp")]
     pub fn with_ftp(mut self, cfg: FtpConfig) -> Self {
         self.ftp_config = Some(cfg);
         self
@@ -70,6 +101,7 @@ impl ProtocolAdapter for AutoAdapter {
         progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
     ) -> Result<()> {
         // S3 路由
+        #[cfg(feature = "s3")]
         if task.destination.starts_with("s3://") {
             let cfg = self.s3_config.clone().ok_or_else(|| {
                 AeroSyncError::InvalidConfig(
@@ -91,6 +123,7 @@ impl ProtocolAdapter for AutoAdapter {
         }
 
         // FTP 路由
+        #[cfg(feature = "ftp")]
         if task.destination.starts_with("ftp://") {
             let cfg = self.ftp_config.clone().ok_or_else(|| {
                 AeroSyncError::InvalidConfig(
@@ -111,6 +144,7 @@ impl ProtocolAdapter for AutoAdapter {
             return ft.upload_file(task, tx).await;
         }
 
+        #[cfg(feature = "quic")]
         if task.destination.starts_with("quic://") {
             let qc = resolve_quic_config(&task.destination, &self.quic_config_base)?;
             let qt = QuicTransfer::new(qc)?;
@@ -125,25 +159,28 @@ impl ProtocolAdapter for AutoAdapter {
                     });
                 }
             });
-            qt.upload_file(task, tx).await
-        } else {
-            // HTTP（包括 http:// 和 host:port 规范化后的地址）
-            let ht = HttpTransfer::new_with_client(
-                Arc::clone(&self.shared_client),
-                self.http_config.clone(),
-            );
-            let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
-            let ptx = progress_tx.clone();
-            tokio::spawn(async move {
-                while let Some(p) = rx.recv().await {
-                    let _ = ptx.send(ProtocolProgress {
-                        bytes_transferred: p.bytes_transferred,
-                        transfer_speed: p.transfer_speed,
-                    });
-                }
-            });
-            ht.upload_file(task, tx).await
+            return qt.upload_file(task, tx).await;
         }
+
+        // HTTP（包括 http:// 和 host:port 规范化后的地址）— also the
+        // fallback when a quic://, s3://, or ftp:// URL arrives but
+        // the corresponding feature was compiled out (the request will
+        // simply fail at the HTTP layer with an unparseable URL).
+        let ht = HttpTransfer::new_with_client(
+            Arc::clone(&self.shared_client),
+            self.http_config.clone(),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
+        let ptx = progress_tx.clone();
+        tokio::spawn(async move {
+            while let Some(p) = rx.recv().await {
+                let _ = ptx.send(ProtocolProgress {
+                    bytes_transferred: p.bytes_transferred,
+                    transfer_speed: p.transfer_speed,
+                });
+            }
+        });
+        ht.upload_file(task, tx).await
     }
 
     async fn download(
@@ -152,6 +189,7 @@ impl ProtocolAdapter for AutoAdapter {
         progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
     ) -> Result<()> {
         // S3 路由
+        #[cfg(feature = "s3")]
         if task.destination.starts_with("s3://") {
             let cfg = self
                 .s3_config
@@ -172,6 +210,7 @@ impl ProtocolAdapter for AutoAdapter {
         }
 
         // FTP 路由
+        #[cfg(feature = "ftp")]
         if task.destination.starts_with("ftp://") {
             let cfg = self
                 .ftp_config
@@ -191,6 +230,7 @@ impl ProtocolAdapter for AutoAdapter {
             return ft.download_file(task, tx).await;
         }
 
+        #[cfg(feature = "quic")]
         if task.destination.starts_with("quic://") {
             let qc = resolve_quic_config(&task.destination, &self.quic_config_base)?;
             let qt = QuicTransfer::new(qc)?;
@@ -204,24 +244,24 @@ impl ProtocolAdapter for AutoAdapter {
                     });
                 }
             });
-            qt.download_file(task, tx).await
-        } else {
-            let ht = HttpTransfer::new_with_client(
-                Arc::clone(&self.shared_client),
-                self.http_config.clone(),
-            );
-            let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
-            let ptx = progress_tx.clone();
-            tokio::spawn(async move {
-                while let Some(p) = rx.recv().await {
-                    let _ = ptx.send(ProtocolProgress {
-                        bytes_transferred: p.bytes_transferred,
-                        transfer_speed: p.transfer_speed,
-                    });
-                }
-            });
-            ht.download_file(task, tx).await
+            return qt.download_file(task, tx).await;
         }
+
+        let ht = HttpTransfer::new_with_client(
+            Arc::clone(&self.shared_client),
+            self.http_config.clone(),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
+        let ptx = progress_tx.clone();
+        tokio::spawn(async move {
+            while let Some(p) = rx.recv().await {
+                let _ = ptx.send(ProtocolProgress {
+                    bytes_transferred: p.bytes_transferred,
+                    transfer_speed: p.transfer_speed,
+                });
+            }
+        });
+        ht.download_file(task, tx).await
     }
 
     fn protocol_name(&self) -> &'static str {
@@ -234,11 +274,14 @@ impl ProtocolAdapter for AutoAdapter {
         state: &mut ResumeState,
         progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
     ) -> Result<()> {
-        // S3/FTP/QUIC 不支持分片，fallback 到普通上传
-        if task.destination.starts_with("s3://")
-            || task.destination.starts_with("ftp://")
-            || task.destination.starts_with("quic://")
-        {
+        // S3/FTP/QUIC 不支持分片，fallback 到普通上传。
+        // The matched-scheme list is gated so we don't false-positive
+        // on a feature that isn't compiled in (the upload() fallback
+        // would surface a clearer error in that case).
+        let needs_fallback = task.destination.starts_with("quic://") && cfg!(feature = "quic")
+            || task.destination.starts_with("s3://") && cfg!(feature = "s3")
+            || task.destination.starts_with("ftp://") && cfg!(feature = "ftp");
+        if needs_fallback {
             return self.upload(task, progress_tx).await;
         }
 
@@ -287,6 +330,7 @@ fn extract_base_url(url: &str) -> Result<String> {
     })
 }
 
+#[cfg(feature = "quic")]
 fn resolve_quic_config(destination: &str, base: &QuicConfig) -> Result<QuicConfig> {
     let stripped = destination.strip_prefix("quic://").ok_or_else(|| {
         AeroSyncError::InvalidConfig(format!("Invalid QUIC URL: {}", destination))
@@ -317,7 +361,7 @@ fn resolve_quic_config(destination: &str, base: &QuicConfig) -> Result<QuicConfi
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "quic"))]
 mod tests {
     use super::*;
     use crate::core::transfer::TransferTask;

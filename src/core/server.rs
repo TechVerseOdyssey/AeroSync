@@ -1,5 +1,6 @@
 use crate::core::audit::{AuditLogger, Direction};
 use crate::core::auth::{AuthConfig, AuthManager, AuthMiddleware};
+#[cfg(feature = "mdns")]
 use crate::core::discovery::{AeroSyncMdns, MdnsHandle};
 use crate::core::metrics::Metrics;
 use crate::core::receipts_http::{router as receipts_http_router, ReceiptHttpState};
@@ -139,6 +140,7 @@ pub struct FileReceiver {
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
     http_handle: Option<tokio::task::JoinHandle<()>>,
     https_handle: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(feature = "quic")]
     quic_handle: Option<tokio::task::JoinHandle<()>>,
     reload_handle: Option<tokio::task::JoinHandle<()>>,
     audit_logger: Option<Arc<AuditLogger>>,
@@ -147,6 +149,7 @@ pub struct FileReceiver {
     /// 每个 task_id 的分片到达计数器（HTTP+HTTPS 共享）
     chunk_arrivals: ChunkArrivalMap,
     /// mDNS 广播句柄 — Some 表示正在广播，drop 时自动注销
+    #[cfg(feature = "mdns")]
     mdns_handle: Option<MdnsHandle>,
     /// RFC-002 §6.4 receipt control surface — shared across HTTP and
     /// HTTPS so SSE subscribers and ack/nack/cancel POSTs hit the same
@@ -163,6 +166,7 @@ pub struct FileReceiver {
     /// OS-assigned QUIC endpoint address — same shape and lifecycle
     /// rules as `local_http_addr`. `None` until `start()` has bound
     /// the UDP socket via `quinn::Endpoint::server`.
+    #[cfg(feature = "quic")]
     local_quic_addr: Arc<Mutex<Option<SocketAddr>>>,
 }
 
@@ -176,15 +180,18 @@ impl FileReceiver {
             received_files: Arc::new(RwLock::new(Vec::new())),
             http_handle: None,
             https_handle: None,
+            #[cfg(feature = "quic")]
             quic_handle: None,
             reload_handle: None,
             audit_logger: None,
             metrics: Metrics::new(),
             ws_tx,
             chunk_arrivals: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "mdns")]
             mdns_handle: None,
             receipts: ReceiptHttpState::new(),
             local_http_addr: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "quic")]
             local_quic_addr: Arc::new(Mutex::new(None)),
         }
     }
@@ -204,6 +211,11 @@ impl FileReceiver {
     /// Returns the OS-assigned address of the QUIC endpoint once
     /// `start()` has bound it. Same lifecycle and `None`-semantics
     /// as [`local_http_addr`](Self::local_http_addr).
+    ///
+    /// Compiled out (always returns `None` would require the field)
+    /// when the `quic` Cargo feature is disabled, so this method
+    /// itself is gated.
+    #[cfg(feature = "quic")]
     pub fn local_quic_addr(&self) -> Option<SocketAddr> {
         *self.local_quic_addr.lock().unwrap()
     }
@@ -327,6 +339,7 @@ impl FileReceiver {
             self.http_handle = Some(handle);
         }
 
+        #[cfg(feature = "quic")]
         if config.enable_quic {
             // Same trick as HTTP: build the `quinn::Endpoint` here so
             // we can record `endpoint.local_addr()` before handing the
@@ -369,6 +382,14 @@ impl FileReceiver {
                 }
             });
             self.quic_handle = Some(handle);
+        }
+        #[cfg(not(feature = "quic"))]
+        if config.enable_quic {
+            tracing::warn!(
+                "ServerConfig.enable_quic = true but the `quic` Cargo feature \
+                 was disabled at compile time — QUIC listener will not start. \
+                 Rebuild with `--features quic` to enable it."
+            );
         }
 
         if config.enable_https {
@@ -419,27 +440,32 @@ impl FileReceiver {
             );
         }
 
-        // mDNS 广播（局域网自动发现）
-        let instance_name = hostname_for_mdns();
-        let auth_required = config.auth.is_some();
-        let ws_enabled = config.enable_ws;
-        match AeroSyncMdns::register(
-            &instance_name,
-            config.http_port,
-            env!("CARGO_PKG_VERSION"),
-            ws_enabled,
-            auth_required,
-        ) {
-            Ok(handle) => {
-                self.mdns_handle = Some(handle);
-                tracing::info!(
-                    "mDNS: broadcasting as '{}' on port {}",
-                    instance_name,
-                    config.http_port
-                );
-            }
-            Err(e) => {
-                tracing::warn!("mDNS broadcast unavailable (non-fatal): {}", e);
+        // mDNS 广播（局域网自动发现）— gated behind the `mdns` feature
+        // so embedders that only need HTTP/QUIC transports don't pay
+        // for `mdns-sd` and its socket scaffolding.
+        #[cfg(feature = "mdns")]
+        {
+            let instance_name = hostname_for_mdns();
+            let auth_required = config.auth.is_some();
+            let ws_enabled = config.enable_ws;
+            match AeroSyncMdns::register(
+                &instance_name,
+                config.http_port,
+                env!("CARGO_PKG_VERSION"),
+                ws_enabled,
+                auth_required,
+            ) {
+                Ok(handle) => {
+                    self.mdns_handle = Some(handle);
+                    tracing::info!(
+                        "mDNS: broadcasting as '{}' on port {}",
+                        instance_name,
+                        config.http_port
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("mDNS broadcast unavailable (non-fatal): {}", e);
+                }
             }
         }
 
@@ -454,6 +480,7 @@ impl FileReceiver {
         if let Some(h) = self.https_handle.take() {
             h.abort();
         }
+        #[cfg(feature = "quic")]
         if let Some(h) = self.quic_handle.take() {
             h.abort();
         }
@@ -461,13 +488,19 @@ impl FileReceiver {
             h.abort();
         }
         // drop MdnsHandle → 自动注销 mDNS 广播
-        self.mdns_handle = None;
+        #[cfg(feature = "mdns")]
+        {
+            self.mdns_handle = None;
+        }
         // Clear the cached bound addresses so a subsequent `start()`
         // (or a Python `Receiver.address` getter) sees `None` until
         // we re-bind. This prevents stale addresses from leaking
         // across stop/start cycles.
         *self.local_http_addr.lock().unwrap() = None;
-        *self.local_quic_addr.lock().unwrap() = None;
+        #[cfg(feature = "quic")]
+        {
+            *self.local_quic_addr.lock().unwrap() = None;
+        }
         tracing::info!("File receiver stopped");
         Ok(())
     }
@@ -774,8 +807,9 @@ async fn start_https_server(
     // axum-server 的 RustlsConfig 内部会构造 rustls::ServerConfig；rustls 0.23
     // 要求显式安装 crypto provider — 我们复用 QUIC 端的 ring provider 安装器，
     // 并使用 axum-server 的 `tls-rustls-no-provider` feature 以避免引入额外的
-    // aws-lc-rs provider 副本。
-    crate::protocols::quic::ensure_crypto_provider_installed();
+    // aws-lc-rs provider 副本。Use the shared installer in `core::tls`
+    // so HTTPS works even when the `quic` Cargo feature is disabled.
+    crate::core::tls::ensure_rustls_provider_installed();
 
     let tls_config = RustlsConfig::from_pem(cert_pem, key_pem)
         .await
@@ -1777,6 +1811,7 @@ async fn handle_ws_client(
 /// [`FileReceiver::start`] so the caller can record the OS-assigned
 /// UDP port via `endpoint.local_addr()` before this function takes
 /// ownership of the endpoint.
+#[cfg(feature = "quic")]
 async fn run_quic_server(
     endpoint: quinn::Endpoint,
     config: ServerConfig,
@@ -1829,13 +1864,14 @@ async fn run_quic_server(
     Ok(())
 }
 
+#[cfg(feature = "quic")]
 fn configure_quic_server(tls: Option<&TlsConfig>) -> Result<quinn::ServerConfig> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use rustls::ServerConfig as TlsServerConfig;
 
     // rustls 0.23 requires a crypto provider to be registered before any
-    // config is built. We reuse the installer from the client side.
-    crate::protocols::quic::ensure_crypto_provider_installed();
+    // config is built. We reuse the shared installer in `core::tls`.
+    crate::core::tls::ensure_rustls_provider_installed();
 
     let (certs, key): (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) =
         if let Some(tls_cfg) = tls {
@@ -1880,6 +1916,7 @@ fn configure_quic_server(tls: Option<&TlsConfig>) -> Result<quinn::ServerConfig>
 /// helpers cover the same PKCS#8 / PKCS#1 / SEC1 fallback chain we used
 /// before — `PrivateKeyDer::from_pem_file` tries all three formats and
 /// returns the first match.
+#[cfg(feature = "quic")]
 fn load_tls_from_pem(
     cert_path: &PathBuf,
     key_path: &PathBuf,
@@ -1919,6 +1956,7 @@ fn load_tls_from_pem(
     Ok((certs, key))
 }
 
+#[cfg(feature = "quic")]
 async fn handle_quic_connection(
     connection: quinn::Connection,
     receive_dir: PathBuf,
@@ -2048,6 +2086,7 @@ async fn handle_quic_connection(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "quic")]
 async fn handle_quic_file_upload(
     recv: &mut quinn::RecvStream,
     filename: &str,
@@ -2235,6 +2274,7 @@ fn get_unique_file_path(receive_dir: &Path, safe_name: &str, allow_overwrite: bo
 }
 
 /// 获取本机主机名用于 mDNS 实例名，失败时回退到 "aerosync"
+#[cfg(feature = "mdns")]
 fn hostname_for_mdns() -> String {
     hostname::get()
         .ok()

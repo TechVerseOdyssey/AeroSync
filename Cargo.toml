@@ -36,6 +36,64 @@ path = "src/lib.rs"
 [[bin]]
 name = "aerosync"
 path = "src/main.rs"
+# Binary requires the full default feature set so the CLI keeps full
+# functionality: HTTP + QUIC transports, S3/FTP routing in
+# AutoAdapter, mDNS LAN discovery, and the receipt-registry helpers
+# wired through to the MCP layer. Library-only consumers can still
+# build smaller variants via `--no-default-features --features http,quic`.
+required-features = ["http", "quic", "mdns", "mcp-helpers"]
+
+[features]
+# Default keeps every protocol and helper enabled so the published
+# `aerosync` CLI / MCP binary works exactly as before. Embedders who
+# want a lean library can opt out via `--no-default-features`.
+default = ["http", "quic", "s3", "ftp", "mdns", "mcp-helpers"]
+
+# HTTP transport (axum + reqwest stack). Currently always-on at the
+# crate level — listed as a feature so future users can write their
+# own conditional code against it and so we have a stable name to
+# pair with the others. Adds no extra deps because axum/reqwest are
+# also pulled in by the HTTPS path.
+http = []
+
+# QUIC transport (quinn 0.11 + the receipt frame protocol in
+# `protocols::quic_receipt`). Pulls in `quinn` and gates the QUIC
+# server in `core::server::start()` plus the QUIC routing branch in
+# `protocols::adapter::AutoAdapter`. HTTPS still works without this
+# feature; we share the rustls crypto provider through `core::tls`.
+quic = ["dep:quinn"]
+
+# AWS S3 / MinIO destination support in `protocols::s3` +
+# AutoAdapter::with_s3 routing. No additional dependencies —
+# `S3Transfer` is implemented directly on top of `reqwest` + `hmac`
+# + `sha2`, all of which are already required by the HTTP transport.
+# Disabling this feature drops the module body and the `s3://` URL
+# branch in `AutoAdapter`.
+s3 = []
+
+# FTP / FTPS destination support in `protocols::ftp` +
+# AutoAdapter::with_ftp routing. Pulls in `suppaftp` and its tokio
+# adapter; the heaviest of the optional protocol deps for embedders
+# that don't need FTP.
+ftp = ["dep:suppaftp"]
+
+# LAN service discovery via mDNS (`mdns-sd`). Gates the
+# `core::discovery::AeroSyncMdns` module, the mDNS broadcast call in
+# `FileReceiver::start()`, and the mDNS-related re-exports.
+mdns = ["dep:mdns-sd"]
+
+# Receipt-registry helpers consumed by `aerosync-mcp` and the
+# Python `Receiver` SDK to surface RFC-002 receipts over the MCP
+# control surface. No extra deps — purely a hook for downstream
+# crates to gate their own optional code paths.
+mcp-helpers = []
+
+# v0.3.0 placeholders (see `docs/rfcs/RFC-004-wan-rendezvous.md`).
+# These compile to empty modules today (just `pub mod rendezvous {}`
+# / `pub mod relay {}`) so downstream Cargo.toml files can begin
+# referencing the future feature names without a breaking rename.
+wan-rendezvous = []
+wan-relay = []
 
 [dependencies]
 # CLI-only deps
@@ -66,7 +124,10 @@ sha2 = "0.10"
 hex = "0.4"
 async-trait = "0.1"
 dirs-next = "2"
-mdns-sd = "0.10"
+# Optional — gated by the `mdns` feature. Drops the LAN discovery
+# stack (and its UDP socket scaffolding) for embedders who don't
+# need it.
+mdns-sd = { version = "0.10", optional = true }
 hostname = "0.3"
 tokio-tungstenite = "0.20"
 
@@ -76,11 +137,18 @@ tokio-util = { version = "0.7", features = ["io"] }
 hmac = "0.12"
 urlencoding = "2.1"
 url = "2"
-suppaftp = { version = "8.0.2", features = ["tokio"] }
+# Optional — gated by the `ftp` feature. Heaviest of the per-
+# protocol opt-in deps; dropping it gives the largest binary-size
+# delta in measured release builds.
+suppaftp = { version = "8.0.2", features = ["tokio"], optional = true }
 
 # Workspace-managed common deps
 tokio = { workspace = true }
-quinn = { workspace = true }
+# Optional — gated by the `quic` feature. The HTTPS path still works
+# without QUIC because the rustls crypto provider is now installed
+# via `core::tls::ensure_rustls_provider_installed`, not via a quic
+# module helper.
+quinn = { workspace = true, optional = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

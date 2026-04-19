@@ -633,7 +633,7 @@ mod codec_tests {
 mod integration_tests {
     use super::*;
     use crate::core::receipt::{Receiver as RxSide, Sender as TxSide, State};
-    use crate::protocols::quic::ensure_crypto_provider_installed;
+    use crate::core::tls::ensure_rustls_provider_installed as ensure_crypto_provider_installed;
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;

@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod auth;
 pub mod capabilities;
+#[cfg(feature = "mdns")]
 pub mod discovery;
 pub mod error;
 pub mod error_advice;
@@ -18,6 +19,7 @@ pub mod resume;
 pub mod routing;
 pub mod server;
 pub mod sniff;
+pub(crate) mod tls;
 pub mod transfer;
 
 pub use audit::{
@@ -28,6 +30,7 @@ pub use capabilities::{
     Capabilities, Flag as CapabilityFlag, BYTES_RECEIVED_CHUNK_THRESHOLD, SUPPORTS_BYTES_RECEIVED,
     SUPPORTS_RECEIPTS,
 };
+#[cfg(feature = "mdns")]
 pub use discovery::{AeroSyncMdns, AeroSyncPeer, MdnsHandle, MDNS_SERVICE_TYPE};
 pub use error::{AeroSyncError, Result};
 pub use file_manager::{FileInfo, FileManager};

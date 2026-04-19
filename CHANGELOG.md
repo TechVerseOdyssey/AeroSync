@@ -18,6 +18,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stop()`. Lets callers who pass `http_port = 0` (or
   `listen="127.0.0.1:0"` from Python) discover the real port instead
   of grepping tracing output. (P0.3)
+- **Per-protocol Cargo features** on the `aerosync` crate — embedders
+  can now opt out of the heavy protocol stacks they don't need:
+  - `http` *(default)* — HTTP transport
+  - `quic` *(default)* — QUIC transport (`quinn` + receipt frames)
+  - `s3`   *(default)* — S3 / MinIO destination support
+  - `ftp`  *(default)* — FTP / FTPS destination support (`suppaftp`)
+  - `mdns` *(default)* — LAN service discovery (`mdns-sd`)
+  - `mcp-helpers` *(default)* — receipt-registry hooks for
+    `aerosync-mcp` and the Python SDK
+  - `wan-rendezvous`, `wan-relay` — placeholder feature names so
+    downstream `Cargo.toml` files can begin referencing the v0.3.0
+    WAN surface (see `docs/rfcs/RFC-004-wan-rendezvous.md`); compile
+    to empty modules today.
+
+  The default feature set preserves full functionality for the
+  shipped `aerosync` CLI and the `aerosync-mcp` server. The
+  `aerosync` binary declares
+  `required-features = ["http", "quic", "mdns", "mcp-helpers"]`,
+  so library-only embedders can build with
+  `cargo build -p aerosync --no-default-features --features http,quic`
+  without dragging in the binary or its mDNS / MCP scaffolding.
+  (P2.2; future v0.3.0 RFC-004)
 
 ### Changed
 
@@ -27,6 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Unblocks the README quickstart pattern where a sender needs to
   discover the receiver's port after binding to `127.0.0.1:0`.
   (P0.3, RFC-001 §5.3 follow-up)
+- **Rustls crypto provider installer** moved from
+  `protocols::quic::ensure_crypto_provider_installed` to a new
+  `core::tls::ensure_rustls_provider_installed` so the HTTPS
+  receiver keeps working when the `quic` feature is disabled.
+  Both call sites in `core::server` and the QUIC integration tests
+  in `protocols::quic_receipt` were updated. No behaviour change
+  for default builds. (P2.2)
 
 
 ## [v0.2.0] - 2026-04-18
