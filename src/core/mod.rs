@@ -22,7 +22,14 @@ pub mod error_advice;
 pub mod file_manager;
 pub mod history;
 pub mod incoming_file;
-pub mod metadata;
+// `metadata` migrated to `aerosync-domain` in v0.3.0 Phase 1e. The
+// `pub use` re-export keeps `crate::core::metadata::*` and
+// `aerosync::core::metadata::*` resolving for every existing caller
+// (transfer.rs, server.rs, history.rs, mcp/server.rs, py bindings)
+// without forcing import-site updates. The downstream
+// `pub use metadata::{...}` line below still works because
+// `metadata` is now in scope as an alias.
+pub use aerosync_domain::metadata;
 pub mod metrics;
 pub mod preflight;
 pub mod progress;

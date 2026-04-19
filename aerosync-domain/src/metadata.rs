@@ -112,7 +112,10 @@ pub enum MetadataError {
 /// [`Metadata`] is sealed onto `TransferStart`.
 ///
 /// ```no_run
-/// use aerosync::core::metadata::MetadataBuilder;
+/// // v0.3.0+ canonical import path. The legacy
+/// // `aerosync::core::metadata::MetadataBuilder` path also resolves
+/// // via the root crate's `pub use aerosync_domain::metadata` re-export.
+/// use aerosync_domain::metadata::MetadataBuilder;
 /// use aerosync_proto::Lifecycle;
 ///
 /// let meta = MetadataBuilder::new()

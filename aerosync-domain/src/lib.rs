@@ -55,7 +55,12 @@
 
 pub mod error;
 
-// pub mod metadata;  // Phase 1e (next commit)
+// `metadata` migrated verbatim from `src/core/metadata.rs` in
+// Phase 1e. Original file did not enforce `missing_docs`; rustdoc
+// completeness deferred to Phase 4 per refactor plan §3 Phase 4.
+#[allow(missing_docs)]
+pub mod metadata;
+
 // pub mod receipt;   // Phase 1f
 
 // ── Crate-root re-exports ─────────────────────────────────────────────

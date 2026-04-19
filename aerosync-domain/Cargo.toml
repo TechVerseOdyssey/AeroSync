@@ -57,5 +57,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # performance on the hot resume / history paths.
 async-trait = "0.1"
 
+# Logging — `metadata::sealed` emits `tracing::warn!` on validation
+# soft-failures (oversize user_metadata, unknown lifecycle string).
+# Same workspace pin as the root crate so log filter syntax stays
+# uniform.
+tracing = { workspace = true }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
