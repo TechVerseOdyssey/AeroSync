@@ -106,8 +106,7 @@ async fn ensure_started(
 ) -> PyResult<()> {
     cell.get_or_try_init::<PyErr, _, _>(|| async {
         let adapter = build_default_adapter(&engine);
-        let dyn_adapter: Arc<dyn aerosync::core::transfer::ProtocolAdapter> =
-            adapter.clone();
+        let dyn_adapter: Arc<dyn aerosync::core::transfer::ProtocolAdapter> = adapter.clone();
         engine.start(dyn_adapter).await.map_err(engine_err_to_py)?;
         Ok(adapter)
     })

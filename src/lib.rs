@@ -17,13 +17,13 @@ pub mod wan;
 
 // Convenience re-exports for the most common types so callers can write
 // `use aerosync::TransferEngine` without remembering the sub-module path.
+#[cfg(feature = "mdns")]
+pub use crate::core::AeroSyncMdns;
 pub use crate::core::{
     AeroSyncError, AuditLogger, AuthConfig, AuthManager, FileManager, FileReceiver, HistoryStore,
     ProgressMonitor, Result, ResumeStore, ServerConfig, TlsConfig, TransferConfig, TransferEngine,
     TransferTask,
 };
-#[cfg(feature = "mdns")]
-pub use crate::core::AeroSyncMdns;
 pub use crate::protocols::{AutoAdapter, HttpConfig, HttpTransfer};
 #[cfg(feature = "quic")]
 pub use crate::protocols::{QuicConfig, QuicTransfer};

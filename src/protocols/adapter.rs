@@ -98,10 +98,7 @@ impl AutoAdapter {
     /// [`AutoAdapter::engine_receipt_inbox`] for the full contract.
     /// This is the canonical hook the Python `Client.__aenter__` uses
     /// to wire receiver→sender ack propagation on the HTTP transport.
-    pub fn with_engine_receipt_inbox(
-        mut self,
-        tx: mpsc::UnboundedSender<HttpReceiptAck>,
-    ) -> Self {
+    pub fn with_engine_receipt_inbox(mut self, tx: mpsc::UnboundedSender<HttpReceiptAck>) -> Self {
         self.engine_receipt_inbox = Some(tx);
         self
     }
@@ -126,10 +123,7 @@ impl AutoAdapter {
                 )
             }
         } else {
-            HttpTransfer::new_with_client(
-                Arc::clone(&self.shared_client),
-                self.http_config.clone(),
-            )
+            HttpTransfer::new_with_client(Arc::clone(&self.shared_client), self.http_config.clone())
         };
         if let Some(inbox) = &self.engine_receipt_inbox {
             ht = ht.with_receipt_sink(inbox.clone());

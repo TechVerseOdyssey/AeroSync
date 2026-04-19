@@ -552,9 +552,7 @@ impl PyIncomingFile {
 /// `ProtocolAdapter` in v0.2 — see `test_killer_demo.py` skip).
 #[pyfunction]
 #[pyo3(signature = (metadata=None))]
-pub fn _test_encode_metadata_header(
-    metadata: Option<HashMap<String, String>>,
-) -> PyResult<String> {
+pub fn _test_encode_metadata_header(metadata: Option<HashMap<String, String>>) -> PyResult<String> {
     use crate::client::build_metadata;
     use prost::Message as _;
     let m = match metadata {

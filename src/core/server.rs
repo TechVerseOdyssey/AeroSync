@@ -107,7 +107,11 @@ pub struct ReceivedFile {
     /// omitted the header. Skipped on serde when absent so existing
     /// JSONL records and HTTP `/files` listings stay byte-compatible
     /// with v0.2.0 clients.
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "metadata_serde")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "metadata_serde"
+    )]
     pub metadata: Option<aerosync_proto::Metadata>,
 }
 
@@ -341,18 +345,19 @@ impl FileReceiver {
             // `local_addr()` when the user passed `http_port = 0`.
             // The pre-bound listener is then moved into the spawned
             // task, which only runs the axum service loop.
-            let http_addr: SocketAddr =
-                format!("{}:{}", config.bind_address, config.http_port)
-                    .parse()
-                    .map_err(|e| {
-                        AeroSyncError::InvalidConfig(format!("Invalid HTTP address: {}", e))
-                    })?;
-            let listener = tokio::net::TcpListener::bind(http_addr).await.map_err(|e| {
-                AeroSyncError::Network(format!("Failed to bind HTTP {}: {}", http_addr, e))
-            })?;
-            let bound = listener.local_addr().map_err(|e| {
-                AeroSyncError::Network(format!("HTTP local_addr() failed: {}", e))
-            })?;
+            let http_addr: SocketAddr = format!("{}:{}", config.bind_address, config.http_port)
+                .parse()
+                .map_err(|e| {
+                    AeroSyncError::InvalidConfig(format!("Invalid HTTP address: {}", e))
+                })?;
+            let listener = tokio::net::TcpListener::bind(http_addr)
+                .await
+                .map_err(|e| {
+                    AeroSyncError::Network(format!("Failed to bind HTTP {}: {}", http_addr, e))
+                })?;
+            let bound = listener
+                .local_addr()
+                .map_err(|e| AeroSyncError::Network(format!("HTTP local_addr() failed: {}", e)))?;
             *self.local_http_addr.lock().unwrap() = Some(bound);
             tracing::info!("HTTP server bound on {} (advertised)", bound);
 
@@ -394,18 +399,17 @@ impl FileReceiver {
             // we can record `endpoint.local_addr()` before handing the
             // endpoint over to the per-connection accept loop.
             let server_config = configure_quic_server(config.tls.as_ref())?;
-            let quic_addr: SocketAddr =
-                format!("{}:{}", config.bind_address, config.quic_port)
-                    .parse()
-                    .map_err(|e| {
-                        AeroSyncError::InvalidConfig(format!("Invalid QUIC address: {}", e))
-                    })?;
+            let quic_addr: SocketAddr = format!("{}:{}", config.bind_address, config.quic_port)
+                .parse()
+                .map_err(|e| {
+                    AeroSyncError::InvalidConfig(format!("Invalid QUIC address: {}", e))
+                })?;
             let endpoint = quinn::Endpoint::server(server_config, quic_addr).map_err(|e| {
                 AeroSyncError::Network(format!("Failed to create QUIC endpoint: {}", e))
             })?;
-            let bound = endpoint.local_addr().map_err(|e| {
-                AeroSyncError::Network(format!("QUIC local_addr() failed: {}", e))
-            })?;
+            let bound = endpoint
+                .local_addr()
+                .map_err(|e| AeroSyncError::Network(format!("QUIC local_addr() failed: {}", e)))?;
             *self.local_quic_addr.lock().unwrap() = Some(bound);
             tracing::info!("QUIC server bound on {} (advertised)", bound);
 

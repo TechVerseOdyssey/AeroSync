@@ -172,9 +172,7 @@ pub fn decode_frame(mut buf: &[u8]) -> Result<ReceiptFrame, CodecError> {
 /// prefix). Used by both [`read_frame_from_stream`] (ReceiptFrame) and
 /// [`read_control_frame_from_stream`] (ControlFrame) so the varint
 /// decoder lives in one place.
-async fn read_length_delimited_body(
-    stream: &mut quinn::RecvStream,
-) -> Result<Vec<u8>, CodecError> {
+async fn read_length_delimited_body(stream: &mut quinn::RecvStream) -> Result<Vec<u8>, CodecError> {
     let mut len: u64 = 0;
     let mut shift: u32 = 0;
     let mut byte_buf = [0u8; 1];

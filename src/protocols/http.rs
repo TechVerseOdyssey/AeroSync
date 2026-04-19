@@ -1413,7 +1413,9 @@ mod tests {
         );
         let (tx, _rx) = mpsc::unbounded_channel();
         let base = format!("http://{}", addr);
-        let result = ht.upload_chunked(&file_path, &base, &mut state, None, tx).await;
+        let result = ht
+            .upload_chunked(&file_path, &base, &mut state, None, tx)
+            .await;
         assert!(result.is_ok(), "serial upload should succeed: {:?}", result);
         assert_eq!(chunk_count.load(std::sync::atomic::Ordering::Relaxed), 4);
     }
@@ -1449,7 +1451,9 @@ mod tests {
         );
         let (tx, _rx) = mpsc::unbounded_channel();
         let base = format!("http://{}", addr);
-        let result = ht.upload_chunked(&file_path, &base, &mut state, None, tx).await;
+        let result = ht
+            .upload_chunked(&file_path, &base, &mut state, None, tx)
+            .await;
         assert!(
             result.is_ok(),
             "concurrent upload should succeed: {:?}",
@@ -1492,7 +1496,9 @@ mod tests {
         }
         let (tx, _rx) = mpsc::unbounded_channel();
         let base = format!("http://{}", addr);
-        let result = ht.upload_chunked(&file_path, &base, &mut state, None, tx).await;
+        let result = ht
+            .upload_chunked(&file_path, &base, &mut state, None, tx)
+            .await;
         assert!(
             result.is_ok(),
             "resumed upload should succeed: {:?}",
@@ -1618,7 +1624,9 @@ mod tests {
         );
         let (tx, _rx) = mpsc::unbounded_channel();
         let base = format!("http://{}", addr);
-        let result = ht.upload_chunked(&file_path, &base, &mut state, None, tx).await;
+        let result = ht
+            .upload_chunked(&file_path, &base, &mut state, None, tx)
+            .await;
         // 503 被识别为网络错误 → 触发重连 → 第二次成功
         assert!(result.is_ok(), "reconnect should succeed: {:?}", result);
     }

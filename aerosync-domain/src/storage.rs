@@ -29,9 +29,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use aerosync_proto::{Lifecycle, Metadata};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::metadata::MetadataJson;
 use crate::Result;
 
 // ──────────────────────────── Resume value objects ─────────────────────────────
@@ -240,6 +242,320 @@ pub trait ResumeStorage: Send + Sync + 'static {
         source_path: &Path,
         destination: &str,
     ) -> Result<Option<ResumeState>>;
+}
+
+// ──────────────────────────── History value objects ───────────────────────────
+//
+// Source: lifted verbatim from `src/core/history.rs` (lines 28-253,
+// pre-v0.3.0). Method bodies, derives, doc strings, and field
+// visibilities are unchanged. The original module's leading rustdoc
+// header now lives on `aerosync-infra::history` (Phase 2.3) where
+// the JSONL persistence impl will move.
+
+/// String label of a receipt's terminal-or-pending state, persisted
+/// alongside the [`HistoryEntry`].
+///
+/// Matches the canonical wire spelling of the seven generic states
+/// in `aerosync::core::receipt::State` but flattens the terminal
+/// payloads (Acked / Nacked / Cancelled / Errored) since the
+/// reason / detail strings already live in dedicated columns.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReceiptStateLabel {
+    /// Receipt freshly created; nothing on the wire yet.
+    Initiated,
+    /// Receipt acked by the receiver application (terminal success).
+    Acked,
+    /// Receipt nacked by the receiver application (terminal failure).
+    Nacked,
+    /// Cancelled from either side (terminal failure).
+    Cancelled,
+    /// Transport / verification error (terminal failure).
+    Errored,
+    /// Receipt stream went silent before terminal (terminal failure).
+    StreamLost,
+}
+
+impl ReceiptStateLabel {
+    /// True when the label represents a terminal lifecycle state.
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, ReceiptStateLabel::Initiated)
+    }
+}
+
+/// 单条传输历史记录
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoryEntry {
+    pub id: Uuid,
+    pub filename: String,
+    /// 接收方保存路径（可选，发送方为 None）
+    pub saved_path: Option<PathBuf>,
+    pub size: u64,
+    pub sha256: Option<String>,
+    /// 对端 IP
+    pub remote_ip: Option<String>,
+    /// "http" / "quic" / "s3" / "ftp"
+    pub protocol: String,
+    /// "send" / "receive"
+    pub direction: String,
+    /// Unix 时间戳（秒）
+    pub completed_at: u64,
+    /// 传输耗时（毫秒）
+    pub duration_ms: u64,
+    /// 平均速度（bytes/s）
+    pub avg_speed_bps: u64,
+    /// 是否成功
+    pub success: bool,
+    /// 失败原因（success=false 时非空）
+    pub error: Option<String>,
+    /// RFC-002 §8.2: receipt id when the transfer carried a Receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<Uuid>,
+    /// RFC-002 §8.2: most-recently-observed receipt state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_state: Option<ReceiptStateLabel>,
+    /// Unix timestamp (seconds) when ack landed; `None` if not acked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acked_at: Option<u64>,
+    /// Reason string when `receipt_state == Nacked`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nack_reason: Option<String>,
+    /// Reason string when `receipt_state == Cancelled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
+    /// RFC-003 metadata envelope captured at send/receive time.
+    /// Stored as the JSON-shaped [`MetadataJson`] adapter so the
+    /// on-disk format is decoupled from the wire protobuf and remains
+    /// human-readable. Old JSONL records (pre-Week-4) round-trip
+    /// safely: the `serde(default)` makes the field implicit `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<MetadataJson>,
+}
+
+impl HistoryEntry {
+    /// 创建一条成功的传输记录
+    #[allow(clippy::too_many_arguments)]
+    pub fn success(
+        filename: impl Into<String>,
+        saved_path: Option<PathBuf>,
+        size: u64,
+        sha256: Option<String>,
+        remote_ip: Option<String>,
+        protocol: impl Into<String>,
+        direction: impl Into<String>,
+        duration_ms: u64,
+    ) -> Self {
+        let avg_speed_bps = size
+            .saturating_mul(1000)
+            .checked_div(duration_ms)
+            .unwrap_or(size);
+        Self {
+            id: Uuid::new_v4(),
+            filename: filename.into(),
+            saved_path,
+            size,
+            sha256,
+            remote_ip,
+            protocol: protocol.into(),
+            direction: direction.into(),
+            completed_at: now_secs(),
+            duration_ms,
+            avg_speed_bps,
+            success: true,
+            error: None,
+            receipt_id: None,
+            receipt_state: None,
+            acked_at: None,
+            nack_reason: None,
+            cancel_reason: None,
+            metadata: None,
+        }
+    }
+
+    /// 创建一条失败的传输记录
+    pub fn failure(
+        filename: impl Into<String>,
+        size: u64,
+        remote_ip: Option<String>,
+        protocol: impl Into<String>,
+        direction: impl Into<String>,
+        duration_ms: u64,
+        error: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            filename: filename.into(),
+            saved_path: None,
+            size,
+            sha256: None,
+            remote_ip,
+            protocol: protocol.into(),
+            direction: direction.into(),
+            completed_at: now_secs(),
+            duration_ms,
+            avg_speed_bps: 0,
+            success: false,
+            error: Some(error.into()),
+            receipt_id: None,
+            receipt_state: None,
+            acked_at: None,
+            nack_reason: None,
+            cancel_reason: None,
+            metadata: None,
+        }
+    }
+
+    /// Builder-style helper: attach a receipt id to a freshly built
+    /// entry. Used by the watch-bridge so the recovery iterator can
+    /// query by receipt later.
+    pub fn with_receipt_id(mut self, id: Uuid) -> Self {
+        self.receipt_id = Some(id);
+        self
+    }
+
+    /// Builder-style helper: attach the RFC-003 metadata envelope
+    /// (proto shape) to a freshly built entry. Internally projected
+    /// to [`MetadataJson`] for serde-friendly persistence.
+    pub fn with_metadata_proto(mut self, m: &Metadata) -> Self {
+        self.metadata = Some(MetadataJson::from_proto(m));
+        self
+    }
+
+    /// Builder-style helper: attach a [`MetadataJson`] directly. Used
+    /// by code paths that already hold the JSON shape (e.g. when
+    /// re-emitting a historical record).
+    pub fn with_metadata_json(mut self, m: MetadataJson) -> Self {
+        self.metadata = Some(m);
+        self
+    }
+}
+
+/// 传输历史查询过滤器
+///
+/// RFC-003 Group B extends this with metadata-aware filters
+/// (`metadata_eq`, `trace_id`, `lifecycle`, `since`, `until`). The
+/// query engine performs a **linear scan** over the JSONL file —
+/// `O(N)` on history size. This is acceptable up to the ~10K-record
+/// horizon at which RFC-003 §7 says we should migrate to SQLite. The
+/// SQLite migration is deferred to v0.2.1 by the w4-metadata plan;
+/// see `docs/protocol/metadata-v1.md` for the trade-off discussion.
+#[derive(Debug, Default, Clone)]
+pub struct HistoryQuery {
+    /// 过滤方向（"send" / "receive"），None = 全部
+    pub direction: Option<String>,
+    /// 过滤协议，None = 全部
+    pub protocol: Option<String>,
+    /// 只返回成功记录
+    pub success_only: bool,
+    /// 最多返回 N 条（0 = 不限）
+    pub limit: usize,
+    /// All `(k, v)` pairs in this map MUST be present in the entry's
+    /// `metadata.user_metadata` for the entry to match. Empty map ⇒
+    /// no constraint.
+    pub metadata_eq: HashMap<String, String>,
+    /// Match only entries whose `metadata.trace_id` equals this. None
+    /// ⇒ no constraint. An entry with no metadata never matches a
+    /// non-`None` value.
+    pub trace_id: Option<String>,
+    /// Match only entries whose `metadata.lifecycle` equals this.
+    pub lifecycle: Option<Lifecycle>,
+    /// Match only entries with `completed_at >= since` (inclusive).
+    /// Compared against the chrono UTC timestamp; the underlying
+    /// `completed_at` is a Unix-second `u64`.
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Match only entries with `completed_at <= until` (inclusive).
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Alias for [`HistoryQuery`] under the RFC-003 plan name. Both
+/// names reach the same type so callers can pick whichever reads
+/// better in context (`HistoryFilter` for metadata-driven searches,
+/// `HistoryQuery` for the legacy direction/protocol/success filters).
+pub type HistoryFilter = HistoryQuery;
+
+// ──────────────────────────── History storage trait ───────────────────────────
+
+/// Async storage abstraction for the transfer history log.
+///
+/// Concrete impls live in `aerosync-infra::history` (today: JSONL
+/// append at `~/.config/aerosync/history.jsonl`; future: SQLite at
+/// the ~10K-record horizon per RFC-003 §7). Consumers
+/// (`TransferEngine`, the `aerosync history` CLI, the receipts-HTTP
+/// recovery iterator) will take `Arc<dyn HistoryStorage>` so the
+/// backend is swappable per-deployment.
+///
+/// ## Implementor contract
+///
+/// - **`append()`** MUST be **append-only crash-safe**: serialize
+///   the entry to one JSON line, write+fsync atomically, never
+///   truncate or rewrite earlier records. Concurrent appends from
+///   multiple async tasks MUST serialize via the impl's internal
+///   lock — the existing `JsonlHistoryStore` uses
+///   `Arc<Mutex<tokio::fs::File>>` for this.
+/// - **`query()` / `read_all()` / `recent()`** MAY perform a linear
+///   scan (the legacy JSONL impl does); they MUST NOT mutate any
+///   on-disk state.
+/// - **`write_metadata()`** rewrites a single record in place by id.
+///   Crash-safety is best-effort (the legacy JSONL impl reads the
+///   whole file, mutates the matching record, writes to a tempfile,
+///   then renames). Returns `Ok(true)` on hit, `Ok(false)` on miss.
+/// - **`record_receipt_terminal()`** rewrites a single record in
+///   place by receipt id, identical safety to `write_metadata`.
+/// - **`iter_unfinished_receipts()`** returns every entry whose
+///   `receipt_state` is non-terminal — used by startup recovery to
+///   surface receipts that lost the wire mid-transfer.
+/// - All methods MUST be cancel-safe.
+///
+/// ## Why the read methods are on the trait
+///
+/// `query` / `recent` / `query_by_receipt` are needed by the CLI
+/// (`aerosync history`) and the MCP `list_history` tool. Putting
+/// them on the trait lets a future SQLite impl push the `WHERE`
+/// clause into SQL instead of streaming every record into memory —
+/// the existing JSONL `query()` is `O(N)` but the trait surface
+/// permits an `O(log N)` upgrade later without API churn.
+#[async_trait::async_trait]
+pub trait HistoryStorage: Send + Sync + 'static {
+    /// Append a fully-formed history entry. The receipt-state /
+    /// metadata fields on `entry` are persisted as-is.
+    async fn append(&self, entry: HistoryEntry) -> Result<()>;
+
+    /// Run a filter query, returning matching entries newest-first
+    /// up to `q.limit` (0 = no cap).
+    async fn query(&self, q: &HistoryQuery) -> Result<Vec<HistoryEntry>>;
+
+    /// Convenience: return the most recent `limit` entries
+    /// regardless of filter.
+    async fn recent(&self, limit: usize) -> Result<Vec<HistoryEntry>>;
+
+    /// Mutate the metadata field of the entry whose `id == record_id`.
+    /// Returns `Ok(true)` on hit, `Ok(false)` if no such entry
+    /// exists. Used by the metadata write-back path so the on-disk
+    /// JSONL record reflects the final sealed envelope.
+    async fn write_metadata(&self, record_id: Uuid, metadata: &Metadata) -> Result<bool>;
+
+    /// Mutate the receipt-state fields (`receipt_state`, `acked_at`,
+    /// `nack_reason`, `cancel_reason`) of the entry whose
+    /// `receipt_id == receipt`. Returns `Ok(true)` on hit, `Ok(false)`
+    /// on miss. Called from the watch-bridge whenever a receipt
+    /// transitions to a terminal state.
+    async fn record_receipt_terminal(
+        &self,
+        receipt: Uuid,
+        state: ReceiptStateLabel,
+        acked_at: Option<u64>,
+        nack_reason: Option<String>,
+        cancel_reason: Option<String>,
+    ) -> Result<bool>;
+
+    /// Return every entry whose `receipt_state` is non-terminal —
+    /// startup recovery uses this to detect receipts that were lost
+    /// mid-transfer (process crash, network drop, etc.).
+    async fn iter_unfinished_receipts(&self) -> Result<Vec<HistoryEntry>>;
+
+    /// Look up a single entry by receipt id. `None` when no entry
+    /// has the matching `receipt_id`.
+    async fn query_by_receipt(&self, receipt_id: Uuid) -> Result<Option<HistoryEntry>>;
 }
 
 // ──────────────────────────── Tests ────────────────────────────────────────────

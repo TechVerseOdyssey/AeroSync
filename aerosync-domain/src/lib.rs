@@ -67,10 +67,16 @@ pub mod metadata;
 
 // ── Phase 2 modules ───────────────────────────────────────────────────
 
-/// Storage abstractions ([`ResumeStorage`], plus [`HistoryStorage`]
-/// added in a follow-up sub-commit) and the pure-data value objects
-/// they transit. See `storage.rs` for the rationale of splitting
-/// data ↔ trait ↔ impl across three crates.
+/// Storage abstractions ([`ResumeStorage`], [`HistoryStorage`]) and
+/// the pure-data value objects they transit. See `storage.rs` for the
+/// rationale of splitting data ↔ trait ↔ impl across three crates.
+///
+/// `missing_docs` is locally suppressed: a few field doc comments
+/// were never written for the original `HistoryEntry` (id, filename,
+/// size, sha256) in `src/core/history.rs`, and Phase 2.1b is a pure
+/// rename — adding fresh docs now would conflate moves with content
+/// changes. Phase 4 (documentation closure) retires this attribute.
+#[allow(missing_docs)]
 pub mod storage;
 
 // ── Crate-root re-exports ─────────────────────────────────────────────

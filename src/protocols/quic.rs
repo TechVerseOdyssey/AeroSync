@@ -423,8 +423,8 @@ impl QuicTransfer {
         // working. We bound the wait so a misbehaving receiver cannot
         // wedge us.
         let mut reply = vec![0u8; 256];
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), recv.read(&mut reply))
-            .await;
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(10), recv.read(&mut reply)).await;
 
         // ── 3. Allow the drainer a brief window to surface the
         //       receiver's `Received` / `Acked` frames before we tear

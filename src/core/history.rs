@@ -1,256 +1,48 @@
-/// 传输历史持久化模块
-///
-/// 每条记录追加到 `~/.config/aerosync/history.jsonl`（JSONL 格式），
-/// 提供按方向、协议、时间范围过滤的查询接口。
-///
-/// # RFC-002 §8.2 receipt-state extension
-///
-/// History records gain optional `receipt_id`, `receipt_state`,
-/// `acked_at`, `nack_reason`, `cancel_reason` fields populated when
-/// the transfer carried a [`Receipt`](crate::core::receipt::Receipt).
-/// The store tracks terminal state per receipt via the
-/// [`HistoryStore::record_receipt_terminal`] hook and exposes a
-/// recovery iterator [`HistoryStore::iter_unfinished_receipts`] for
-/// startup observability. RFC-002 §11 ResumeStore-side persistence
-/// is explicitly OUT OF SCOPE for v0.2.0 (deferred to v0.2.1) — this
-/// module persists *history*, not resumable state.
+//! 传输历史持久化模块
+//!
+//! 每条记录追加到 `~/.config/aerosync/history.jsonl`（JSONL 格式），
+//! 提供按方向、协议、时间范围过滤的查询接口。
+//!
+//! # RFC-002 §8.2 receipt-state extension
+//!
+//! History records gain optional `receipt_id`, `receipt_state`,
+//! `acked_at`, `nack_reason`, `cancel_reason` fields populated when
+//! the transfer carried a [`Receipt`](crate::core::receipt::Receipt).
+//! The store tracks terminal state per receipt via the
+//! [`HistoryStore::record_receipt_terminal`] hook and exposes a
+//! recovery iterator [`HistoryStore::iter_unfinished_receipts`] for
+//! startup observability.
+//!
+//! ## v0.3.0 Phase 2.1b migration
+//!
+//! The pure-data types ([`ReceiptStateLabel`], [`HistoryEntry`],
+//! [`HistoryQuery`], [`HistoryFilter`]) moved to
+//! [`aerosync_domain::storage`] so the new
+//! [`aerosync_domain::storage::HistoryStorage`] async trait can
+//! reference them. This module re-exports them under their original
+//! paths so every existing caller (`aerosync::core::history::*`,
+//! `aerosync::core::*`) keeps resolving without source changes.
+//!
+//! The [`HistoryStore`] file-backed JSONL impl below stays here for
+//! now — Phase 2.3 will move it to `aerosync-infra::history` and
+//! have it `impl aerosync_domain::storage::HistoryStorage`.
+
+pub use aerosync_domain::storage::{HistoryEntry, HistoryFilter, HistoryQuery, ReceiptStateLabel};
+
 use crate::core::metadata::MetadataJson;
 use crate::{AeroSyncError, Result};
 use aerosync_proto::{Lifecycle, Metadata};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-/// String label of a receipt's terminal-or-pending state, persisted
-/// alongside the [`HistoryEntry`].
-///
-/// Matches the canonical wire spelling of the seven generic states
-/// in [`crate::core::receipt::State`] but flattens the terminal
-/// payloads (Acked / Nacked / Cancelled / Errored) since the
-/// reason / detail strings already live in dedicated columns.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ReceiptStateLabel {
-    /// Receipt freshly created; nothing on the wire yet.
-    Initiated,
-    /// Receipt acked by the receiver application (terminal success).
-    Acked,
-    /// Receipt nacked by the receiver application (terminal failure).
-    Nacked,
-    /// Cancelled from either side (terminal failure).
-    Cancelled,
-    /// Transport / verification error (terminal failure).
-    Errored,
-    /// Receipt stream went silent before terminal (terminal failure).
-    StreamLost,
-}
-
-impl ReceiptStateLabel {
-    /// True when the label represents a terminal lifecycle state.
-    pub fn is_terminal(self) -> bool {
-        !matches!(self, ReceiptStateLabel::Initiated)
-    }
-}
-
-/// 单条传输历史记录
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HistoryEntry {
-    pub id: Uuid,
-    pub filename: String,
-    /// 接收方保存路径（可选，发送方为 None）
-    pub saved_path: Option<PathBuf>,
-    pub size: u64,
-    pub sha256: Option<String>,
-    /// 对端 IP
-    pub remote_ip: Option<String>,
-    /// "http" / "quic" / "s3" / "ftp"
-    pub protocol: String,
-    /// "send" / "receive"
-    pub direction: String,
-    /// Unix 时间戳（秒）
-    pub completed_at: u64,
-    /// 传输耗时（毫秒）
-    pub duration_ms: u64,
-    /// 平均速度（bytes/s）
-    pub avg_speed_bps: u64,
-    /// 是否成功
-    pub success: bool,
-    /// 失败原因（success=false 时非空）
-    pub error: Option<String>,
-    /// RFC-002 §8.2: receipt id when the transfer carried a Receipt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub receipt_id: Option<Uuid>,
-    /// RFC-002 §8.2: most-recently-observed receipt state.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub receipt_state: Option<ReceiptStateLabel>,
-    /// Unix timestamp (seconds) when ack landed; `None` if not acked.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acked_at: Option<u64>,
-    /// Reason string when `receipt_state == Nacked`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nack_reason: Option<String>,
-    /// Reason string when `receipt_state == Cancelled`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cancel_reason: Option<String>,
-    /// RFC-003 metadata envelope captured at send/receive time.
-    /// Stored as the JSON-shaped [`MetadataJson`] adapter so the
-    /// on-disk format is decoupled from the wire protobuf and remains
-    /// human-readable. Old JSONL records (pre-Week-4) round-trip
-    /// safely: the `serde(default)` makes the field implicit `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<MetadataJson>,
-}
-
-impl HistoryEntry {
-    /// 创建一条成功的传输记录
-    #[allow(clippy::too_many_arguments)]
-    pub fn success(
-        filename: impl Into<String>,
-        saved_path: Option<PathBuf>,
-        size: u64,
-        sha256: Option<String>,
-        remote_ip: Option<String>,
-        protocol: impl Into<String>,
-        direction: impl Into<String>,
-        duration_ms: u64,
-    ) -> Self {
-        let avg_speed_bps = size
-            .saturating_mul(1000)
-            .checked_div(duration_ms)
-            .unwrap_or(size);
-        Self {
-            id: Uuid::new_v4(),
-            filename: filename.into(),
-            saved_path,
-            size,
-            sha256,
-            remote_ip,
-            protocol: protocol.into(),
-            direction: direction.into(),
-            completed_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            duration_ms,
-            avg_speed_bps,
-            success: true,
-            error: None,
-            receipt_id: None,
-            receipt_state: None,
-            acked_at: None,
-            nack_reason: None,
-            cancel_reason: None,
-            metadata: None,
-        }
-    }
-
-    /// 创建一条失败的传输记录
-    pub fn failure(
-        filename: impl Into<String>,
-        size: u64,
-        remote_ip: Option<String>,
-        protocol: impl Into<String>,
-        direction: impl Into<String>,
-        duration_ms: u64,
-        error: impl Into<String>,
-    ) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            filename: filename.into(),
-            saved_path: None,
-            size,
-            sha256: None,
-            remote_ip,
-            protocol: protocol.into(),
-            direction: direction.into(),
-            completed_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            duration_ms,
-            avg_speed_bps: 0,
-            success: false,
-            error: Some(error.into()),
-            receipt_id: None,
-            receipt_state: None,
-            acked_at: None,
-            nack_reason: None,
-            cancel_reason: None,
-            metadata: None,
-        }
-    }
-
-    /// Builder-style helper: attach a receipt id to a freshly built
-    /// entry. Used by the watch-bridge so the recovery iterator can
-    /// query by receipt later.
-    pub fn with_receipt_id(mut self, id: Uuid) -> Self {
-        self.receipt_id = Some(id);
-        self
-    }
-
-    /// Builder-style helper: attach the RFC-003 metadata envelope
-    /// (proto shape) to a freshly built entry. Internally projected
-    /// to [`MetadataJson`] for serde-friendly persistence.
-    pub fn with_metadata_proto(mut self, m: &Metadata) -> Self {
-        self.metadata = Some(MetadataJson::from_proto(m));
-        self
-    }
-
-    /// Builder-style helper: attach a [`MetadataJson`] directly. Used
-    /// by code paths that already hold the JSON shape (e.g. when
-    /// re-emitting a historical record).
-    pub fn with_metadata_json(mut self, m: MetadataJson) -> Self {
-        self.metadata = Some(m);
-        self
-    }
-}
-
-/// 传输历史查询过滤器
-///
-/// RFC-003 Group B extends this with metadata-aware filters
-/// (`metadata_eq`, `trace_id`, `lifecycle`, `since`, `until`). The
-/// query engine performs a **linear scan** over the JSONL file —
-/// `O(N)` on history size. This is acceptable up to the ~10K-record
-/// horizon at which RFC-003 §7 says we should migrate to SQLite. The
-/// SQLite migration is deferred to v0.2.1 by the w4-metadata plan;
-/// see `docs/protocol/metadata-v1.md` for the trade-off discussion.
-#[derive(Debug, Default, Clone)]
-pub struct HistoryQuery {
-    /// 过滤方向（"send" / "receive"），None = 全部
-    pub direction: Option<String>,
-    /// 过滤协议，None = 全部
-    pub protocol: Option<String>,
-    /// 只返回成功记录
-    pub success_only: bool,
-    /// 最多返回 N 条（0 = 不限）
-    pub limit: usize,
-    /// All `(k, v)` pairs in this map MUST be present in the entry's
-    /// `metadata.user_metadata` for the entry to match. Empty map ⇒
-    /// no constraint.
-    pub metadata_eq: HashMap<String, String>,
-    /// Match only entries whose `metadata.trace_id` equals this. None
-    /// ⇒ no constraint. An entry with no metadata never matches a
-    /// non-`None` value.
-    pub trace_id: Option<String>,
-    /// Match only entries whose `metadata.lifecycle` equals this.
-    pub lifecycle: Option<Lifecycle>,
-    /// Match only entries with `completed_at >= since` (inclusive).
-    /// Compared against the chrono UTC timestamp; the underlying
-    /// `completed_at` is a Unix-second `u64`.
-    pub since: Option<chrono::DateTime<chrono::Utc>>,
-    /// Match only entries with `completed_at <= until` (inclusive).
-    pub until: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// Alias for [`HistoryQuery`] under the RFC-003 plan name. Both
-/// names reach the same type so callers can pick whichever reads
-/// better in context (`HistoryFilter` for metadata-driven searches,
-/// `HistoryQuery` for the legacy direction/protocol/success filters).
-pub type HistoryFilter = HistoryQuery;
+// Test-only: HashMap is used by metadata-filter unit tests below.
+// (After Phase 2.1b moved the HistoryQuery struct out of this file,
+// HashMap is no longer needed in lib code.)
+#[cfg(test)]
+use std::collections::HashMap;
 
 /// JSONL 格式传输历史存储
 pub struct HistoryStore {

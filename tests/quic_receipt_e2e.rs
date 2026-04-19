@@ -91,8 +91,11 @@ async fn quic_sender_observes_receipt_frames_after_upload() {
     let body = b"hello QUIC receipt stream\n";
     tokio::fs::write(&payload, body).await.unwrap();
 
-    let mut task =
-        TransferTask::new_upload(payload.clone(), format!("quic://{}", addr), body.len() as u64);
+    let mut task = TransferTask::new_upload(
+        payload.clone(),
+        format!("quic://{}", addr),
+        body.len() as u64,
+    );
     task.metadata = Some(aerosync_proto::Metadata {
         trace_id: Some("rcpt-1".into()),
         ..Default::default()

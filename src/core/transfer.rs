@@ -7,10 +7,10 @@ use crate::core::metadata::{
 use crate::core::progress::TransferStatus;
 use crate::core::receipt::{Event, Receipt, Sender, State};
 use crate::core::receipt_registry::ReceiptRegistry;
-use crate::protocols::http::{HttpReceiptAck, HttpReceiptDecision};
 use crate::core::resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
 use crate::core::sniff::{sniff_content_type, SNIFF_PEEK_BYTES};
 use crate::core::{AeroSyncError, ProgressMonitor, Result, TransferProgress};
+use crate::protocols::http::{HttpReceiptAck, HttpReceiptDecision};
 use aerosync_proto::Metadata;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -364,9 +364,8 @@ impl TransferEngine {
                 // wedged engine bridge can't leak the task.
                 let receipt_clone = Arc::clone(&receipt);
                 tokio::spawn(async move {
-                    let wait = receipt_clone.await_state(|s| {
-                        matches!(s, State::Processing) || s.is_terminal()
-                    });
+                    let wait = receipt_clone
+                        .await_state(|s| matches!(s, State::Processing) || s.is_terminal());
                     let waited = tokio::time::timeout(Duration::from_secs(30), wait).await;
                     if waited.is_err() {
                         tracing::debug!(

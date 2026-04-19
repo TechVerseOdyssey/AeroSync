@@ -117,8 +117,8 @@ allowed_ips = ["192.168.1.0/24", "10.0.0.0/8"]
     // 显式 map_err：v0.3.0 起 `aerosync-domain::AeroSyncError` 不再
     // 通过 `From<toml::de::Error>` 自动桥接（避免 domain crate 背
     // toml 依赖）。调用方在跨 toml 边界时显式转换即可。
-    let config = AuthConfig::from_toml(config_toml)
-        .map_err(|e| AeroSyncError::TomlParse(e.to_string()))?;
+    let config =
+        AuthConfig::from_toml(config_toml).map_err(|e| AeroSyncError::TomlParse(e.to_string()))?;
     println!("加载的配置:");
     println!("  启用认证: {}", config.enable_auth);
     println!("  Token 生命周期: {} 小时", config.token_lifetime_hours);

@@ -1306,8 +1306,7 @@ impl AeroSyncMcpServer {
         let one_shot = params.one_shot;
         let request_id = Uuid::new_v4();
         tokio::spawn(async move {
-            let deadline =
-                tokio::time::sleep(std::time::Duration::from_secs(idle_secs.max(1)));
+            let deadline = tokio::time::sleep(std::time::Duration::from_secs(idle_secs.max(1)));
             tokio::pin!(deadline);
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
             tick.tick().await; // skip the immediate first tick
@@ -2790,7 +2789,10 @@ mod tests {
         // Receiver is currently running.
         {
             let g = server.receiver.lock().await;
-            assert!(g.is_some(), "receiver must be running immediately after request_file");
+            assert!(
+                g.is_some(),
+                "receiver must be running immediately after request_file"
+            );
         }
 
         // Wait past the idle deadline + a generous polling slack.

@@ -36,9 +36,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 import aerosync
+import pytest
 
 
 def _aerosync_cli() -> Path | None:
