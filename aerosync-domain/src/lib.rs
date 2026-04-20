@@ -82,6 +82,23 @@ pub mod metadata;
 /// likewise documented.
 pub mod storage;
 
+// ── Phase 3 modules ───────────────────────────────────────────────────
+
+/// `TransferSession` aggregate-root companions:
+/// [`session::SessionId`] newtype, [`session::SessionKind`]
+/// (Send / Receive discriminator), [`session::SessionStatus`]
+/// lifecycle enum. The aggregate root itself (`TransferSession`)
+/// lands in Phase 3.3; the file-manifest / event-log helpers in
+/// 3.2 / 3.3. This module exists in v0.3.0 Phase 3.1 as the stable
+/// type-signature foundation that later phases (sender-path
+/// migration in 3.4, receiver-path migration in 3.5) can reference
+/// without churn. No re-export at the crate root yet — Phase 3.3
+/// will decide what to surface.
+pub mod session;
+
+// `manifest` (FileManifest, FileEntry, Hash, ChunkPlan) — DEFERRED
+// to Phase 3.2.
+
 // ── Crate-root re-exports ─────────────────────────────────────────────
 //
 // Mirrors what the root `aerosync` crate already exposes via
@@ -91,15 +108,6 @@ pub mod storage;
 // the longer `use aerosync_domain::error::{AeroSyncError, Result}`.
 
 pub use error::{AeroSyncError, Result};
-
-// ── Phase 2 modules ───────────────────────────────────────────────────
-//
-// pub mod storage;
-
-// ── Phase 3 modules ───────────────────────────────────────────────────
-//
-// pub mod session;
-// pub mod manifest;
 
 /// Crate version string, exposed for diagnostic output. Matches the
 /// `Cargo.toml` `version.workspace` value at build time.
