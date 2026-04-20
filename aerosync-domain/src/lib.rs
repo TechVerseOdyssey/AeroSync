@@ -96,8 +96,16 @@ pub mod storage;
 /// will decide what to surface.
 pub mod session;
 
-// `manifest` (FileManifest, FileEntry, Hash, ChunkPlan) — DEFERRED
-// to Phase 3.2.
+/// File-payload value objects: [`manifest::Hash`] (typed content
+/// digest), [`manifest::FileEntry`] (one file in a manifest),
+/// [`manifest::FileManifest`] (ordered collection of entries with
+/// path-safety invariants), and [`manifest::ChunkPlan`] /
+/// [`manifest::ChunkSpec`] (pure-arithmetic slicing of a single file
+/// for resumable upload). Phase 3.3 will compose these into
+/// `TransferSession`. No re-export at the crate root yet — Phase 3.3
+/// will decide what to surface, mirroring the [`session`] module's
+/// pattern.
+pub mod manifest;
 
 // ── Crate-root re-exports ─────────────────────────────────────────────
 //
