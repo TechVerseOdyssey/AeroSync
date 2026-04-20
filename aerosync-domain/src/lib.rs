@@ -55,10 +55,12 @@
 
 pub mod error;
 
-// `metadata` migrated verbatim from `src/core/metadata.rs` in
-// Phase 1e. Original file did not enforce `missing_docs`; rustdoc
-// completeness deferred to Phase 4 per refactor plan §3 Phase 4.
-#[allow(missing_docs)]
+/// RFC-003 metadata envelope: builder, validator, lifecycle helpers,
+/// and the JSON-serializable [`metadata::MetadataJson`] adapter.
+/// Migrated verbatim from `src/core/metadata.rs` in Phase 1e; the
+/// temporary `#[allow(missing_docs)]` is retired here (Phase 4b)
+/// after backfilling field-level docs on the few public structs that
+/// shipped without them.
 pub mod metadata;
 
 // `receipt` (state machine extraction) — DEFERRED to Phase 3 because

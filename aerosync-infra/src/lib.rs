@@ -50,12 +50,11 @@
 
 // ── Phase 1 modules ───────────────────────────────────────────────────
 
-// `audit` migrated verbatim from `src/core/audit.rs` in Phase 1d.
-// The original module did not enforce `missing_docs`; rustdoc cleanup
-// is deferred to Phase 4 (documentation closure) per the refactor
-// plan §3 Phase 4. Until then, suppress the lint locally so the
-// move stays a pure rename.
-#[allow(missing_docs)]
+/// JSONL audit-trail logger ([`audit::AuditLogger`]) — append-only
+/// transfer/auth/MCP-call records keyed by a UTC timestamp. Migrated
+/// verbatim from `src/core/audit.rs` in Phase 1d; the temporary
+/// `#[allow(missing_docs)]` is retired here (Phase 4b) after
+/// backfilling field-level docs on the public enums and struct.
 pub mod audit;
 pub mod tls;
 
@@ -66,8 +65,16 @@ pub mod tls;
 // tmp+rename. Re-exports the `ResumeState` / `ChunkState` value
 // objects from `aerosync_domain::storage` so the legacy import path
 // `aerosync::core::resume::*` keeps resolving via `pub use` shim
-// in `src/core/mod.rs`. `missing_docs` suppressed for the same
-// reason as `audit` (verbatim move; rustdoc cleanup in Phase 4).
+// in `src/core/mod.rs`.
+//
+// Phase 4b note: the `#[allow(missing_docs)]` previously here is
+// retained — `ResumeStore` itself is fully documented but the
+// re-exports of the domain `ChunkState` / `ResumeState` value
+// objects (which themselves carry full field docs in
+// `aerosync_domain::storage`) trip the lint at the re-export site.
+// Removing the allow would force documenting every re-exported name
+// twice. Tracked for cleanup in Phase 5 alongside the trait
+// consumer migration.
 #[allow(missing_docs)]
 pub mod resume;
 // pub mod history;     // Phase 2.3

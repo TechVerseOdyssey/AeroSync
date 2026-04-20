@@ -43,7 +43,13 @@ serde_json = { workspace = true }
 
 # UUID v7 for `SessionId` / `TaskId`. v7 = time-sorted, globally unique;
 # matches the receipt id minting strategy used by `core::receipt`.
-uuid = { workspace = true }
+# `uuid` carries `Uuid` ids through the wire-format conversions in
+# `metadata` and the value objects in `storage`. Both modules
+# `#[derive(Serialize, Deserialize)]` on structs containing `Uuid`,
+# so the `serde` feature is mandatory for this crate to build
+# standalone (`cargo build -p aerosync-domain`). The workspace
+# baseline only enables `v4`; we explicitly opt-in to `serde` here.
+uuid = { workspace = true, features = ["v4", "serde"] }
 
 # `chrono` for typed `expires_at` / `created_at` accessors mirroring the
 # wire `google.protobuf.Timestamp`. Same minimal feature set as the root

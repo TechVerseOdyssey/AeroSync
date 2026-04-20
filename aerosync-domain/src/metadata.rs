@@ -81,27 +81,61 @@ pub const SYSTEM_FIELD_NAMES: &[&str] = &[
 pub enum MetadataError {
     /// `user_metadata` exceeded [`MAX_USER_METADATA_ENTRIES`].
     #[error("user_metadata has {count} entries, max {max}")]
-    TooManyUserEntries { count: usize, max: usize },
+    TooManyUserEntries {
+        /// Actual number of entries in the rejected map.
+        count: usize,
+        /// Hard upper bound (= [`MAX_USER_METADATA_ENTRIES`]).
+        max: usize,
+    },
 
     /// A `user_metadata` key exceeded [`MAX_USER_METADATA_KEY_BYTES`].
     #[error("user_metadata key '{key}' is {len} bytes, max {max}")]
-    UserKeyTooLong { key: String, len: usize, max: usize },
+    UserKeyTooLong {
+        /// The offending key (echoed verbatim for diagnostics).
+        key: String,
+        /// Byte-length of the offending key.
+        len: usize,
+        /// Hard upper bound (= [`MAX_USER_METADATA_KEY_BYTES`]).
+        max: usize,
+    },
 
     /// A `user_metadata` value exceeded [`MAX_USER_METADATA_VALUE_BYTES`].
     #[error("user_metadata['{key}'] value is {len} bytes, max {max}")]
-    UserValueTooLong { key: String, len: usize, max: usize },
+    UserValueTooLong {
+        /// Key whose value violated the size cap.
+        key: String,
+        /// Byte-length of the offending value.
+        len: usize,
+        /// Hard upper bound (= [`MAX_USER_METADATA_VALUE_BYTES`]).
+        max: usize,
+    },
 
     /// `parent_file_ids` exceeded [`MAX_PARENT_FILE_IDS`].
     #[error("parent_file_ids has {count} entries, max {max}")]
-    TooManyParents { count: usize, max: usize },
+    TooManyParents {
+        /// Actual number of parent ids supplied.
+        count: usize,
+        /// Hard upper bound (= [`MAX_PARENT_FILE_IDS`]).
+        max: usize,
+    },
 
     /// `file_name` exceeded [`MAX_FILE_NAME_BYTES`].
     #[error("file_name is {len} bytes, max {max}")]
-    FileNameTooLong { len: usize, max: usize },
+    FileNameTooLong {
+        /// Byte-length of the offending name (UTF-8 bytes, not chars).
+        len: usize,
+        /// Hard upper bound (= [`MAX_FILE_NAME_BYTES`]).
+        max: usize,
+    },
 
     /// Total serialized envelope exceeded [`MAX_METADATA_BYTES`].
     #[error("serialized metadata is {actual} bytes, max {max}")]
-    OversizeEnvelope { actual: usize, max: usize },
+    OversizeEnvelope {
+        /// Encoded protobuf size of the rejected envelope.
+        actual: usize,
+        /// Hard upper bound (= [`MAX_METADATA_BYTES`]).
+        max: usize,
+    },
 }
 
 /// Application-facing builder for the [`Metadata`] envelope.
@@ -362,38 +396,74 @@ pub fn proto_ts_to_datetime(ts: &prost_types::Timestamp) -> Option<chrono::DateT
 // ─────────────────────────────────────────────────────────────────────
 
 /// Mirror of [`Metadata`] with serde derives, used as the on-disk
-/// representation in the JSONL [`crate::core::history::HistoryStore`].
+/// representation in the JSONL `aerosync::core::history::HistoryStore`
+/// (the `HistoryStore` impl currently lives in the root `aerosync`
+/// crate; the file move lands in Phase 3).
 /// We hand-roll this rather than `#[derive(Serialize)]` on the
 /// generated proto type because `prost` does not emit serde derives
 /// and we want a stable JSON shape that survives proto-field
 /// reordering in future revisions.
+///
+/// All field names match the proto field names byte-for-byte so the
+/// JSONL records round-trip with `MetadataJson::to_proto` /
+/// [`MetadataJson::from_proto`]. `serde(default,
+/// skip_serializing_if = …)` keeps the on-disk JSON minimal —
+/// fields that take their default value are not emitted, and
+/// records written by older AeroSync versions (with fewer fields)
+/// deserialize cleanly.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
 pub struct MetadataJson {
+    /// System-generated UUID for the file (RFC-003 §3 `system.id`).
+    /// Empty string ⇒ unset (sender did not seal an envelope).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
+    /// Sender node identity (RFC-003 §3 `system.from_node`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub from_node: String,
+    /// Receiver node identity (RFC-003 §3 `system.to_node`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub to_node: String,
+    /// Wall-clock timestamp when the sender sealed the envelope.
+    /// `None` for legacy records that pre-date metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Sniffed or caller-supplied MIME type (RFC-003 §3 `well_known.content_type`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_type: String,
+    /// File size in bytes (RFC-003 §3 `well_known.size_bytes`). Zero
+    /// values are skipped during serialization to keep zero-byte
+    /// records compact; deserialization defaults missing field to 0.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub size_bytes: u64,
+    /// Lowercase hex SHA-256 of the file body. Empty ⇒ hashing was
+    /// disabled or the record predates content hashing.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sha256: String,
+    /// Original file name as the sender presented it (basename only;
+    /// directory transfers store one record per file).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub file_name: String,
+    /// Transport protocol that carried the envelope (`"http"`,
+    /// `"quic"`, `"s3"`, `"ftp"`, `"mcp"`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub protocol: String,
 
+    /// Caller-supplied distributed-tracing id (RFC-003 §3
+    /// `well_known.trace_id`). Stable across re-tries of the same
+    /// logical transfer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    /// Caller-supplied conversation grouping id (RFC-003 §3
+    /// `well_known.conversation_id`). Logically clusters multiple
+    /// related files (e.g. one chat session emitting several uploads).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// Parent-file ids this transfer was derived from, used by the
+    /// metadata graph queries (RFC-003 §3 `well_known.parent_file_ids`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parent_file_ids: Vec<String>,
+    /// Optional retention deadline (RFC-003 §3 `well_known.expires_at`).
+    /// Receiver MAY garbage-collect after this point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Stored as the lower-case enum name (`"transient"`,
@@ -402,9 +472,17 @@ pub struct MetadataJson {
     /// JSONL records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<String>,
+    /// Caller-supplied opaque correlation id (RFC-003 §3
+    /// `well_known.correlation_id`). Free-form; AeroSync does not
+    /// interpret it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
 
+    /// Application-supplied free-form key/value bag (RFC-003 §4
+    /// `user_metadata`). Subject to the
+    /// [`MAX_USER_METADATA_ENTRIES`] / [`MAX_USER_METADATA_KEY_BYTES`]
+    /// / [`MAX_USER_METADATA_VALUE_BYTES`] caps validated by the
+    /// builder.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub user_metadata: HashMap<String, String>,
 }

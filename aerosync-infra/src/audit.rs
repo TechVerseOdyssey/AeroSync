@@ -67,7 +67,12 @@ pub enum AuditEvent {
     /// 认证失败（Token 无效/过期/缺失）
     AuthFailed,
     /// 单个分片上传完成（仅用于调试日志级别）
-    ChunkUploaded { index: u32, total: u32 },
+    ChunkUploaded {
+        /// Zero-based index of the chunk that just completed.
+        index: u32,
+        /// Total number of chunks the file was split into.
+        total: u32,
+    },
     /// MCP 工具调用
     McpToolCall,
 }
@@ -76,7 +81,9 @@ pub enum AuditEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
+    /// Outbound (this node was the sender).
     Send,
+    /// Inbound (this node was the receiver).
     Receive,
 }
 
@@ -84,11 +91,15 @@ pub enum Direction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum AuditResult {
+    /// Operation succeeded.
     Ok,
+    /// Operation failed; the inner string is a human-readable
+    /// reason suitable for log diagnostics (NOT a stable error code).
     Err(String),
 }
 
 impl AuditResult {
+    /// True iff this result is [`AuditResult::Ok`].
     pub fn is_ok(&self) -> bool {
         matches!(self, AuditResult::Ok)
     }
@@ -120,6 +131,10 @@ pub struct AuditEntry {
 pub struct AuditRecord {
     /// Unix timestamp（秒）
     pub timestamp: u64,
+    /// The application-supplied [`AuditEntry`] body. Flattened on
+    /// serialization so the on-disk JSONL has top-level
+    /// `event` / `direction` / `protocol` / … fields rather than a
+    /// nested `entry` object — keeps `jq` queries readable.
     #[serde(flatten)]
     pub entry: AuditEntry,
 }
