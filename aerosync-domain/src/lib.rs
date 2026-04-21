@@ -101,11 +101,22 @@ pub mod session;
 /// [`manifest::FileManifest`] (ordered collection of entries with
 /// path-safety invariants), and [`manifest::ChunkPlan`] /
 /// [`manifest::ChunkSpec`] (pure-arithmetic slicing of a single file
-/// for resumable upload). Phase 3.3 will compose these into
-/// `TransferSession`. No re-export at the crate root yet — Phase 3.3
-/// will decide what to surface, mirroring the [`session`] module's
-/// pattern.
+/// for resumable upload). Phase 3.3 composes these into
+/// [`transfer_session::TransferSession`]. No re-export at the crate
+/// root yet — Phase 3.4 will decide what to surface.
 pub mod manifest;
+
+/// `TransferSession` aggregate root + supporting types
+/// ([`transfer_session::ProtocolKind`], [`transfer_session::EventLog`],
+/// [`transfer_session::SessionEvent`],
+/// [`transfer_session::SessionStateError`]). Composes the Phase 3.1
+/// session companions and the Phase 3.2 manifest into a single
+/// state-machine-validated aggregate. `ReceiptLedger` and the
+/// `task_ids` field are deferred to Phase 3.4 because they need
+/// `Receipt` (still in the root crate) and a domain-level `TaskId`
+/// design decision. No consumer wiring yet — sender path is Phase
+/// 3.4, receiver path is Phase 3.5.
+pub mod transfer_session;
 
 // ── Crate-root re-exports ─────────────────────────────────────────────
 //
