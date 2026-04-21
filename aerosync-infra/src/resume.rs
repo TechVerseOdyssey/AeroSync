@@ -25,6 +25,13 @@
 //! DEFAULT_CHUNK_SIZE}` (the root crate forwards to this module via
 //! `pub use aerosync_infra::resume` in `src/core/mod.rs`).
 
+/// Re-exports of the [`aerosync_domain::storage`] value objects and
+/// the trait this module's [`ResumeStore`] implements. Hoisted to the
+/// [`aerosync_infra::resume`] module-root so the legacy
+/// `aerosync::core::resume::*` import path keeps resolving — the root
+/// crate forwards via `pub use aerosync_infra::resume;` in
+/// `src/core/mod.rs`. Field-level docs for `ChunkState` / `ResumeState`
+/// live with their canonical definition in `aerosync_domain::storage`.
 pub use aerosync_domain::storage::{
     ChunkState, ResumeState, ResumeStorage, DEFAULT_CHUNK_SIZE,
 };

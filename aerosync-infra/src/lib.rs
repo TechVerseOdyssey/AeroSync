@@ -59,25 +59,21 @@ pub mod audit;
 pub mod tls;
 
 // ── Phase 2 modules ───────────────────────────────────────────────────
-//
-// `resume` migrated from `src/core/resume.rs` in Phase 2.2 with one
-// behavioural upgrade — `ResumeStore::save` is now crash-safe via
-// tmp+rename. Re-exports the `ResumeState` / `ChunkState` value
-// objects from `aerosync_domain::storage` so the legacy import path
-// `aerosync::core::resume::*` keeps resolving via `pub use` shim
-// in `src/core/mod.rs`.
-//
-// Phase 4b note: the `#[allow(missing_docs)]` previously here is
-// retained — `ResumeStore` itself is fully documented but the
-// re-exports of the domain `ChunkState` / `ResumeState` value
-// objects (which themselves carry full field docs in
-// `aerosync_domain::storage`) trip the lint at the re-export site.
-// Removing the allow would force documenting every re-exported name
-// twice. Tracked for cleanup in Phase 5 alongside the trait
-// consumer migration.
-#[allow(missing_docs)]
+
+/// File-backed JSON [`aerosync_domain::storage::ResumeStorage`] impl
+/// ([`resume::ResumeStore`]). Migrated from `src/core/resume.rs` in
+/// Phase 2.2 with one behavioural upgrade: [`resume::ResumeStore::save`]
+/// is now crash-safe via tmp+rename (was vulnerable to torn writes
+/// pre-v0.3.0). Re-exports the `ResumeState` / `ChunkState` /
+/// `ResumeStorage` / `DEFAULT_CHUNK_SIZE` symbols from
+/// [`aerosync_domain::storage`] so the legacy
+/// `aerosync::core::resume::*` import path keeps resolving via the
+/// `pub use aerosync_infra::resume;` shim in `src/core/mod.rs`. Phase
+/// 4d (this commit) retired the previous `#[allow(missing_docs)]` by
+/// adding a single block doc on the re-export — the field-level docs
+/// live with the canonical definitions in `aerosync_domain::storage`.
 pub mod resume;
-// pub mod history;     // Phase 2.3
+// pub mod history;     // Phase 2.3 (deferred — see src/core/history.rs)
 
 // ── Phase 4 modules ───────────────────────────────────────────────────
 //
