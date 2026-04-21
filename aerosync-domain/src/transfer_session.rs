@@ -1,12 +1,13 @@
 //! [`TransferSession`] aggregate root + supporting value objects:
-//! [`ProtocolKind`], [`SessionEvent`], [`EventLog`], [`SessionStateError`].
+//! [`ProtocolKind`], [`SessionEvent`], [`EventLog`], [`ReceiptLedger`],
+//! [`ReceiptEntry`], [`SessionStateError`].
 //!
 //! Per `docs/v0.3.0-refactor-plan.md` §3 (line 124, micro-PR 3.3),
 //! this module composes the Phase 3.1 / 3.2 companions into the
 //! actual `TransferSession` struct that the sender path (Phase 3.4)
 //! and the receiver path (Phase 3.5) will adopt.
 //!
-//! ## v0.3.0 Phase 3.3 status (skeleton, no consumer wiring)
+//! ## v0.3.0 Phase 3.3 + 3.4c status (skeleton, no consumer wiring)
 //!
 //! Like the rest of Phase 3 to date, this module is **purely
 //! additive** — no existing AeroSync code constructs a
@@ -15,15 +16,26 @@
 //! log is fully usable, so Phase 3.4 / 3.5 can drive it from the
 //! engine and receiver respectively without further changes here.
 //!
-//! ## What's deferred to Phase 3.4
+//! Phase 3.4c (this commit) adds [`ReceiptLedger`] — a per-session
+//! map from `receipt_id` → ([`crate::receipt::State`] snapshot +
+//! [`crate::receipt::Outcome`] when terminal) — alongside
+//! [`EventLog`]. The ledger holds plain snapshots rather than
+//! phantom-typed `Arc<Receipt<Side>>`s so a single session can
+//! mix sender-side and receiver-side receipts in one collection
+//! without an existential type. Phase 3.4e/f wiring will feed
+//! it from `tokio::sync::watch::Receiver` observers attached to
+//! the per-task `Receipt`s.
 //!
-//! - **`ReceiptLedger`.** The refactor plan §3 lists `ReceiptLedger`
-//!   alongside `EventLog` for this micro-PR, but the ledger needs
-//!   `aerosync::core::receipt::Receipt`, which still lives in the
-//!   root crate. Phase 3.4 promotes `Receipt` to `aerosync-domain`
-//!   (breaking the `aerosync-infra → aerosync` cycle that also
-//!   blocks the deferred `history.rs` move) and lands the ledger in
-//!   the same commit.
+//! ## What's deferred to Phase 3.4d/e/f/g
+//!
+//! - **`receipts: ReceiptLedger` field on `TransferSession`.** The
+//!   refactor sketch shows the ledger embedded in the aggregate
+//!   root, but adding a non-default-constructible field today
+//!   would change the serde-format of `TransferSession` and force
+//!   every test/mock that already constructs one to update.
+//!   Phase 3.4e (engine integration) lands the field together
+//!   with the `task_ids` field below — both as a single
+//!   serde-format change.
 //!
 //! - **`task_ids: Vec<TaskId>` field.** The refactor sketch shows
 //!   this on `TransferSession`, but `TaskId` lives in the root
@@ -56,13 +68,15 @@
 //! crate root. They are **not** listed in
 //! `docs/v0.3.0-frozen-api.md` yet.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::manifest::FileManifest;
+use crate::receipt::{Outcome, State};
 use crate::session::{SessionId, SessionKind, SessionStatus};
 
 // ──────────────────────────── ProtocolKind ─────────────────────────────────────
@@ -240,6 +254,148 @@ impl EventLog {
 impl Default for EventLog {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ──────────────────────────── ReceiptLedger / ReceiptEntry ────────────────────
+
+/// Snapshot of one receipt's lifecycle as recorded in a
+/// [`ReceiptLedger`].
+///
+/// Holds the most-recent [`crate::receipt::State`] for the receipt
+/// plus the wall-clock time at which it was recorded. When the
+/// receipt has reached a terminal state, [`ReceiptEntry::outcome`]
+/// is also populated for fast `terminal/pending` queries; for
+/// non-terminal entries it is `None`.
+///
+/// `ReceiptEntry` is intentionally a plain snapshot rather than an
+/// `Arc<Receipt<Side>>` — receipts come in two phantom-typed
+/// flavours (`Receipt<Sender>` / `Receipt<Receiver>`) that cannot
+/// share a single homogeneous container without an existential type.
+/// The session-level ledger only needs the observable lifecycle,
+/// which is identical between the two sides, so the snapshot
+/// representation is both simpler and lossless.
+///
+/// **Not yet serializable.** [`crate::receipt::State`] and
+/// [`crate::receipt::Outcome`] do not derive `Serialize` /
+/// `Deserialize` today (the receipt types are tokio-watch-driven,
+/// not persisted). If Phase 3.4e decides to embed
+/// [`ReceiptLedger`] in [`TransferSession`]'s on-disk
+/// representation, serde derives will be added here and on the
+/// receipt enums together. Today the ledger is a process-lifetime
+/// in-memory aggregator only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptEntry {
+    /// Stable receipt identifier (matches `Receipt::id()`).
+    pub receipt_id: Uuid,
+    /// Most-recently observed lifecycle state for this receipt.
+    pub state: State,
+    /// Cached terminal outcome — `Some(_)` iff
+    /// [`Self::state`] is one of [`State::Completed`] /
+    /// [`State::Failed`]. Avoids re-pattern-matching the state
+    /// every time a caller asks "did this terminal ack or fail?".
+    pub outcome: Option<Outcome>,
+    /// Wall-clock time the snapshot was last written by
+    /// [`ReceiptLedger::record`].
+    pub recorded_at: SystemTime,
+}
+
+/// Per-session map from `receipt_id` to the latest
+/// [`ReceiptEntry`].
+///
+/// One [`TransferSession`] hosts N parallel per-file transfers,
+/// each owning a `Receipt`. The ledger aggregates their snapshots
+/// so the session aggregate root can answer "are we done yet?"
+/// (`pending_count() == 0`), "any failures?"
+/// (`iter().any(|e| matches!(e.outcome, Some(Outcome::Failed(_))))`),
+/// or "where did receipt X end up?" (`get(id)`) without
+/// touching every per-task `Receipt` directly.
+///
+/// The ledger does NOT subscribe to receipt change notifications
+/// itself — Phase 3.4e wiring will spawn one observer task per
+/// receipt that calls [`ReceiptLedger::record`] on every
+/// `tokio::sync::watch::Receiver::changed()`. Keeping the ledger
+/// passive keeps it usable in test mocks and in the Phase 3.5
+/// receiver path where the watch loop sits one layer up.
+/// **Not yet serializable** — see [`ReceiptEntry`] for the
+/// rationale and the Phase 3.4e migration plan.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReceiptLedger {
+    /// Snapshot map keyed by `receipt_id`. Stored as a plain
+    /// `HashMap` because lookups dominate over iteration on this
+    /// type's call-sites.
+    entries: HashMap<Uuid, ReceiptEntry>,
+}
+
+impl ReceiptLedger {
+    /// Construct an empty ledger.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record (or overwrite) the snapshot for `receipt_id`. The
+    /// `recorded_at` field is stamped to `SystemTime::now()`; tests
+    /// that need determinism can use [`Self::record_at`].
+    pub fn record(&mut self, receipt_id: Uuid, state: State) {
+        self.record_at(receipt_id, state, SystemTime::now());
+    }
+
+    /// Variant of [`Self::record`] with an explicit timestamp.
+    /// Auto-populates [`ReceiptEntry::outcome`] when the state is
+    /// terminal, mirroring [`State::outcome`].
+    pub fn record_at(&mut self, receipt_id: Uuid, state: State, at: SystemTime) {
+        let outcome = state.outcome();
+        self.entries.insert(
+            receipt_id,
+            ReceiptEntry {
+                receipt_id,
+                state,
+                outcome,
+                recorded_at: at,
+            },
+        );
+    }
+
+    /// Borrow the snapshot for `receipt_id`, or `None` if the
+    /// ledger has never seen it.
+    pub fn get(&self, receipt_id: Uuid) -> Option<&ReceiptEntry> {
+        self.entries.get(&receipt_id)
+    }
+
+    /// Iterate every recorded entry. Iteration order is
+    /// unspecified (backed by `HashMap`); callers that need a
+    /// stable order should `collect` then `sort_by_key(|e|
+    /// e.recorded_at)`.
+    pub fn iter(&self) -> impl Iterator<Item = &ReceiptEntry> {
+        self.entries.values()
+    }
+
+    /// Number of recorded receipts (terminal + pending).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// `true` iff no receipts have been recorded.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Number of recorded receipts that have reached a terminal
+    /// state ([`State::Completed`] / [`State::Failed`]).
+    pub fn terminal_count(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|e| e.state.is_terminal())
+            .count()
+    }
+
+    /// Number of recorded receipts still in-flight (not terminal).
+    /// Equal to `len() - terminal_count()`.
+    pub fn pending_count(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|e| !e.state.is_terminal())
+            .count()
     }
 }
 
@@ -528,6 +684,157 @@ mod tests {
         assert_eq!(created.at(), t);
         assert_eq!(changed.at(), t);
         assert_eq!(custom.at(), t);
+    }
+
+    // ---- ReceiptLedger ------------------------------------------------------
+
+    use crate::receipt::{CompletedTerminal, FailedTerminal, Outcome as ReceiptOutcome};
+
+    #[test]
+    fn receipt_ledger_default_is_empty() {
+        let l = ReceiptLedger::new();
+        assert_eq!(l.len(), 0);
+        assert!(l.is_empty());
+        assert_eq!(l.terminal_count(), 0);
+        assert_eq!(l.pending_count(), 0);
+    }
+
+    #[test]
+    fn receipt_ledger_record_inserts_then_overwrites_same_id() {
+        let mut l = ReceiptLedger::new();
+        let id = Uuid::new_v4();
+        l.record(id, State::Initiated);
+        assert_eq!(l.len(), 1);
+        // Re-record same id with a later state — overwrite, not append.
+        l.record(id, State::StreamOpened);
+        assert_eq!(l.len(), 1);
+        let entry = l.get(id).unwrap();
+        assert_eq!(entry.state, State::StreamOpened);
+    }
+
+    #[test]
+    fn receipt_ledger_outcome_is_none_for_non_terminal() {
+        let mut l = ReceiptLedger::new();
+        let id = Uuid::new_v4();
+        l.record(id, State::Processing);
+        assert!(l.get(id).unwrap().outcome.is_none());
+    }
+
+    #[test]
+    fn receipt_ledger_outcome_acked_for_completed_acked() {
+        let mut l = ReceiptLedger::new();
+        let id = Uuid::new_v4();
+        l.record(id, State::Completed(CompletedTerminal::Acked));
+        let entry = l.get(id).unwrap();
+        assert!(entry.state.is_terminal());
+        assert!(matches!(entry.outcome, Some(ReceiptOutcome::Acked)));
+    }
+
+    #[test]
+    fn receipt_ledger_outcome_failed_variants() {
+        let mut l = ReceiptLedger::new();
+        let nack_id = Uuid::new_v4();
+        l.record(
+            nack_id,
+            State::Failed(FailedTerminal::Nacked {
+                reason: "checksum mismatch".to_string(),
+            }),
+        );
+        let cancel_id = Uuid::new_v4();
+        l.record(
+            cancel_id,
+            State::Failed(FailedTerminal::Cancelled {
+                reason: "user cancelled".to_string(),
+            }),
+        );
+        let err_id = Uuid::new_v4();
+        l.record(
+            err_id,
+            State::Failed(FailedTerminal::Errored {
+                code: 500,
+                detail: "io".to_string(),
+            }),
+        );
+        assert!(matches!(
+            l.get(nack_id).unwrap().outcome,
+            Some(ReceiptOutcome::Nacked(_))
+        ));
+        assert!(matches!(
+            l.get(cancel_id).unwrap().outcome,
+            Some(ReceiptOutcome::Cancelled(_))
+        ));
+        assert!(matches!(
+            l.get(err_id).unwrap().outcome,
+            Some(ReceiptOutcome::Failed { code: 500, .. })
+        ));
+    }
+
+    #[test]
+    fn receipt_ledger_terminal_and_pending_counts() {
+        let mut l = ReceiptLedger::new();
+        l.record(Uuid::new_v4(), State::Initiated);
+        l.record(Uuid::new_v4(), State::StreamOpened);
+        l.record(Uuid::new_v4(), State::Completed(CompletedTerminal::Acked));
+        l.record(
+            Uuid::new_v4(),
+            State::Failed(FailedTerminal::Cancelled {
+                reason: "x".to_string(),
+            }),
+        );
+        assert_eq!(l.len(), 4);
+        assert_eq!(l.pending_count(), 2);
+        assert_eq!(l.terminal_count(), 2);
+    }
+
+    #[test]
+    fn receipt_ledger_record_at_pins_timestamp() {
+        let mut l = ReceiptLedger::new();
+        let id = Uuid::new_v4();
+        let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        l.record_at(id, State::Processing, t);
+        assert_eq!(l.get(id).unwrap().recorded_at, t);
+    }
+
+    #[test]
+    fn receipt_ledger_get_returns_none_for_unknown_id() {
+        let l = ReceiptLedger::new();
+        assert!(l.get(Uuid::new_v4()).is_none());
+    }
+
+    #[test]
+    fn receipt_ledger_iter_yields_every_entry() {
+        let mut l = ReceiptLedger::new();
+        let ids: Vec<_> = (0..5).map(|_| Uuid::new_v4()).collect();
+        for &id in &ids {
+            l.record(id, State::Initiated);
+        }
+        let seen: std::collections::HashSet<Uuid> =
+            l.iter().map(|e| e.receipt_id).collect();
+        for id in ids {
+            assert!(seen.contains(&id));
+        }
+    }
+
+    // ---- State::outcome() ---------------------------------------------------
+
+    #[test]
+    fn state_outcome_none_for_non_terminal_states() {
+        assert!(State::Initiated.outcome().is_none());
+        assert!(State::StreamOpened.outcome().is_none());
+        assert!(State::DataTransferred.outcome().is_none());
+        assert!(State::StreamClosed.outcome().is_none());
+        assert!(State::Processing.outcome().is_none());
+    }
+
+    #[test]
+    fn state_outcome_clones_terminal_payloads() {
+        let s = State::Failed(FailedTerminal::Nacked {
+            reason: "abc".to_string(),
+        });
+        match s.outcome() {
+            Some(ReceiptOutcome::Nacked(reason)) => assert_eq!(reason, "abc"),
+            other => panic!("expected Nacked, got {other:?}"),
+        }
     }
 
     // ---- TransferSession constructor ----------------------------------------

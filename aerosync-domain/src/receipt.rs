@@ -123,6 +123,36 @@ impl State {
     pub fn is_terminal(&self) -> bool {
         matches!(self, State::Completed(_) | State::Failed(_))
     }
+
+    /// Project the state into the simpler [`Outcome`] enum, returning
+    /// `Some(_)` iff the state is terminal. Non-terminal states map
+    /// to `None`.
+    ///
+    /// Pure projection — no allocation beyond cloning the inline
+    /// reason / detail strings already held by the terminal payloads.
+    /// Used by [`crate::transfer_session::ReceiptLedger::record_at`] to
+    /// cache the outcome alongside the snapshot so repeated lookups
+    /// don't re-pattern-match the state.
+    pub fn outcome(&self) -> Option<Outcome> {
+        match self {
+            State::Initiated
+            | State::StreamOpened
+            | State::DataTransferred
+            | State::StreamClosed
+            | State::Processing => None,
+            State::Completed(CompletedTerminal::Acked) => Some(Outcome::Acked),
+            State::Failed(FailedTerminal::Nacked { reason }) => {
+                Some(Outcome::Nacked(reason.clone()))
+            }
+            State::Failed(FailedTerminal::Cancelled { reason }) => {
+                Some(Outcome::Cancelled(reason.clone()))
+            }
+            State::Failed(FailedTerminal::Errored { code, detail }) => Some(Outcome::Failed {
+                code: *code,
+                detail: detail.clone(),
+            }),
+        }
+    }
 }
 
 impl fmt::Display for State {
