@@ -83,6 +83,7 @@ pub mod sniff;
 pub(crate) use aerosync_infra::tls;
 pub mod transfer;
 
+pub use aerosync_domain::storage::{HistoryStorage, ResumeStorage};
 pub use audit::{
     AuditEntry, AuditEvent, AuditLogger, AuditRecord, AuditResult, Direction as AuditDirection,
 };
@@ -95,7 +96,6 @@ pub use capabilities::{
 pub use discovery::{AeroSyncMdns, AeroSyncPeer, MdnsHandle, MDNS_SERVICE_TYPE};
 pub use error::{AeroSyncError, Result};
 pub use file_manager::{FileInfo, FileManager};
-pub use aerosync_domain::storage::{HistoryStorage, ResumeStorage};
 pub use history::{HistoryEntry, HistoryFilter, HistoryQuery, HistoryStore, ReceiptStateLabel};
 pub use incoming_file::IncomingFile;
 pub use metadata::{

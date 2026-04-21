@@ -136,14 +136,13 @@ impl Hash {
         if value.len() != algo.hex_len() {
             return Err(ManifestError::InvalidHash {
                 algo,
-                reason: format!(
-                    "expected {} hex chars, got {}",
-                    algo.hex_len(),
-                    value.len()
-                ),
+                reason: format!("expected {} hex chars, got {}", algo.hex_len(), value.len()),
             });
         }
-        if !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        if !value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
             return Err(ManifestError::InvalidHash {
                 algo,
                 reason: "value must be lowercase hex (0-9, a-f only)".to_string(),
@@ -288,7 +287,11 @@ impl fmt::Display for ManifestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ManifestError::AbsolutePath { path } => {
-                write!(f, "manifest entry path must be relative: {}", path.display())
+                write!(
+                    f,
+                    "manifest entry path must be relative: {}",
+                    path.display()
+                )
             }
             ManifestError::ParentTraversal { path } => write!(
                 f,
@@ -533,10 +536,8 @@ impl ChunkPlan {
 
     /// Iterate every chunk in order. `O(chunk_count)`; allocation-free.
     pub fn iter(&self) -> impl Iterator<Item = ChunkSpec> + '_ {
-        (0..self.chunk_count).map(move |i| {
-            self.chunk_at(i)
-                .expect("index is in range by construction")
-        })
+        (0..self.chunk_count)
+            .map(move |i| self.chunk_at(i).expect("index is in range by construction"))
     }
 }
 
@@ -560,7 +561,13 @@ mod tests {
     #[test]
     fn hash_sha256_rejects_wrong_length() {
         let err = Hash::sha256_from_hex("a".repeat(63)).unwrap_err();
-        assert!(matches!(err, ManifestError::InvalidHash { algo: HashAlgo::Sha256, .. }));
+        assert!(matches!(
+            err,
+            ManifestError::InvalidHash {
+                algo: HashAlgo::Sha256,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -641,15 +648,13 @@ mod tests {
 
     #[test]
     fn manifest_rejects_absolute_unix_path() {
-        let err = FileManifest::new([FileEntry::new(PathBuf::from("/etc/passwd"), 1)])
-            .unwrap_err();
+        let err = FileManifest::new([FileEntry::new(PathBuf::from("/etc/passwd"), 1)]).unwrap_err();
         assert!(matches!(err, ManifestError::AbsolutePath { .. }));
     }
 
     #[test]
     fn manifest_rejects_parent_traversal() {
-        let err =
-            FileManifest::new([FileEntry::new(PathBuf::from("a/../b"), 1)]).unwrap_err();
+        let err = FileManifest::new([FileEntry::new(PathBuf::from("a/../b"), 1)]).unwrap_err();
         assert!(matches!(err, ManifestError::ParentTraversal { .. }));
     }
 
@@ -740,7 +745,10 @@ mod tests {
     #[test]
     fn chunk_plan_rejects_zero_chunk_size() {
         let err = ChunkPlan::new(100, 0).unwrap_err();
-        assert!(matches!(err, ManifestError::InvalidChunkSize { chunk_size: 0 }));
+        assert!(matches!(
+            err,
+            ManifestError::InvalidChunkSize { chunk_size: 0 }
+        ));
     }
 
     #[test]

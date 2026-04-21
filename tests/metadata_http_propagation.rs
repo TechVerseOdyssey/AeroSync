@@ -24,10 +24,11 @@
 //!    valid base64 but invalid protobuf is rejected with `400` for
 //!    the same reason; no `ReceivedFile` is created.
 //!
-//! The QUIC path is intentionally NOT covered here: the QUIC
-//! adapter today carries a `TODO(w3c-quic-receipt-wiring)` and
-//! always leaves `ReceivedFile.metadata = None`. That wire is
-//! batch C.
+//! The QUIC path is intentionally NOT covered here; the matching
+//! QUIC end-to-end metadata propagation is exercised by its own
+//! integration test in batch C (the historical
+//! `w3c-quic-receipt-wiring` TODO was closed in v0.2.1 by commit
+//! `41c7235`).
 
 use aerosync::core::metadata::MetadataBuilder;
 use aerosync::core::server::{FileReceiver, ServerConfig};

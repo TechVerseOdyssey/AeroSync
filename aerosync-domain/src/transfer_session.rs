@@ -607,10 +607,7 @@ mod tests {
             serde_json::to_string(&ProtocolKind::Http).unwrap(),
             "\"http\""
         );
-        assert_eq!(
-            serde_json::to_string(&ProtocolKind::S3).unwrap(),
-            "\"s3\""
-        );
+        assert_eq!(serde_json::to_string(&ProtocolKind::S3).unwrap(), "\"s3\"");
         let back: ProtocolKind = serde_json::from_str("\"quic\"").unwrap();
         assert_eq!(back, ProtocolKind::Quic);
     }
@@ -808,8 +805,7 @@ mod tests {
         for &id in &ids {
             l.record(id, State::Initiated);
         }
-        let seen: std::collections::HashSet<Uuid> =
-            l.iter().map(|e| e.receipt_id).collect();
+        let seen: std::collections::HashSet<Uuid> = l.iter().map(|e| e.receipt_id).collect();
         for id in ids {
             assert!(seen.contains(&id));
         }
@@ -857,12 +853,7 @@ mod tests {
     #[test]
     fn new_at_pins_started_at_and_event_timestamp() {
         let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let s = TransferSession::new_at(
-            sample_kind(),
-            sample_manifest(),
-            ProtocolKind::Quic,
-            t,
-        );
+        let s = TransferSession::new_at(sample_kind(), sample_manifest(), ProtocolKind::Quic, t);
         assert_eq!(s.started_at, t);
         assert_eq!(s.events.iter().next().unwrap().at(), t);
     }
@@ -871,8 +862,7 @@ mod tests {
 
     #[test]
     fn pending_to_active_then_completed_is_legal() {
-        let mut s =
-            TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
+        let mut s = TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
         s.transition_to(SessionStatus::Active).unwrap();
         s.transition_to(SessionStatus::Completed).unwrap();
         assert_eq!(s.status, SessionStatus::Completed);
@@ -883,8 +873,7 @@ mod tests {
 
     #[test]
     fn pending_to_cancelled_is_legal() {
-        let mut s =
-            TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
+        let mut s = TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
         s.transition_to(SessionStatus::Cancelled).unwrap();
         assert_eq!(s.status, SessionStatus::Cancelled);
         assert!(s.completed_at.is_some());
@@ -892,8 +881,7 @@ mod tests {
 
     #[test]
     fn active_to_failed_records_reason_and_terminal_stamp() {
-        let mut s =
-            TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
+        let mut s = TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
         s.transition_to(SessionStatus::Active).unwrap();
         s.transition_to(SessionStatus::Failed {
             reason: "disk full".into(),
@@ -905,8 +893,7 @@ mod tests {
 
     #[test]
     fn pending_to_completed_is_illegal() {
-        let mut s =
-            TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
+        let mut s = TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
         let err = s.transition_to(SessionStatus::Completed).unwrap_err();
         assert_eq!(err.from, SessionStatus::Pending);
         assert!(matches!(err.to, SessionStatus::Completed));
@@ -919,28 +906,23 @@ mod tests {
 
     #[test]
     fn pending_to_failed_is_illegal() {
-        let mut s =
-            TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
+        let mut s = TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
         let err = s
-            .transition_to(SessionStatus::Failed {
-                reason: "x".into(),
-            })
+            .transition_to(SessionStatus::Failed { reason: "x".into() })
             .unwrap_err();
         assert_eq!(err.from, SessionStatus::Pending);
     }
 
     #[test]
     fn no_op_transition_is_illegal() {
-        let mut s =
-            TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
+        let mut s = TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
         let err = s.transition_to(SessionStatus::Pending).unwrap_err();
         assert_eq!(err.from, SessionStatus::Pending);
     }
 
     #[test]
     fn cannot_transition_out_of_completed() {
-        let mut s =
-            TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
+        let mut s = TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
         s.transition_to(SessionStatus::Active).unwrap();
         s.transition_to(SessionStatus::Completed).unwrap();
         let err = s.transition_to(SessionStatus::Active).unwrap_err();
@@ -949,8 +931,7 @@ mod tests {
 
     #[test]
     fn cannot_transition_out_of_cancelled() {
-        let mut s =
-            TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
+        let mut s = TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
         s.transition_to(SessionStatus::Cancelled).unwrap();
         let err = s.transition_to(SessionStatus::Active).unwrap_err();
         assert_eq!(err.from, SessionStatus::Cancelled);
@@ -958,8 +939,7 @@ mod tests {
 
     #[test]
     fn record_custom_appends_event_without_status_change() {
-        let mut s =
-            TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
+        let mut s = TransferSession::new(sample_kind(), sample_manifest(), ProtocolKind::Http);
         s.record_custom("task chunk-12 acked");
         assert_eq!(s.status, SessionStatus::Pending);
         assert_eq!(s.events.len(), 2);

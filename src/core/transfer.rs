@@ -1,8 +1,6 @@
 use crate::core::audit::{AuditLogger, Direction};
 use crate::core::history::HistoryEntry;
 use crate::core::history::HistoryStore;
-use aerosync_domain::storage::HistoryStorage;
-use aerosync_infra::history::spawn_watch_bridge as history_spawn_watch_bridge;
 use crate::core::metadata::{
     datetime_to_proto_ts, empty_metadata, validate_sealed as validate_metadata,
 };
@@ -13,6 +11,8 @@ use crate::core::resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
 use crate::core::sniff::{sniff_content_type, SNIFF_PEEK_BYTES};
 use crate::core::{AeroSyncError, ProgressMonitor, Result, TransferProgress};
 use crate::protocols::http::{HttpReceiptAck, HttpReceiptDecision};
+use aerosync_domain::storage::HistoryStorage;
+use aerosync_infra::history::spawn_watch_bridge as history_spawn_watch_bridge;
 use aerosync_proto::Metadata;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};

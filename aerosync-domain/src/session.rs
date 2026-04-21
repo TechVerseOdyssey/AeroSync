@@ -59,9 +59,7 @@ use uuid::Uuid;
 ///
 /// The newtype is `Copy` because the inner `Uuid` is 16 bytes and the
 /// callers (event ring buffers, receipt registry) clone it freely.
-#[derive(
-    Debug, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionId(Uuid);
 
@@ -225,9 +223,7 @@ impl SessionStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            SessionStatus::Completed
-                | SessionStatus::Failed { .. }
-                | SessionStatus::Cancelled
+            SessionStatus::Completed | SessionStatus::Failed { .. } | SessionStatus::Cancelled
         )
     }
 }
@@ -351,12 +347,10 @@ mod tests {
         assert!(!SessionStatus::Pending.is_terminal());
         assert!(!SessionStatus::Active.is_terminal());
         assert!(SessionStatus::Completed.is_terminal());
-        assert!(
-            SessionStatus::Failed {
-                reason: "disk full".to_string(),
-            }
-            .is_terminal()
-        );
+        assert!(SessionStatus::Failed {
+            reason: "disk full".to_string(),
+        }
+        .is_terminal());
         assert!(SessionStatus::Cancelled.is_terminal());
     }
 
@@ -378,16 +372,12 @@ mod tests {
     #[test]
     fn session_status_tag_discriminator_is_status() {
         let pending = serde_json::to_string(&SessionStatus::Pending).expect("serialize");
-        let completed =
-            serde_json::to_string(&SessionStatus::Completed).expect("serialize");
+        let completed = serde_json::to_string(&SessionStatus::Completed).expect("serialize");
         let failed = serde_json::to_string(&SessionStatus::Failed {
             reason: "io".to_string(),
         })
         .expect("serialize");
-        assert!(
-            pending.contains("\"status\":\"pending\""),
-            "got: {pending}"
-        );
+        assert!(pending.contains("\"status\":\"pending\""), "got: {pending}");
         assert!(
             completed.contains("\"status\":\"completed\""),
             "got: {completed}"

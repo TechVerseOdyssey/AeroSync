@@ -298,7 +298,9 @@ impl From<&State> for StateView {
             // is now in a different crate from the enum (post-Phase
             // 3.4a `Receipt` move). Surface unknown-but-successful
             // terminals with a generic "completed" outcome.
-            State::Completed(_) => StateView::Completed { outcome: "completed" },
+            State::Completed(_) => StateView::Completed {
+                outcome: "completed",
+            },
             State::Failed(FailedTerminal::Cancelled { reason }) => StateView::Failed {
                 kind: "cancelled",
                 reason: Some(reason.clone()),

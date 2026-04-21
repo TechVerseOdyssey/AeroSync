@@ -32,9 +32,7 @@
 /// crate forwards via `pub use aerosync_infra::resume;` in
 /// `src/core/mod.rs`. Field-level docs for `ChunkState` / `ResumeState`
 /// live with their canonical definition in `aerosync_domain::storage`.
-pub use aerosync_domain::storage::{
-    ChunkState, ResumeState, ResumeStorage, DEFAULT_CHUNK_SIZE,
-};
+pub use aerosync_domain::storage::{ChunkState, ResumeState, ResumeStorage, DEFAULT_CHUNK_SIZE};
 
 use aerosync_domain::{AeroSyncError, Result};
 use async_trait::async_trait;
@@ -104,10 +102,7 @@ impl ResumeStore {
         let final_path = self.state_path(state.task_id);
         let tmp_path = {
             let mut p = final_path.clone();
-            let mut name = p
-                .file_name()
-                .map(|n| n.to_os_string())
-                .unwrap_or_default();
+            let mut name = p.file_name().map(|n| n.to_os_string()).unwrap_or_default();
             name.push(".tmp");
             p.set_file_name(name);
             p

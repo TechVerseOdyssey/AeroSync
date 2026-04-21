@@ -2,9 +2,9 @@
 //! 实现 aerosync-core 的 ProtocolAdapter trait，由 main.rs 注入。
 
 use crate::core::resume::{ResumeState, ResumeStore};
-use aerosync_domain::storage::ResumeStorage;
 use crate::core::transfer::{ProtocolAdapter, ProtocolProgress, TransferTask};
 use crate::core::{AeroSyncError, Result};
+use aerosync_domain::storage::ResumeStorage;
 use async_trait::async_trait;
 use reqwest::Client;
 use std::sync::Arc;
