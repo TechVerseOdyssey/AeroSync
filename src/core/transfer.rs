@@ -1,6 +1,8 @@
 use crate::core::audit::{AuditLogger, Direction};
 use crate::core::history::HistoryEntry;
 use crate::core::history::HistoryStore;
+use aerosync_domain::storage::HistoryStorage;
+use aerosync_infra::history::spawn_watch_bridge as history_spawn_watch_bridge;
 use crate::core::metadata::{
     datetime_to_proto_ts, empty_metadata, validate_sealed as validate_metadata,
 };
@@ -213,11 +215,18 @@ pub struct TransferEngine {
     /// QUIC frame routing once the receipt stream is wired into the
     /// transport (deferred from this task — see `quic_receipt`).
     receipt_registry: Arc<ReceiptRegistry<Sender>>,
-    /// Optional [`HistoryStore`] auto-paired with every `send` call:
-    /// when set, each freshly-issued [`Receipt`] is connected via
-    /// [`HistoryStore::spawn_watch_bridge`] so terminal transitions
-    /// land in the JSONL history.
-    history_store: Option<Arc<HistoryStore>>,
+    /// Optional [`HistoryStorage`] backend auto-paired with every
+    /// `send` call: when set, each freshly-issued [`Receipt`] is
+    /// connected via the
+    /// [`aerosync_infra::history::spawn_watch_bridge`] free function
+    /// so terminal transitions land in the configured store. Stored
+    /// as a trait object (Phase 3.4d-ii) so alternative backends
+    /// (in-memory mock, future SQLite, aerosync.cloud HTTP shim) can
+    /// drop in without engine churn — the concrete
+    /// [`HistoryStore`] still works thanks to the
+    /// [`Arc<HistoryStore>`] → [`Arc<dyn HistoryStorage>`] coercion in
+    /// [`Self::with_history_store`].
+    history_store: Option<Arc<dyn HistoryStorage>>,
     /// Map of QUEUE-side `task_id → receipt_id` so the bridge spawned
     /// by `send` can drive the right receipt when the worker reports
     /// completion.
@@ -259,10 +268,25 @@ impl TransferEngine {
         }
     }
 
-    /// Builder: attach a [`HistoryStore`] so future [`Self::send`]
-    /// calls auto-persist receipt terminals via
-    /// [`HistoryStore::spawn_watch_bridge`].
+    /// Builder: attach the file-backed [`HistoryStore`] so future
+    /// [`Self::send`] calls auto-persist receipt terminals via the
+    /// [`aerosync_infra::history::spawn_watch_bridge`] free function.
+    /// Concrete-typed for back-compat (call-sites that already pass
+    /// `Arc<HistoryStore>` keep working); use
+    /// [`Self::with_history_storage`] to plug in an alternative
+    /// [`HistoryStorage`] backend (in-memory mock, future SQLite,
+    /// aerosync.cloud HTTP shim).
     pub fn with_history_store(mut self, store: Arc<HistoryStore>) -> Self {
+        self.history_store = Some(store as Arc<dyn HistoryStorage>);
+        self
+    }
+
+    /// Builder: attach any [`HistoryStorage`] implementation as the
+    /// receipt-terminal sink. Companion to [`Self::with_history_store`]
+    /// — Phase 3.4d-ii introduced this opaque-trait variant so test
+    /// mocks and future cloud backends can drop in without depending
+    /// on the concrete [`HistoryStore`] file format.
+    pub fn with_history_storage(mut self, store: Arc<dyn HistoryStorage>) -> Self {
         self.history_store = Some(store);
         self
     }
@@ -582,7 +606,7 @@ impl TransferEngine {
                 entry = entry.with_metadata_proto(sealed);
             }
             store.append_silent(entry).await;
-            store.spawn_watch_bridge(Arc::clone(&receipt));
+            history_spawn_watch_bridge(Arc::clone(store), Arc::clone(&receipt));
         }
 
         let task_id = task.id;

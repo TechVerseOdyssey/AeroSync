@@ -1,4 +1,5 @@
 use crate::core::resume::{ResumeState, ResumeStore};
+use aerosync_domain::storage::ResumeStorage;
 use crate::core::{AeroSyncError, Result, TransferTask};
 use crate::protocols::circuit_breaker::CircuitBreaker;
 use crate::protocols::ratelimit::RateLimiter;
@@ -100,8 +101,14 @@ pub struct HttpTransfer {
     client: Arc<Client>,
     config: HttpConfig,
     circuit_breaker: Arc<CircuitBreaker>,
-    /// 可选的断点续传状态持久化存储，每完成一个分片后保存进度
-    resume_store: Option<Arc<ResumeStore>>,
+    /// 可选的断点续传状态持久化存储，每完成一个分片后保存进度。
+    /// Phase 3.4d-ii: typed as `Arc<dyn ResumeStorage>` so alternative
+    /// backends (in-memory mock for tests, future SQLite-backed store)
+    /// can plug in without touching the HTTP transport. The concrete
+    /// [`ResumeStore`] still works thanks to the generic
+    /// `with_resume_store` builder which coerces `Arc<H>` into the
+    /// trait-object slot.
+    resume_store: Option<Arc<dyn ResumeStorage>>,
     /// Optional sink for application-level [`HttpReceiptAck`] messages
     /// parsed off the receiver's `/upload` JSON response body
     /// (`receipt_ack` field, RFC-002 §6.4 application-level ACK on
@@ -222,11 +229,26 @@ impl HttpTransfer {
         }
     }
 
-    /// 使用外部共享 client + ResumeStore 构造（每分片完成后持久化续传状态）。
+    /// 使用外部共享 client + 文件后端 [`ResumeStore`] 构造
+    /// （每分片完成后持久化续传状态）。Concrete-typed for back-compat;
+    /// see [`Self::new_with_client_and_resume_storage`] for the
+    /// trait-object form added in Phase 3.4d-ii.
     pub fn new_with_client_and_resume(
         client: Arc<Client>,
         config: HttpConfig,
         store: Arc<ResumeStore>,
+    ) -> Self {
+        Self::new_with_client_and_resume_storage(client, config, store as Arc<dyn ResumeStorage>)
+    }
+
+    /// 使用外部共享 client + 任意 [`ResumeStorage`] 实现构造。
+    /// Phase 3.4d-ii companion to [`Self::new_with_client_and_resume`]
+    /// for tests and future backends that don't want to materialise
+    /// a concrete [`ResumeStore`].
+    pub fn new_with_client_and_resume_storage(
+        client: Arc<Client>,
+        config: HttpConfig,
+        store: Arc<dyn ResumeStorage>,
     ) -> Self {
         Self {
             client,

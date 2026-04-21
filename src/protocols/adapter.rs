@@ -2,6 +2,7 @@
 //! 实现 aerosync-core 的 ProtocolAdapter trait，由 main.rs 注入。
 
 use crate::core::resume::{ResumeState, ResumeStore};
+use aerosync_domain::storage::ResumeStorage;
 use crate::core::transfer::{ProtocolAdapter, ProtocolProgress, TransferTask};
 use crate::core::{AeroSyncError, Result};
 use async_trait::async_trait;
@@ -28,8 +29,12 @@ pub struct AutoAdapter {
     s3_config: Option<S3Config>,
     #[cfg(feature = "ftp")]
     ftp_config: Option<FtpConfig>,
-    /// 可选的断点续传持久化存储，注入后每完成一个分片自动保存进度
-    resume_store: Option<Arc<ResumeStore>>,
+    /// 可选的断点续传持久化存储，注入后每完成一个分片自动保存进度。
+    /// Phase 3.4d-ii: stored as `Arc<dyn ResumeStorage>` so this
+    /// adapter can host any storage backend (in-memory, SQLite,
+    /// future cloud-shim) — the concrete [`ResumeStore`] still works
+    /// thanks to the generic [`Self::with_resume_store`] builder.
+    resume_store: Option<Arc<dyn ResumeStorage>>,
     /// Optional inbox stitched into every HTTP `HttpTransfer` this
     /// adapter constructs (via [`HttpTransfer::with_receipt_sink`])
     /// so receiver-side application acks parsed off the `/upload`
@@ -86,8 +91,20 @@ impl AutoAdapter {
         }
     }
 
-    /// Builder: 注入断点续传持久化存储
+    /// Builder: 注入文件后端 [`ResumeStore`]。Concrete-typed for
+    /// back-compat with existing call sites (`src/main.rs`, integration
+    /// tests). See [`Self::with_resume_storage`] for the trait-object
+    /// variant added in Phase 3.4d-ii.
     pub fn with_resume_store(mut self, store: Arc<ResumeStore>) -> Self {
+        self.resume_store = Some(store as Arc<dyn ResumeStorage>);
+        self
+    }
+
+    /// Builder: 注入任意 [`ResumeStorage`] 实现。Phase 3.4d-ii
+    /// companion to [`Self::with_resume_store`] for tests and future
+    /// backends that don't want to materialise a concrete
+    /// [`ResumeStore`].
+    pub fn with_resume_storage(mut self, store: Arc<dyn ResumeStorage>) -> Self {
         self.resume_store = Some(store);
         self
     }
@@ -111,7 +128,7 @@ impl AutoAdapter {
     fn build_http_transfer(&self, with_resume: bool) -> HttpTransfer {
         let mut ht = if with_resume {
             if let Some(store) = &self.resume_store {
-                HttpTransfer::new_with_client_and_resume(
+                HttpTransfer::new_with_client_and_resume_storage(
                     Arc::clone(&self.shared_client),
                     self.http_config.clone(),
                     Arc::clone(store),
