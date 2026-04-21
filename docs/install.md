@@ -50,12 +50,15 @@ Grab a tarball/zip from
 verify the `.sha256`, extract, and place `aerosync` / `aerosync-mcp` on
 your `$PATH`.
 
+Replace `<TAG>` with the release you want (e.g. `v0.3.0`) and
+`<VER>` with the matching bare version (e.g. `0.3.0`):
+
 ```bash
-curl -LO https://github.com/TechVerseOdyssey/AeroSync/releases/download/v0.1.0/aerosync-0.1.0-aarch64-apple-darwin.tar.gz
-curl -LO https://github.com/TechVerseOdyssey/AeroSync/releases/download/v0.1.0/aerosync-0.1.0-aarch64-apple-darwin.tar.gz.sha256
-shasum -a 256 -c aerosync-0.1.0-aarch64-apple-darwin.tar.gz.sha256
-tar -xzf aerosync-0.1.0-aarch64-apple-darwin.tar.gz
-sudo mv aerosync-0.1.0-aarch64-apple-darwin/aerosync* /usr/local/bin/
+curl -LO https://github.com/TechVerseOdyssey/AeroSync/releases/download/<TAG>/aerosync-<VER>-aarch64-apple-darwin.tar.gz
+curl -LO https://github.com/TechVerseOdyssey/AeroSync/releases/download/<TAG>/aerosync-<VER>-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 -c aerosync-<VER>-aarch64-apple-darwin.tar.gz.sha256
+tar -xzf aerosync-<VER>-aarch64-apple-darwin.tar.gz
+sudo mv aerosync-<VER>-aarch64-apple-darwin/aerosync* /usr/local/bin/
 ```
 
 ## 5. From source

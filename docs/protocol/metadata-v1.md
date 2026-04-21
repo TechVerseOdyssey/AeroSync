@@ -1,6 +1,6 @@
 # Metadata Envelope (v1)
 
-> **Status**: implemented in v0.2.0. Wire version `aerosync-wire/1`.
+> **Status**: introduced in v0.2.x; v0.3 wire unchanged. Wire version `aerosync-wire/1`.
 > **Design source**: [RFC-003 Metadata Envelope](../rfcs/RFC-003-metadata-envelope.md).
 > **Scope**: this document is the operator-/integrator-facing reference for
 > the on-the-wire and on-disk shape of the metadata envelope, the size
@@ -134,22 +134,22 @@ return.
 
 ## 4. Persistence and queries
 
-### 4.1 On-disk format (v0.2.0)
+### 4.1 On-disk format
 
-In v0.2.0 the receiver `HistoryStore` is JSONL at
-`~/.config/aerosync/history.jsonl`. Each record gains an optional
-`metadata` field of shape `MetadataJson` (a hand-written serde
-adapter that mirrors the protobuf schema; see
+Introduced in v0.2.x and unchanged through v0.3: the receiver
+`HistoryStore` is JSONL at `~/.config/aerosync/history.jsonl`. Each
+record gains an optional `metadata` field of shape `MetadataJson` (a
+hand-written serde adapter that mirrors the protobuf schema; see
 `src/core/metadata.rs::MetadataJson`). Records written by older
 versions deserialize cleanly to `metadata: None`.
 
-> **Limitation (deferred to v0.2.1):** there is no SQLite/JSON1 index
-> on `metadata` in v0.2.0. `HistoryStore::query` performs a full
-> linear scan of the JSONL file; cost is `O(N)` where `N` is the
-> number of history records. RFC-003 §11 task #5 (SQLite migration
-> with `json_extract` indices on `trace_id` and `conversation_id`)
-> is tracked for the v0.2.1 milestone. `rusqlite` / `sqlx` are
-> intentionally **not** added to `Cargo.toml` yet.
+> **Limitation:** there is still no SQLite/JSON1 index on `metadata`
+> as of v0.3. `HistoryStore::query` performs a full linear scan of the
+> JSONL file; cost is `O(N)` where `N` is the number of history
+> records. RFC-003 §11 task #5 (SQLite migration with `json_extract`
+> indices on `trace_id` and `conversation_id`) is tracked for a future
+> milestone. `rusqlite` / `sqlx` are intentionally **not** added to
+> `Cargo.toml` yet.
 
 ### 4.2 Query model
 
@@ -315,8 +315,9 @@ route_to_tenant_inbox(tenant, incoming.path()).await?;
   anything an application wants to ship and the schema doesn't model
   belongs there.
 - The wire-version stays `aerosync-wire/1` as long as no field is
-  removed or renumbered. v0.2.1's SQLite migration is on-disk only
-  and does not bump the wire version.
+  removed or renumbered. v0.3 wire is byte-identical to v0.2.x; any
+  future SQLite migration is on-disk only and does not bump the wire
+  version.
 
 ## 10. See also
 

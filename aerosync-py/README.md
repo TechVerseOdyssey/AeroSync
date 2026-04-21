@@ -1,70 +1,52 @@
 # aerosync (Python SDK)
 
 In-process Python bindings for the [AeroSync](https://github.com/TechVerseOdyssey/AeroSync)
-file transfer engine. Lets a Python application send and receive files
-via QUIC / HTTP without spawning subprocesses or speaking MCP.
+file-transfer engine. Lets a Python application send and receive files
+over QUIC / HTTP without spawning subprocesses or speaking MCP, while
+keeping the engine's resume / receipts / metadata-envelope semantics
+intact.
 
-> Status: **alpha** — w5 of v0.2.0. Phase 1A scaffold (this commit)
-> covers the workspace member, tokio runtime bridge, and the public
-> API shells. See [RFC-001](../docs/rfcs/RFC-001-python-sdk.md) for
-> the full design and the v0.2.0 task table.
-
-## Install (from source)
-
-Wheels for `pip install aerosync` ship in w7 (RFC-001 task #19). Until
-then, build locally with [maturin](https://www.maturin.rs/):
+## Install
 
 ```bash
-pip install maturin pytest
-maturin develop -m aerosync-py/Cargo.toml
-pytest aerosync-py/tests/
+pip install aerosync
 ```
 
-You will need a working Rust toolchain (1.89+) and Python 3.9+.
+We ship a single `abi3-py39` wheel per OS — one wheel works on
+CPython 3.9, 3.10, 3.11, 3.12, … macOS (universal2) / Linux glibc
+(x86_64 + aarch64) / Linux musl (x86_64) / Windows (x86_64).
+Bumping the abi3 floor would be a SemVer-breaking change for the SDK.
 
-## Usage
+## Quickstart
 
 ```python
+import asyncio
 import aerosync
 
-async def producer():
+async def main():
     async with aerosync.client() as c:
-        receipt = await c.send("output.csv", to="data-cleaner")
-        await receipt.processed()
+        receipt = await c.send(
+            "report.csv",
+            to="127.0.0.1:7788",
+            metadata={"trace_id": "run-123", "agent_id": "scraper"},
+        )
+        outcome = await receipt.processed()
+        print(outcome["status"])  # → "acked"
 
-async def consumer():
-    async with aerosync.receiver(name="data-cleaner") as r:
-        async for incoming in r:
-            print(incoming.path)
-            # await incoming.ack()    # w6
+asyncio.run(main())
 ```
 
-## What is in this commit (Phase 1A — w5)
+Pair it with a receiver loop on the other side; the verbatim
+end-to-end round-trip (sender + receiver async-with) lives in the
+[top-level README](../README.md#python-sdk-quickstart-v030-rc1) and
+is exercised by `tests/test_killer_demo.py` — if that test fails,
+both READMEs are a lie.
 
-| RFC-001 task | Status |
-| ------------ | ------ |
-| #1 scaffold + maturin + pyo3 hello-world | done |
-| #2 pyo3-async-runtimes tokio bridge      | done |
-| #3 `Client.send()` MVP                   | Group B (this week) |
-| #4 `Client.send_directory()`             | Group B (this week) |
-| #5 `Receiver` + async iterator           | Group C (this week) |
-| #6 `IncomingFile` (no ack/nack yet)      | Group C (this week) |
-| #7 `aerosync.discover()` mDNS wrapper    | Group C (this week) |
-| #8 records (`Peer`/`Progress`/`HistoryEntry`) | Group C (this week) |
+## Reference
 
-Tasks #9 (`Client.history()`), #10 (custom exception hierarchy),
-#11 (`Config`), #12 (bytes / `BinaryIO` sources), #13 (`on_progress`),
-#14 (full `Receipt` state machine), #15 (`IncomingFile.ack/nack`), and
-#16 (metadata pass-through) are scheduled for w6 (Phase 1B / 2). Tasks
-#17–#22 (mypy / pytest matrix / wheel CI / PyPI / docs / notebooks)
-land in w7 + w8 (Phase 3).
+- Design rationale and public-API contract: [RFC-001 Python SDK](../docs/rfcs/RFC-001-python-sdk.md).
+- Wire metadata schema (shared with the Rust crate): [`docs/protocol/metadata-v1.md`](../docs/protocol/metadata-v1.md).
+- Release / publish dance for maintainers: [`docs/python/RELEASE-CHECKLIST.md`](../docs/python/RELEASE-CHECKLIST.md).
+- Type stubs (PEP 561 `py.typed`, `mypy --strict` clean): [`python/aerosync/_native.pyi`](python/aerosync/_native.pyi).
 
-## Open-questions sign-off (RFC-001 §11)
-
-| # | Question | Answer accepted in w5 |
-| - | -------- | --------------------- |
-| 1 | abi3 vs full Python matrix | `abi3-py39` — one wheel per OS |
-| 2 | Module name layout | `aerosync._native` (Rust) re-exported by `aerosync` (public) |
-| 3 | tokio runtime sharing | one shared runtime per process, `OnceCell` |
-| 4 | Pydantic dependency | no — `@dataclass(slots=True)` |
-| 5 | sync wrapper | no — document `asyncio.run()` recipe |
+Current: **v0.3.0-rc1** (matches the workspace `[package].version` in `Cargo.toml`).

@@ -16,10 +16,14 @@ The MSRV is **Rust 1.89**. CI verifies this on every PR.
 
 ## Project layout
 
-| Crate          | Purpose                                                                                                                                                                                                                            |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `aerosync`     | Library + `aerosync` CLI binary. The library is split into two sub-modules: `aerosync::core` (transfer engine, resume store, mDNS, auth, file receiver) and `aerosync::protocols` (HTTP / QUIC / S3 / FTP + the auto-adapter).     |
-| `aerosync-mcp` | Thin binary wrapping the `aerosync` library and exposing it as an MCP server (8 tools) over stdio. Depends on `aerosync` only.                                                                                                     |
+| Crate             | Purpose                                                                                                                                                                                                                            |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `aerosync`        | Library + `aerosync` CLI binary. The library is split into two sub-modules: `aerosync::core` (transfer engine, resume store, mDNS, auth, file receiver) and `aerosync::protocols` (HTTP / QUIC / S3 / FTP + the auto-adapter).     |
+| `aerosync-mcp`    | Thin binary wrapping the `aerosync` library and exposing it as an MCP server (11 tools) over stdio. Depends on `aerosync` only.                                                                                                    |
+| `aerosync-proto`  | Wire-format protobuf bindings (ALPN `aerosync/1`). Source of truth for `Metadata`, `ControlFrame`, `ReceiptFrame`. Public; consumed by `aerosync` and `aerosync-py`.                                                               |
+| `aerosync-py`     | PyO3 Python SDK (`pip install aerosync`). abi3-py39 wheel; published only to PyPI.                                                                                                                                                 |
+| `aerosync-domain` | **Internal-only (v0.3.0+)** — pure value objects, state machines, errors. Re-exported through `aerosync::core::*`. May break in v0.4; do not depend on directly.                                                                   |
+| `aerosync-infra`  | **Internal-only (v0.3.0+)** — IO impls (TLS, audit, history JSONL, resume JSON, config). Re-exported through `aerosync::core::*`. May break in v0.4; do not depend on directly.                                                    |
 
 ## Running the test suite
 
@@ -30,8 +34,8 @@ cargo test -p aerosync --test protocols_pipeline # one integration test
 cargo test -p aerosync-mcp                       # the MCP server crate
 ```
 
-There are 41+ tests in `aerosync-mcp` alone — please add coverage when
-you add or change behaviour.
+There are 41+ tests in `aerosync-mcp` alone (covering all 11 MCP
+tools) — please add coverage when you add or change behaviour.
 
 ## Style
 

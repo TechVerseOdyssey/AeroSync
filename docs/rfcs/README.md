@@ -25,7 +25,7 @@ Draft  →  Review  →  Accepted  →  Implemented  →  (Superseded)
 | 001 | [Python SDK](RFC-001-python-sdk.md)             | Draft  | v0.2.0 | RFC-002, RFC-003 |
 | 002 | [Receipt Protocol](RFC-002-receipt-protocol.md) | Draft  | v0.2.0 | —          |
 | 003 | [Metadata Envelope](RFC-003-metadata-envelope.md) | Draft  | v0.2.0 | RFC-002    |
-| 004 | [WAN Rendezvous & NAT Traversal](RFC-004-wan-rendezvous.md) | Draft  | v0.3.0 | RFC-002, RFC-003 |
+| 004 | [WAN Rendezvous & NAT Traversal](RFC-004-wan-rendezvous.md) | Draft  | v0.4   | RFC-002, RFC-003 |
 
 ## v0.2.0 milestone summary
 

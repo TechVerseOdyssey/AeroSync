@@ -21,17 +21,17 @@
 | `rclone`   |   ✓    |     ✗     |         ✗         |          ✗           |            ✗             |
 | **AeroSync** | **✓**  |   **✓**   |       **✓**       |        **✓**         |          **✓**           |
 
-Designed for the use case nothing else covers cleanly: **one agent on machine A asks another agent on machine B "send me that 30 GB dataset"**, and it just works — over LAN (QUIC, mDNS-discovered) or WAN (HTTP fallback), resumable, with a single binary on each side.
+Designed for the use case nothing else covers cleanly: **one agent on machine A asks another agent on machine B "send me that 30 GB dataset"**, and it just works — LAN 完整支持（QUIC + mDNS 自动发现，HTTP 回退），WAN 规划中（[RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md)，目标 v0.4），resumable, with a single binary on each side.
 
-## Status (v0.2.1)
+## Status (v0.3.0-rc1)
 
 - **Rust crate** (`aerosync`, `aerosync-mcp`, `aerosync-proto`) — production-shaped APIs, 630+ tests, MIT. v0.3.0 splits the codebase into `aerosync-domain` (pure value objects + state machines) and `aerosync-infra` (filesystem + TLS + audit + history persistence), with the legacy `aerosync::core::*` import paths preserved via re-exports. Both new crates are **internal** for v0.3.0 — they may break in v0.4 — and should not be depended on directly.
 - **Python SDK** (`aerosync` on PyPI) — async-first PyO3 binding, abi3-py39 wheels for macOS / Linux glibc+musl / Windows. First stable in v0.2.0; v0.2.1 hardens HTTP+QUIC metadata propagation, adds `Receiver.idle_timeout`, and lights up the killer-demo round-trip end-to-end.
 - **Receipt protocol** ([RFC-002](docs/rfcs/RFC-002-receipt-protocol.md)) — sender knows when receiver actually processed; 7-state machine, HTTP SSE control plane (`GET /v1/receipts/:id/events`), idempotent ack/nack/cancel. v0.2.1 wires the QUIC bidi receipt stream end-to-end (`w3c-quic-receipt-wiring` closed) and adds HTTP wire-level `receipt_ack` echo (RFC-002 §6.4).
 - **Metadata envelope** ([RFC-003](docs/rfcs/RFC-003-metadata-envelope.md)) — every transfer carries structured metadata (`trace_id`, `lifecycle`, free-form `user_metadata`); persisted, queryable, propagated identically over HTTP and QUIC. See [`docs/protocol/metadata-v1.md`](docs/protocol/metadata-v1.md).
-- **MCP** — 9 tools for AI agents (push, pull, history, receipts). New in v0.2.1: `request_file` symmetric pull tool. See [`docs/mcp-integration.md`](docs/mcp-integration.md).
+- **MCP** — 11 tools for AI agents (push, pull, history, receipts, receipt waiting/cancel). New in v0.2.1: `request_file` symmetric pull tool. See [`docs/mcp-integration.md`](docs/mcp-integration.md).
 
-## Python SDK quickstart (v0.2.1)
+## Python SDK quickstart (v0.3.0-rc1)
 
 ```bash
 pip install aerosync
@@ -89,7 +89,7 @@ The full Python reference lives under [`aerosync-py/python/aerosync/`](aerosync-
 - **End-to-end SHA-256** integrity check.
 - **HMAC-SHA256 bearer token** auth.
 - **TOML config** with CLI overrides.
-- **MCP server** — exposes 8 tools (`send_file`, `send_directory`, `start_receiver`, …) so AI agents can drive transfers natively. See [`docs/mcp-integration.md`](docs/mcp-integration.md).
+- **MCP server** — exposes 11 tools (`send_file`, `send_directory`, `start_receiver`, …) so AI agents can drive transfers natively. See [`docs/mcp-integration.md`](docs/mcp-integration.md).
 
 ## Install
 
@@ -241,7 +241,7 @@ AeroSync ships an [MCP](https://modelcontextprotocol.io) server (`aerosync-mcp`)
 }
 ```
 
-8 tools are exposed: `send_file`, `send_directory`, `start_receiver`, `stop_receiver`, `get_receiver_status`, `get_transfer_status`, `discover_receivers`, `list_history`. Full schemas, runtime envs and security notes: [`docs/mcp-integration.md`](docs/mcp-integration.md).
+11 tools are exposed: `send_file`, `send_directory`, `start_receiver`, `request_file`, `stop_receiver`, `get_receiver_status`, `list_history`, `discover_receivers`, `get_transfer_status`, `wait_receipt`, `cancel_receipt`. Full schemas, runtime envs and security notes: [`docs/mcp-integration.md`](docs/mcp-integration.md).
 
 ## Protocol details
 
@@ -284,21 +284,28 @@ aerosync (CLI)              aerosync-mcp (MCP server for AI agents)
        │                              │
        └──────────────┬───────────────┘
                       ▼
-              aerosync-core
+              aerosync (root: app + protocol layer)
               ├── TransferEngine    concurrent workers (FuturesUnordered + Semaphore)
               ├── ProgressMonitor   progress reporting
-              ├── ResumeStore       chunked-resume persistence
               ├── FileReceiver      HTTP/QUIC receiver
-              └── AuthManager       HMAC-SHA256 tokens
+              ├── AutoAdapter       protocol routing (auto-negotiation)
+              ├── HttpTransfer      HTTP up/down (shared Arc<Client>)
+              ├── QuicTransfer      QUIC (quinn + rustls)
+              ├── S3Transfer        S3 (AWS SigV4)
+              └── FtpTransfer       FTP (suppaftp async)
                       │
-                      ▼
-            aerosync-protocols
-            ├── AutoAdapter   protocol routing (auto-negotiation)
-            ├── HttpTransfer  HTTP up/down (shared Arc<Client>)
-            ├── QuicTransfer  QUIC (quinn + rustls)
-            ├── S3Transfer    S3 (AWS SigV4)
-            └── FtpTransfer   FTP (suppaftp async)
+        ┌─────────────┴─────────────┐
+        ▼                           ▼
+ aerosync-domain              aerosync-infra
+ (pure value objects,         (filesystem + TLS + audit
+  state machines, errors)      + history persistence,
+  re-exported via               JSON/JSONL impls of the
+  aerosync::core::*)            Storage traits)
+
+ aerosync-proto              wire format (protobuf, ALPN aerosync/1)
 ```
+
+Both `aerosync-domain` and `aerosync-infra` are **internal-only** in v0.3.0 — re-exported through `aerosync::core::*` for back-compat; do not depend on them directly until v0.4.
 
 ### Concurrency strategy
 

@@ -170,10 +170,13 @@ Run through this list every time you cut a new SDK release.
 
 ## Notes / known caveats
 
-- **Windows-on-ARM** is NOT in the matrix for v0.2.0 — see comment
-  inline in `python-release.yml`. Filed against v0.2.1.
-- **musllinux aarch64** likewise deferred; needs more soak time on
-  the maturin-action qemu path.
+- **Windows-on-ARM** is NOT in the wheel matrix — see comment inline
+  in `python-release.yml`. Tracked for evaluation in a future minor
+  release once GitHub Actions / cibuildwheel runners stabilise on
+  that target.
+- **musllinux aarch64** likewise deferred to a future minor release;
+  needs more soak time on the maturin-action qemu path before we
+  ship it as a supported wheel.
 - **abi3 tagging** is single-wheel-per-platform: each wheel works on
   CPython 3.9, 3.10, 3.11, 3.12, … Bumping the abi3 floor is a SemVer
   break for the SDK and must be a major-version bump.
