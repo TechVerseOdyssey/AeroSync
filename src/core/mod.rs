@@ -33,7 +33,20 @@ pub use aerosync_domain::metadata;
 pub mod metrics;
 pub mod preflight;
 pub mod progress;
-pub mod receipt;
+// `receipt` migrated to `aerosync-domain` in v0.3.0 Phase 3.4a (the
+// move was deferred from Phase 1f to land alongside the Phase 3
+// aggregate-root work — see refactor-plan §3 and the
+// `aerosync_domain::receipt` module docs). The `pub use` re-export
+// keeps every existing path (`crate::core::receipt::Receipt`,
+// `aerosync::core::receipt::Sender`, etc.) resolving for the 17
+// in-workspace callers (history.rs, transfer.rs, server.rs,
+// receipts_http.rs, receipt_registry.rs, incoming_file.rs,
+// quic_receipt.rs, mcp/server.rs, py bindings, 5 integration
+// tests) without forcing any import-site update. The downstream
+// `pub use receipt::{...}` block below still works because
+// `receipt` is now in scope as an alias for
+// `aerosync_domain::receipt`.
+pub use aerosync_domain::receipt;
 pub mod receipt_registry;
 pub mod receipts_http;
 // `resume` migrated to `aerosync-infra` in v0.3.0 Phase 2.2 with one

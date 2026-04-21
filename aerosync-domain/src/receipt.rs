@@ -241,7 +241,7 @@ impl<Side> Receipt<Side> {
     /// The phantom side is selected by the binding's type annotation:
     ///
     /// ```
-    /// # use aerosync::core::receipt::{Receipt, Sender, Receiver};
+    /// # use aerosync_domain::receipt::{Receipt, Sender, Receiver};
     /// # use uuid::Uuid;
     /// let s: Receipt<Sender>   = Receipt::new(Uuid::new_v4());
     /// let r: Receipt<Receiver> = Receipt::new(Uuid::new_v4());

@@ -432,6 +432,13 @@ impl HistoryStore {
                     State::Completed(CompletedTerminal::Acked) => {
                         Some((ReceiptStateLabel::Acked, None))
                     }
+                    // Forward-compat wildcard required because
+                    // `CompletedTerminal` is `#[non_exhaustive]` and
+                    // this match is now in a different crate from the
+                    // enum (post-Phase 3.4a `Receipt` move). Treat
+                    // any future Completed variant as "acked" — it's
+                    // by definition a successful terminal.
+                    State::Completed(_) => Some((ReceiptStateLabel::Acked, None)),
                     State::Failed(FailedTerminal::Nacked { reason }) => {
                         Some((ReceiptStateLabel::Nacked, Some(reason)))
                     }
@@ -441,6 +448,13 @@ impl HistoryStore {
                     State::Failed(FailedTerminal::Errored { code, detail }) => Some((
                         ReceiptStateLabel::Errored,
                         Some(format!("code={code} {detail}")),
+                    )),
+                    // Same forward-compat rationale as above. Unknown
+                    // failed variants fall under `Errored` so the audit
+                    // trail still records a useful diagnostic.
+                    State::Failed(_) => Some((
+                        ReceiptStateLabel::Errored,
+                        Some("unknown failed terminal variant".to_string()),
                     )),
                 } {
                     let _ = store.record_receipt_terminal(id, label, reason).await;

@@ -63,9 +63,21 @@ pub mod error;
 /// shipped without them.
 pub mod metadata;
 
-// `receipt` (state machine extraction) — DEFERRED to Phase 3 because
-// `TransferSession` (the Phase 3 aggregate root) will reorganize
-// receipt logic anyway. Doing the split twice is wasteful.
+/// Per-receipt state machine ([`receipt::Receipt`] + side markers
+/// [`receipt::Sender`] / [`receipt::Receiver`], the [`receipt::State`]
+/// machine, [`receipt::Event`] inputs, terminal payloads
+/// [`receipt::CompletedTerminal`] / [`receipt::FailedTerminal`] /
+/// [`receipt::Outcome`], and the [`receipt::StateError`]
+/// invalid-transition error). Migrated verbatim from
+/// `src/core/receipt.rs` in v0.3.0 Phase 3.4a (the move was deferred
+/// from Phase 1f to land alongside the Phase 3 aggregate-root work
+/// per refactor-plan §3). The module's only deps are
+/// `tokio::sync::watch` (allowed per refactor-plan §4 D1), `uuid`,
+/// and `std::{fmt, marker::PhantomData}` — no transport, no
+/// filesystem, no protobuf coupling. The legacy
+/// `aerosync::core::receipt::*` import path keeps resolving via the
+/// `pub use aerosync_domain::receipt;` shim in `src/core/mod.rs`.
+pub mod receipt;
 
 // ── Phase 2 modules ───────────────────────────────────────────────────
 

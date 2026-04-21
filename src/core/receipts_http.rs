@@ -293,6 +293,12 @@ impl From<&State> for StateView {
             State::StreamClosed => StateView::StreamClosed,
             State::Processing => StateView::Processing,
             State::Completed(CompletedTerminal::Acked) => StateView::Completed { outcome: "acked" },
+            // Forward-compat wildcard required because
+            // `CompletedTerminal` is `#[non_exhaustive]` and this match
+            // is now in a different crate from the enum (post-Phase
+            // 3.4a `Receipt` move). Surface unknown-but-successful
+            // terminals with a generic "completed" outcome.
+            State::Completed(_) => StateView::Completed { outcome: "completed" },
             State::Failed(FailedTerminal::Cancelled { reason }) => StateView::Failed {
                 kind: "cancelled",
                 reason: Some(reason.clone()),
@@ -310,6 +316,13 @@ impl From<&State> for StateView {
                 reason: None,
                 code: Some(*code),
                 detail: Some(detail.clone()),
+            },
+            // Same forward-compat rationale as above.
+            State::Failed(_) => StateView::Failed {
+                kind: "unknown",
+                reason: None,
+                code: None,
+                detail: None,
             },
         }
     }
