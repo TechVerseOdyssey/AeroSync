@@ -91,9 +91,17 @@ Run through this list every time you cut a new SDK release.
 
 - [ ] `aerosync-py/Cargo.toml` — `[package].version`
 - [ ] `aerosync-py/pyproject.toml` — `[project].version`
-- [ ] Both must match exactly. The Rust crate isn't published, but
-      maturin uses `Cargo.toml` as the source of truth for the wheel
-      filename's version segment.
+- [ ] Both must match semantically. The Rust crate isn't published,
+      but maturin uses `Cargo.toml` as the source of truth for the
+      wheel filename's version segment. Note that pre-release suffixes
+      differ in spelling between the two files — Cargo uses SemVer
+      (`0.3.0-rc1`) while `pyproject.toml` uses PEP 440 normalized
+      form (`0.3.0rc1`, no hyphen). Stable releases (`0.3.0`) are
+      identical in both.
+- [ ] No other files need a version bump. In particular,
+      `aerosync-py/tests/test_smoke.py` reads `[package].version`
+      from `Cargo.toml` at test-time, so the version assertion stays
+      in sync automatically — there is no constant to edit.
 
 ### 2 · Update CHANGELOG.md
 

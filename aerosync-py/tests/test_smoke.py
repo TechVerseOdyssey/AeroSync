@@ -7,6 +7,30 @@ end-to-end with `pytest aerosync-py/tests/`.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
+
+def _cargo_pkg_version() -> str:
+    """Read `[package].version` from `aerosync-py/Cargo.toml`.
+
+    The Rust `version()` binding returns `env!("CARGO_PKG_VERSION")`,
+    which is sourced from this same field. Reading it dynamically here
+    means release bumps only have to touch `Cargo.toml` — the smoke
+    test follows automatically instead of needing a paired edit.
+    """
+    cargo_toml = Path(__file__).resolve().parent.parent / "Cargo.toml"
+    with cargo_toml.open("rb") as f:
+        data = tomllib.load(f)
+    version = data["package"]["version"]
+    assert isinstance(version, str)
+    return version
+
 
 def test_module_imports() -> None:
     import aerosync
@@ -14,8 +38,7 @@ def test_module_imports() -> None:
     v = aerosync.version()
     assert isinstance(v, str)
     assert v == aerosync.__version__
-    # Cargo package version pin from `aerosync-py/Cargo.toml`.
-    assert v == "0.2.1"
+    assert v == _cargo_pkg_version()
 
 
 def test_public_surface_contains_factories() -> None:
