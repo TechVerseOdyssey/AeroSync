@@ -8,8 +8,8 @@
 //! - **System fields (1-19)** — `id`, `from_node`, `to_node`,
 //!   `created_at`, `content_type`, `size_bytes`, `sha256`,
 //!   `file_name`, `protocol`. The application **cannot** set these
-//!   via [`MetadataBuilder`]. They are populated by
-//!   [`crate::core::transfer::TransferEngine`] just before
+//!   via [`crate::metadata::MetadataBuilder`]. They are populated by
+//!   `TransferEngine` (see `aerosync` main crate) just before
 //!   `TransferStart` is sent.
 //!
 //! - **Well-known fields (20-99)** — `trace_id`, `conversation_id`,
@@ -19,7 +19,7 @@
 //! - **`user_metadata` (99)** — free-form `string → string` map for
 //!   application use. Bounded by RFC-003 §6 size limits.
 //!
-//! # Size limits (enforced by [`MetadataBuilder::build`])
+//! # Size limits (enforced by [`crate::metadata::MetadataBuilder::build`])
 //!
 //! | Constraint                          | Limit       |
 //! | ----------------------------------- | ----------- |
@@ -142,7 +142,7 @@ pub enum MetadataError {
 ///
 /// The builder accepts only **well-known** and **`user_metadata`**
 /// fields. System fields (`id`, `sha256`, `created_at`, …) are
-/// populated by [`crate::core::transfer::TransferEngine`] before
+/// populated by `TransferEngine` (see `aerosync` main crate) before
 /// [`Metadata`] is sealed onto `TransferStart`.
 ///
 /// ```no_run
@@ -334,7 +334,7 @@ impl MetadataBuilder {
 /// Validate a fully-populated [`Metadata`] (system fields included)
 /// against the RFC-003 §6 wire-size cap and the `file_name` /
 /// `parent_file_ids` complexity limits. Used by
-/// [`crate::core::transfer::TransferEngine`] after it has stamped
+/// `TransferEngine` (see `aerosync` main crate) after it has stamped
 /// the system fields in.
 pub fn validate_sealed(meta: &Metadata) -> Result<(), MetadataError> {
     if meta.file_name.len() > MAX_FILE_NAME_BYTES {

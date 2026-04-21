@@ -1,5 +1,5 @@
-//! `TransferSession` companion types — [`SessionId`], [`SessionKind`],
-//! [`SessionStatus`].
+//! `TransferSession` companion types — [`crate::session::SessionId`],
+//! [`crate::session::SessionKind`], [`crate::session::SessionStatus`].
 //!
 //! Per `docs/v0.3.0-refactor-plan.md` §3 Phase 3, this module owns the
 //! pure-data foundations the upcoming `TransferSession` aggregate root
@@ -11,7 +11,7 @@
 //!
 //! ## v0.3.0 Phase 3.1 status (skeleton)
 //!
-//! No existing AeroSync code references [`SessionId`] yet — this is
+//! No existing AeroSync code references [`crate::session::SessionId`] yet — this is
 //! purely additive infrastructure. Phases 3.4 / 3.5 will wire it
 //! through `TransferEngine::send_with_metadata` and
 //! `FileReceiver::accept_*` once the aggregate root lands. The
@@ -20,7 +20,7 @@
 //!
 //! ## Naming
 //!
-//! [`SessionId`] is the **upper-level semantic id** — one logical
+//! [`crate::session::SessionId`] is the **upper-level semantic id** — one logical
 //! batch transfer of N files == one session. `TaskId` (lives in the
 //! root `aerosync` crate, attached to `TransferTask`) remains the
 //! per-file data-stream id. Per refactor-plan §4 D3, both ids

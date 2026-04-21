@@ -10,7 +10,7 @@
 //! - `.detail` — the original Rust error message (the same string
 //!   passed as the exception's first positional argument).
 //!
-//! The hierarchy is wired up at module init by [`register`]. Once the
+//! The hierarchy is wired up at module init by `register`. Once the
 //! `_native` extension has been imported these classes are reachable
 //! as `aerosync._native.AeroSyncError`, …; the public Python package
 //! re-exports them under `aerosync.AeroSyncError` etc.

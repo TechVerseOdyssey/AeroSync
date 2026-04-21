@@ -112,7 +112,7 @@ impl AutoAdapter {
     /// Builder: stitch the engine's HTTP receipt inbox (obtained from
     /// [`crate::core::transfer::TransferEngine::http_receipt_inbox`])
     /// into every `HttpTransfer` this adapter constructs. See
-    /// [`AutoAdapter::engine_receipt_inbox`] for the full contract.
+    /// `AutoAdapter::engine_receipt_inbox` for the full contract.
     /// This is the canonical hook the Python `Client.__aenter__` uses
     /// to wire receiver→sender ack propagation on the HTTP transport.
     pub fn with_engine_receipt_inbox(mut self, tx: mpsc::UnboundedSender<HttpReceiptAck>) -> Self {

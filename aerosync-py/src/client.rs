@@ -30,7 +30,7 @@ use uuid::Uuid;
 /// factory which returns an async context manager.
 ///
 /// `chunk_size_default` and `timeout_default` cache the values pulled
-/// from the user-supplied [`crate::config::PyConfigView`] so subsequent
+/// from the user-supplied `Config` (see [`crate::config::ResolvedConfig`]) so subsequent
 /// `send()` calls without explicit `chunk_size=` / `timeout=` kwargs
 /// can fall back to them. RFC-001 §5.7 lists these as the only two
 /// per-call defaults that travel via `Config`.

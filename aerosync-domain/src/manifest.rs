@@ -1,19 +1,20 @@
-//! File-manifest value objects — [`Hash`], [`FileEntry`], [`FileManifest`],
-//! and the [`ChunkPlan`] sibling that describes how a single file is sliced
-//! for resumable transfer.
+//! File-manifest value objects — [`struct@crate::manifest::Hash`],
+//! [`crate::manifest::FileEntry`], [`crate::manifest::FileManifest`],
+//! and the [`crate::manifest::ChunkPlan`] sibling that describes how a
+//! single file is sliced for resumable transfer.
 //!
 //! Per `docs/v0.3.0-refactor-plan.md` §3 (line 123, micro-PR 3.2), this
 //! module owns the **shape** of a transfer's payload: which files are
 //! involved, how big each is, what their content hashes are (when known),
 //! and how each one will be cut into upload chunks. The
 //! `TransferSession` aggregate root (Phase 3.3) holds one
-//! [`FileManifest`] and uses [`ChunkPlan`] to drive its sender / receiver
-//! tasks.
+//! [`crate::manifest::FileManifest`] and uses [`crate::manifest::ChunkPlan`]
+//! to drive its sender / receiver tasks.
 //!
 //! ## v0.3.0 Phase 3.2 status (skeleton)
 //!
 //! Like [`crate::session`], this module is **purely additive**: no
-//! existing AeroSync code constructs a [`FileManifest`] yet. Phase 3.4
+//! existing AeroSync code constructs a [`crate::manifest::FileManifest`] yet. Phase 3.4
 //! (`TransferEngine::send_*` migration) and Phase 3.5
 //! (`FileReceiver::accept_*` migration) will adopt the types in
 //! single-file commits. Today the closest analogue is the per-file
@@ -23,22 +24,23 @@
 //!
 //! ## Design notes
 //!
-//! - **Relative paths only.** Every [`FileEntry::relative_path`] is
+//! - **Relative paths only.** Every [`crate::manifest::FileEntry::relative_path`] is
 //!   relative to the manifest's owning `source_root` (sender side) or
 //!   `save_root` (receiver side); the roots themselves live one layer
 //!   up in [`crate::session::SessionKind`]. Construction validates
 //!   that no entry is absolute, contains a `..` segment, or starts
 //!   with a Windows drive letter — these would let a malicious peer
-//!   write outside the intended root. See [`ManifestError`].
+//!   write outside the intended root. See [`crate::manifest::ManifestError`].
 //!
 //! - **`Hash` is opaque.** AeroSync has historically threaded SHA-256
-//!   hashes as raw lowercase hex strings. The [`Hash`] newtype lifts
-//!   this to a typed value object so v0.4 can add Blake3 / xxh3 / …
-//!   without churning every call-site that currently writes
-//!   `String`-typed `sha256` fields. The on-disk and on-wire framing
-//!   is preserved — [`Hash`]'s serde adapter is `#[serde(into / from)]`
-//!   the legacy hex-string representation when the algorithm is
-//!   SHA-256, so any v0.2.x persisted state still parses.
+//!   hashes as raw lowercase hex strings. The [`struct@crate::manifest::Hash`]
+//!   newtype lifts this to a typed value object so v0.4 can add
+//!   Blake3 / xxh3 / … without churning every call-site that currently
+//!   writes `String`-typed `sha256` fields. The on-disk and on-wire
+//!   framing is preserved — [`struct@crate::manifest::Hash`]'s serde
+//!   adapter is `#[serde(into / from)]` the legacy hex-string
+//!   representation when the algorithm is SHA-256, so any v0.2.x
+//!   persisted state still parses.
 //!
 //! - **`ChunkPlan` is pure arithmetic.** It carries no state about
 //!   which chunks have been uploaded — that is [`crate::storage::ChunkState`]'s
@@ -63,7 +65,7 @@ use crate::storage::DEFAULT_CHUNK_SIZE;
 
 // ──────────────────────────── HashAlgo / Hash ──────────────────────────────────
 
-/// Cryptographic-or-checksum algorithm identifying a [`Hash`] value.
+/// Cryptographic-or-checksum algorithm identifying a [`struct@Hash`] value.
 ///
 /// Today AeroSync only emits SHA-256, so [`HashAlgo::Sha256`] is the
 /// only variant. The enum is `#[non_exhaustive]` so adding Blake3 /
@@ -126,7 +128,7 @@ pub struct Hash {
 }
 
 impl Hash {
-    /// Construct and validate a [`Hash`].
+    /// Construct and validate a [`struct@Hash`].
     ///
     /// Returns [`ManifestError::InvalidHash`] if `value` is the wrong
     /// length for `algo` or contains a non-hex character (uppercase

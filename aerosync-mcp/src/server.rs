@@ -502,8 +502,9 @@ impl AeroSyncMcpServer {
     /// `wait_receipt` and `cancel_receipt` resolve their `receipt_id`
     /// argument against this registry. Downstream code wiring a
     /// `TransferEngine` into the same process should clone this Arc
-    /// and pass it to [`TransferEngine::with_receipt_registry`] (TBD)
-    /// so issued receipts are visible to the MCP control surface.
+    /// and pass it to `TransferEngine::with_receipt_registry` (TBD,
+    /// see `aerosync` main crate) so issued receipts are visible to
+    /// the MCP control surface.
     pub fn receipt_registry(&self) -> Arc<ReceiptRegistry<ReceiptSender>> {
         Arc::clone(&self.receipt_registry)
     }

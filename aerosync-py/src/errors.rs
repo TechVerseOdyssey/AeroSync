@@ -79,9 +79,8 @@ pub fn timeout_to_py(_err: tokio::time::error::Elapsed) -> PyErr {
 }
 
 /// Build a [`TransferFailed`] from an arbitrary message + code. Used
-/// by [`PyReceipt::processed`](crate::receipt::PyReceipt::processed)
-/// in the future when we graduate it to the "raises on failure"
-/// contract from RFC-001 §5.5.
+/// by `PyReceipt::processed` in the future when we graduate it to the
+/// "raises on failure" contract from RFC-001 §5.5.
 #[allow(dead_code)]
 pub fn transfer_failed(msg: impl Into<String>, code: &'static str) -> PyErr {
     new_err::<TransferFailed>(msg, code)

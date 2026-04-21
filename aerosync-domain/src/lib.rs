@@ -81,7 +81,7 @@ pub mod receipt;
 
 // ── Phase 2 modules ───────────────────────────────────────────────────
 
-/// Storage abstractions ([`ResumeStorage`], [`HistoryStorage`]) and
+/// Storage abstractions ([`crate::storage::ResumeStorage`], [`crate::storage::HistoryStorage`]) and
 /// the pure-data value objects they transit. See `storage.rs` for the
 /// rationale of splitting data ↔ trait ↔ impl across three crates.
 ///

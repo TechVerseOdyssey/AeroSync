@@ -358,7 +358,7 @@ pub fn frame_to_event(frame: &ReceiptFrame) -> Option<Event> {
     }
 }
 
-/// Build a sender-side [`ReceiptFrame::Acked`] for the given receipt.
+/// Build a sender-side `ReceiptFrame` carrying [`receipt_frame::Body::Acked`] for the given receipt.
 pub fn build_acked_frame(receipt_id: &str) -> ReceiptFrame {
     ReceiptFrame {
         receipt_id: receipt_id.to_string(),
@@ -367,7 +367,7 @@ pub fn build_acked_frame(receipt_id: &str) -> ReceiptFrame {
     }
 }
 
-/// Build a [`ReceiptFrame::Nacked`] frame.
+/// Build a `ReceiptFrame` carrying [`receipt_frame::Body::Nacked`].
 pub fn build_nacked_frame(receipt_id: &str, reason: impl Into<String>) -> ReceiptFrame {
     ReceiptFrame {
         receipt_id: receipt_id.to_string(),
@@ -378,7 +378,7 @@ pub fn build_nacked_frame(receipt_id: &str, reason: impl Into<String>) -> Receip
     }
 }
 
-/// Build a [`ReceiptFrame::Received`] frame.
+/// Build a `ReceiptFrame` carrying [`receipt_frame::Body::Received`].
 pub fn build_received_frame(receipt_id: &str, sha256: impl Into<String>) -> ReceiptFrame {
     ReceiptFrame {
         receipt_id: receipt_id.to_string(),
@@ -390,7 +390,7 @@ pub fn build_received_frame(receipt_id: &str, sha256: impl Into<String>) -> Rece
     }
 }
 
-/// Build a [`ReceiptFrame::Failed`] frame from a numeric code + detail.
+/// Build a `ReceiptFrame` carrying [`receipt_frame::Body::Failed`] from a numeric code + detail.
 pub fn build_failed_frame(
     receipt_id: &str,
     code: aerosync_proto::ErrorCode,
@@ -406,7 +406,7 @@ pub fn build_failed_frame(
     }
 }
 
-/// Build a [`ReceiptFrame::BytesReceived`] frame.
+/// Build a `ReceiptFrame` carrying [`receipt_frame::Body::BytesReceived`].
 pub fn build_bytes_received_frame(receipt_id: &str, bytes: u64) -> ReceiptFrame {
     ReceiptFrame {
         receipt_id: receipt_id.to_string(),

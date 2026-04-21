@@ -250,7 +250,7 @@ impl QuicTransfer {
     /// Builder: install a sink that receives every inbound
     /// [`ReceiptFrame`] read off the bidi receipt control stream after
     /// the data stream completes. See the field-level docs on
-    /// [`QuicTransfer::receipt_sink`] for the full contract. Used by
+    /// `QuicTransfer::receipt_sink` for the full contract. Used by
     /// integration tests to assert sender-observed `Sealed` / `Acked`
     /// frames; the default constructor leaves the sink unset.
     pub fn with_receipt_sink(mut self, tx: mpsc::UnboundedSender<ReceiptFrame>) -> Self {

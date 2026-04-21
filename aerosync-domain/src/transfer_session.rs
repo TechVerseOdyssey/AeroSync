@@ -1,6 +1,7 @@
-//! [`TransferSession`] aggregate root + supporting value objects:
-//! [`ProtocolKind`], [`SessionEvent`], [`EventLog`], [`ReceiptLedger`],
-//! [`ReceiptEntry`], [`SessionStateError`].
+//! [`crate::transfer_session::TransferSession`] aggregate root + supporting value objects:
+//! [`crate::transfer_session::ProtocolKind`], [`crate::transfer_session::SessionEvent`],
+//! [`crate::transfer_session::EventLog`], [`crate::transfer_session::ReceiptLedger`],
+//! [`crate::transfer_session::ReceiptEntry`], [`crate::transfer_session::SessionStateError`].
 //!
 //! Per `docs/v0.3.0-refactor-plan.md` §3 (line 124, micro-PR 3.3),
 //! this module composes the Phase 3.1 / 3.2 companions into the
@@ -11,15 +12,15 @@
 //!
 //! Like the rest of Phase 3 to date, this module is **purely
 //! additive** — no existing AeroSync code constructs a
-//! [`TransferSession`] yet. The state machine is fully validated
-//! (illegal transitions return [`SessionStateError`]) and the event
+//! [`crate::transfer_session::TransferSession`] yet. The state machine is fully validated
+//! (illegal transitions return [`crate::transfer_session::SessionStateError`]) and the event
 //! log is fully usable, so Phase 3.4 / 3.5 can drive it from the
 //! engine and receiver respectively without further changes here.
 //!
-//! Phase 3.4c (this commit) adds [`ReceiptLedger`] — a per-session
+//! Phase 3.4c (this commit) adds [`crate::transfer_session::ReceiptLedger`] — a per-session
 //! map from `receipt_id` → ([`crate::receipt::State`] snapshot +
 //! [`crate::receipt::Outcome`] when terminal) — alongside
-//! [`EventLog`]. The ledger holds plain snapshots rather than
+//! [`crate::transfer_session::EventLog`]. The ledger holds plain snapshots rather than
 //! phantom-typed `Arc<Receipt<Side>>`s so a single session can
 //! mix sender-side and receiver-side receipts in one collection
 //! without an existential type. Phase 3.4e/f wiring will feed
@@ -47,7 +48,7 @@
 //!
 //! ## State machine
 //!
-//! Legal transitions enforced by [`TransferSession::transition_to`]:
+//! Legal transitions enforced by [`crate::transfer_session::TransferSession::transition_to`]:
 //!
 //! ```text
 //!   Pending ─► Active ─┬─► Completed
@@ -56,9 +57,9 @@
 //!         └────────────► Cancelled        (cancel before start)
 //! ```
 //!
-//! Any other move returns [`SessionStateError`] without touching
+//! Any other move returns [`crate::transfer_session::SessionStateError`] without touching
 //! `self.status`. Entering a terminal state (Completed / Failed /
-//! Cancelled) also stamps [`TransferSession::completed_at`].
+//! Cancelled) also stamps [`crate::transfer_session::TransferSession::completed_at`].
 //!
 //! ## Stability
 //!
@@ -81,7 +82,7 @@ use crate::session::{SessionId, SessionKind, SessionStatus};
 
 // ──────────────────────────── ProtocolKind ─────────────────────────────────────
 
-/// Wire protocol carrying a [`TransferSession`].
+/// Wire protocol carrying a [`crate::transfer_session::TransferSession`].
 ///
 /// `#[non_exhaustive]` so v0.4 can add `WanRendezvous` (RFC-004) and
 /// future transports without a major bump on `aerosync-domain`.

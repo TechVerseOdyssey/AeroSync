@@ -261,7 +261,7 @@ impl HttpTransfer {
 
     /// Builder: install a sink that receives every [`HttpReceiptAck`]
     /// parsed off `/upload` response bodies. See the field-level docs
-    /// on [`HttpTransfer::receipt_sink`] for the full contract.
+    /// on `HttpTransfer::receipt_sink` for the full contract.
     /// Mirrors [`crate::protocols::quic::QuicTransfer::with_receipt_sink`].
     pub fn with_receipt_sink(mut self, tx: mpsc::UnboundedSender<HttpReceiptAck>) -> Self {
         self.receipt_sink = Some(tx);

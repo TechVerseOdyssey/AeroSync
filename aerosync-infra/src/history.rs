@@ -7,16 +7,18 @@
 //!
 //! History records gain optional `receipt_id`, `receipt_state`,
 //! `acked_at`, `nack_reason`, `cancel_reason` fields populated when
-//! the transfer carried a [`Receipt`](aerosync_domain::receipt::Receipt).
+//! the transfer carried a [`aerosync_domain::receipt::Receipt`].
 //! The store tracks terminal state per receipt via the
-//! [`HistoryStore::record_receipt_terminal`] hook and exposes a
-//! recovery iterator [`HistoryStore::iter_unfinished_receipts`] for
+//! [`crate::history::HistoryStore::record_receipt_terminal`] hook and exposes a
+//! recovery iterator [`crate::history::HistoryStore::iter_unfinished_receipts`] for
 //! startup observability.
 //!
 //! ## v0.3.0 Phase 2.1b migration
 //!
-//! The pure-data types ([`ReceiptStateLabel`], [`HistoryEntry`],
-//! [`HistoryQuery`], [`HistoryFilter`]) moved to
+//! The pure-data types ([`aerosync_domain::storage::ReceiptStateLabel`],
+//! [`aerosync_domain::storage::HistoryEntry`],
+//! [`aerosync_domain::storage::HistoryQuery`],
+//! [`aerosync_domain::storage::HistoryFilter`]) moved to
 //! [`aerosync_domain::storage`] so the new
 //! [`aerosync_domain::storage::HistoryStorage`] async trait can
 //! reference them. This module re-exports them under their original
@@ -25,11 +27,11 @@
 //!
 //! ## v0.3.0 Phase 3.4b migration
 //!
-//! `HistoryStore` (and its [`HistoryStorage`] impl) moved here from
+//! `HistoryStore` (and its [`aerosync_domain::storage::HistoryStorage`] impl) moved here from
 //! `src/core/history.rs` after Phase 3.4a promoted `Receipt` to
 //! [`aerosync_domain`], unblocking the `aerosync-infra → aerosync`
 //! cycle that previously prevented the wholesale move.
-//! [`HistoryStore::spawn_watch_bridge`] now references
+//! [`crate::history::HistoryStore::spawn_watch_bridge`] now references
 //! [`aerosync_domain::receipt::Receipt`] directly. The legacy
 //! `aerosync::core::history::*` import path keeps resolving via the
 //! `pub use aerosync_infra::history;` shim in `src/core/mod.rs` —
@@ -106,7 +108,7 @@ impl HistoryStore {
     ///
     /// Holds the file mutex for the duration of the read so the
     /// caller can never observe a half-rewritten JSONL — both
-    /// [`Self::append`] and [`Self::rewrite_locked`] take the same
+    /// [`Self::append`] and `rewrite_locked` take the same
     /// mutex when mutating the file. Combined with the
     /// `tmp + rename` strategy in `rewrite_locked`, this means
     /// concurrent readers always see either the OLD complete file or
@@ -390,7 +392,7 @@ impl HistoryStore {
         Ok(all.into_iter().find(|e| e.receipt_id == Some(receipt_id)))
     }
 
-    /// Spawn a tokio task that watches a [`Receipt`] and persists
+    /// Spawn a tokio task that watches a [`aerosync_domain::receipt::Receipt`] and persists
     /// every terminal transition via [`Self::record_receipt_terminal`].
     ///
     /// The task ends when the watch channel closes (i.e. the Receipt
@@ -419,7 +421,7 @@ impl HistoryStore {
 /// spawns a tokio task that watches the receipt and persists every
 /// terminal transition via [`HistoryStorage::record_receipt_terminal`].
 ///
-/// Extracted in v0.3.0 Phase 3.4d-i so [`crate::TransferEngine`] (and
+/// Extracted in v0.3.0 Phase 3.4d-i so `TransferEngine` (see `aerosync` main crate) (and
 /// any future custom storage backend such as SQLite or an in-memory
 /// mock) can subscribe to receipt watch channels without depending on
 /// the concrete [`HistoryStore`] type. The inherent

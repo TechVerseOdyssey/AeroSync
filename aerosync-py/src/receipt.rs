@@ -8,13 +8,13 @@
 //!
 //! # State strings
 //!
-//! [`PyReceipt::state`] returns the protocol-canonical lowercase
-//! identifier from [`State::Display`] — `initiated`,
+//! `PyReceipt::state` returns the protocol-canonical lowercase
+//! identifier from the `Display` impl on `State` — `initiated`,
 //! `stream_opened`, `data_transferred`, `stream_closed`, `processing`,
 //! `completed`, `failed`. Terminal payloads (Acked / Nacked /
 //! Cancelled / Errored) are flattened to the bare `completed` /
 //! `failed` strings; the structured terminal reason lives in the
-//! `Outcome` dict returned by [`PyReceipt::processed`].
+//! `Outcome` dict returned by `PyReceipt::processed`.
 //!
 //! # Awaitables
 //!

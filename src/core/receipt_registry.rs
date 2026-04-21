@@ -2,7 +2,7 @@
 //!
 //! Both ends of an `aerosync/1` peering need a way to look up the
 //! [`Receipt`] for an incoming wire frame (QUIC `ReceiptFrame` or HTTP
-//! `POST /v1/receipts/:id/ack`) and route the corresponding [`Event`]
+//! `POST /v1/receipts/:id/ack`) and route the corresponding [`crate::core::receipt::Event`]
 //! into the right state machine. This registry is the side-agnostic
 //! storage layer that does the lookup.
 //!

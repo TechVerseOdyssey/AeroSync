@@ -1,4 +1,4 @@
-//! HTTP control surface for the [`Receipt`](super::receipt::Receipt)
+//! HTTP control surface for the [`Receipt`]
 //! state machine — RFC-002 §6.4 + §9 (Week 2 task #5).
 //!
 //! This module wires the four HTTP endpoints called out in

@@ -8,7 +8,7 @@
 //!
 //! `ack` / `nack` apply the receiver-side state-machine event
 //! ([`Event::Ack`] / [`Event::Nack`]) on the local [`Receipt`]. Wiring
-//! the resulting [`crate::protocols::quic_receipt::ReceiptFrame`] over
+//! the resulting [`aerosync_proto::ReceiptFrame`] over
 //! the QUIC receipt stream is performed by the QUIC transport layer
 //! once it is connected to the per-receiver [`ReceiptRegistry`]; this
 //! struct does **not** itself call into the transport. That separation

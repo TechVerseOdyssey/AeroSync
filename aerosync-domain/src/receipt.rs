@@ -1,6 +1,6 @@
 //! Per-receipt state machine (RFC-002 §4 / §5).
 //!
-//! A [`Receipt<Side>`] owns the canonical state of one in-flight
+//! A [`crate::receipt::Receipt<Side>`] owns the canonical state of one in-flight
 //! transfer. Both the sender and the receiver instantiate one; the
 //! `Side` phantom type just makes "sender-side receipt" and
 //! "receiver-side receipt" distinct types so misuse is caught at
@@ -8,7 +8,7 @@
 //!
 //! State is stored behind a `tokio::sync::watch` channel so multiple
 //! observers can `await` transitions concurrently without polling.
-//! All mutations go through [`Receipt::apply_event`] — the watch
+//! All mutations go through [`crate::receipt::Receipt::apply_event`] — the watch
 //! channel is the single source of truth.
 //!
 //! # State machine

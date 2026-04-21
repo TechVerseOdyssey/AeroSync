@@ -1,4 +1,4 @@
-//! 断点续传状态管理（file-backed JSON impl of [`ResumeStorage`]）。
+//! 断点续传状态管理（file-backed JSON impl of [`aerosync_domain::storage::ResumeStorage`]）。
 //!
 //! 状态文件存储路径：`{state_dir}/.aerosync/{task_id}.json`
 //! 每个传输任务对应一个 JSON 文件，记录已完成的分片列表。
@@ -27,7 +27,7 @@
 
 /// Re-exports of the [`aerosync_domain::storage`] value objects and
 /// the trait this module's [`ResumeStore`] implements. Hoisted to the
-/// [`aerosync_infra::resume`] module-root so the legacy
+/// `aerosync_infra::resume` module-root so the legacy
 /// `aerosync::core::resume::*` import path keeps resolving — the root
 /// crate forwards via `pub use aerosync_infra::resume;` in
 /// `src/core/mod.rs`. Field-level docs for `ChunkState` / `ResumeState`

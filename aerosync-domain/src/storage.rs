@@ -3,15 +3,16 @@
 //!
 //! Per `docs/v0.3.0-refactor-plan.md` §3 Phase 2, this module owns:
 //!
-//! 1. The **value objects** ([`ChunkState`], [`ResumeState`], plus
-//!    history-side types added in a follow-up sub-commit) that
-//!    transit between application code and any persistent backend.
-//!    They live in `aerosync-domain` so they have zero IO/networking
-//!    deps and can be referenced by the trait signatures below.
-//! 2. The **storage traits** ([`ResumeStorage`], plus
-//!    [`HistoryStorage`] in a follow-up sub-commit) that
-//!    `aerosync::core::transfer::TransferEngine` and friends consume
-//!    via `Arc<dyn …>`. Concrete implementations live in
+//! 1. The **value objects** ([`crate::storage::ChunkState`],
+//!    [`crate::storage::ResumeState`], plus history-side types added
+//!    in a follow-up sub-commit) that transit between application
+//!    code and any persistent backend. They live in `aerosync-domain`
+//!    so they have zero IO/networking deps and can be referenced by
+//!    the trait signatures below.
+//! 2. The **storage traits** ([`crate::storage::ResumeStorage`], plus
+//!    [`crate::storage::HistoryStorage`] in a follow-up sub-commit)
+//!    that `TransferEngine` (see `aerosync` main crate) and friends
+//!    consume via `Arc<dyn …>`. Concrete implementations live in
 //!    `aerosync-infra::resume` (file-backed JSON; Phase 2.2) and
 //!    `aerosync-infra::history` (file-backed JSONL; Phase 2.3).
 //!
