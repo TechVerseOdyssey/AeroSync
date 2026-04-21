@@ -25,7 +25,7 @@ Designed for the use case nothing else covers cleanly: **one agent on machine A 
 
 ## Status (v0.2.1)
 
-- **Rust crate** (`aerosync`, `aerosync-mcp`, `aerosync-proto`) — production-shaped APIs, 560+ tests, MIT.
+- **Rust crate** (`aerosync`, `aerosync-mcp`, `aerosync-proto`) — production-shaped APIs, 630+ tests, MIT. v0.3.0 splits the codebase into `aerosync-domain` (pure value objects + state machines) and `aerosync-infra` (filesystem + TLS + audit + history persistence), with the legacy `aerosync::core::*` import paths preserved via re-exports. Both new crates are **internal** for v0.3.0 — they may break in v0.4 — and should not be depended on directly.
 - **Python SDK** (`aerosync` on PyPI) — async-first PyO3 binding, abi3-py39 wheels for macOS / Linux glibc+musl / Windows. First stable in v0.2.0; v0.2.1 hardens HTTP+QUIC metadata propagation, adds `Receiver.idle_timeout`, and lights up the killer-demo round-trip end-to-end.
 - **Receipt protocol** ([RFC-002](docs/rfcs/RFC-002-receipt-protocol.md)) — sender knows when receiver actually processed; 7-state machine, HTTP SSE control plane (`GET /v1/receipts/:id/events`), idempotent ack/nack/cancel. v0.2.1 wires the QUIC bidi receipt stream end-to-end (`w3c-quic-receipt-wiring` closed) and adds HTTP wire-level `receipt_ack` echo (RFC-002 §6.4).
 - **Metadata envelope** ([RFC-003](docs/rfcs/RFC-003-metadata-envelope.md)) — every transfer carries structured metadata (`trace_id`, `lifecycle`, free-form `user_metadata`); persisted, queryable, propagated identically over HTTP and QUIC. See [`docs/protocol/metadata-v1.md`](docs/protocol/metadata-v1.md).

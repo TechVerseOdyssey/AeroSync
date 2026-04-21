@@ -663,36 +663,62 @@ aerosync send ./bigfile.tar.gz host:7789 --chunk-size 64M --parallel 8
 
 ---
 
-## 十一、现有代码可复用清单
+## 十一、模块所属（v0.3.0 实际状态）
 
-| 现有代码 | 位置 | 复用策略 |
-|---------|------|---------|
-| `AeroSyncError` 错误类型 | `core/error.rs` | 直接复用，补充新变体 |
-| `TransferProgress` / `TransferStats` | `core/progress.rs` | 复用结构，改 HashMap 存储 |
-| `FileInfo` / `FileManager` | `core/file_manager.rs` | 复用，增加 SHA-256 计算方法 |
-| `TokenManager` + HMAC-SHA256 | `core/auth/token.rs` | 完整复用，增加磁盘持久化 |
-| `AuthConfig` + TOML 加载 | `core/auth/config.rs` | 完整复用，合并进统一 Config |
-| `AuthMiddleware` | `core/auth/middleware.rs` | 复用，真正集成到 server 路由 |
-| `TransferProtocol` trait | `protocols/traits.rs` | 完整复用 |
-| `HttpTransfer` 上传逻辑 | `protocols/http.rs` | 改造为流式传输后复用 |
-| `ServerConfig` 结构 | `core/server.rs` | 复用字段，合并到统一 Config |
+> **历史说明**：v0.1 / v0.2 时本节列出"现有代码可复用清单"和"需要新建的模块"两张表，
+> 反映彼时 src/core/* 单一 crate 的视角。v0.3.0 完成 DDD 拆分后，原表已全部失效
+> （文件路径、所属 crate、职责描述均不再准确）。本节重写为按 crate 索引的当前状态，
+> 详细规范请参见 [§3 Crate 职责详解](#三crate-职责详解)。
+
+### 11.1 `aerosync-domain` —— 领域层（v0.3.0 新增）
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| `error` | `aerosync-domain/src/error.rs` | `AeroSyncError` + `Result` 别名（Phase 1c 迁入）|
+| `metadata` | `aerosync-domain/src/metadata.rs` | `MetadataBuilder` + `MetadataJson` + 验证（Phase 1e 迁入）|
+| `receipt` | `aerosync-domain/src/receipt.rs` | `Receipt<S>` 状态机 + `State` / `Outcome` / `CompletedTerminal` / `FailedTerminal`（Phase 3.4a 迁入）|
+| `session` | `aerosync-domain/src/session.rs` | `SessionId` / `SessionKind` / `SessionStatus`（Phase 3.1）|
+| `manifest` | `aerosync-domain/src/manifest.rs` | `FileEntry` / `FileManifest` / `ChunkPlan` / `Hash`（Phase 3.2）|
+| `transfer_session` | `aerosync-domain/src/transfer_session.rs` | `TransferSession` 聚合根 + `EventLog` + `ReceiptLedger`（Phase 3.3 + 3.4c）|
+| `storage` | `aerosync-domain/src/storage.rs` | `ResumeStorage` / `HistoryStorage` 异步 trait + value objects（Phase 2.1）|
+
+### 11.2 `aerosync-infra` —— 基础设施层（v0.3.0 新增）
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| `tls` | `aerosync-infra/src/tls.rs` | rustls provider 安装 + cert 工具（Phase 1b 迁入）|
+| `audit` | `aerosync-infra/src/audit.rs` | `AuditLogger` + `AuditEntry` JSONL 持久化（Phase 1d 迁入）|
+| `resume` | `aerosync-infra/src/resume.rs` | `ResumeStore` JSON 文件实现 + 原子写（Phase 2.2 迁入并加固）|
+| `history` | `aerosync-infra/src/history.rs` | `HistoryStore` JSONL 实现 + `spawn_watch_bridge` 自由函数（Phase 3.4b 迁入 + 3.4d-i 自由函数化）|
+
+### 11.3 `aerosync` 根 crate —— 应用层 + 协议层
+
+完整协议实现 + 引擎编排，文件路径见 [§3.4](#34-aerosync--应用层--协议层根-crate)。
+v0.3.0 通过 `pub use aerosync_domain::xxx;` / `pub use aerosync_infra::xxx;`
+shim（位于 `src/core/mod.rs`）保留所有 `aerosync::core::*` 老路径——
+所有 v0.2.x 调用方升级 v0.3.0 无需修改 import。
 
 ---
 
-## 十二、需要新建的模块
+## 十二、未来工作清单（v0.4 及之后）
 
-| 模块 | 路径 | 核心职责 |
-|------|------|---------|
-| CLI 命令解析 | `src/main.rs` | clap v4，`send` / `receive` / `token` / `status` |
-| 发送端应用服务 | `aerosync-core/src/sender.rs` | 文件扫描、协议协商、任务调度 |
-| 接收端应用服务 | `aerosync-core/src/receiver.rs` | 监听、鉴权、文件写入、校验 |
-| 审计日志 | `aerosync-core/src/audit.rs` | 结构化日志追加到文件 |
-| 传输历史 | `aerosync-core/src/history.rs` | 持久化传输记录（SQLite / TOML） |
-| QUIC 服务端 | `aerosync-protocols/src/quic/server.rs` | quinn 服务端监听 |
-| HTTP 流式客户端 | `aerosync-protocols/src/http/client.rs` | reqwest streaming body |
-| S3 适配器 | `aerosync-protocols/src/s3.rs` | aws-sdk-s3 封装 |
-| TLS 管理 | `aerosync-infra/src/tls.rs` | rcgen 自动证书生成 |
-| 统一配置 | `aerosync-infra/src/config.rs` | 合并所有配置，TOML 读写 |
-| 领域聚合 | `aerosync-domain/src/session.rs` | TransferSession 聚合根 |
-| 文件清单 | `aerosync-domain/src/manifest.rs` | FileManifest + ChunkPlan |
-| 领域事件 | `aerosync-domain/src/events.rs` | 传输生命周期事件定义 |
+> **历史说明**：v0.1 / v0.2 时本节列出"需要新建的模块"，到 v0.3.0 已全部实现。
+> 本节重写为面向未来版本的待办清单，反映 v0.3.0 拆分完成后剩余的架构演进项。
+
+### 12.1 v0.4：WAN 公网 ship + Engine ↔ Session 集成
+
+| 工作项 | 目标 crate / 文件 | 关联 RFC / Phase |
+|--------|------------------|------------------|
+| TransferEngine 接受 `TransferSession` | `aerosync/src/core/transfer.rs` | v0.3.0 Phase 3.4e（推迟到 v0.4）|
+| ReceiverSession 串入 FileReceiver | `aerosync/src/core/server.rs` | v0.3.0 Phase 3.5（推迟到 v0.4）|
+| PyO3 `Receipt.session_id` getter | `aerosync-py/src/lib.rs` | v0.3.0 Phase 3.4f（推迟到 v0.4）|
+| Wire proto `session_id` 字段 | `aerosync-proto/proto/*.proto` | v0.3.0 Phase 3.4g（推迟到 v0.4）|
+| WAN 28 项任务 | 全 workspace | [RFC-004](rfcs/RFC-004-wan-public-internet.md) |
+
+### 12.2 v0.5+：可选基础设施扩展
+
+| 工作项 | 目标 crate / 文件 | 备注 |
+|--------|------------------|------|
+| SQLite 后端 `HistoryStorage` 实现 | `aerosync-infra/src/history_sqlite.rs`（待建）| Phase 3.4d-ii 已完成 trait 切换，新增即可 |
+| 云端 `HistoryStorage` HTTP shim | `aerosync-infra/src/history_cloud.rs`（待建）| Milestone 5 aerosync.cloud 配套 |
+| TransferSession 持久化 | `aerosync-infra/src/transfer_session_store.rs`（待建）| 触发 `ReceiptLedger` serde 上场 |
