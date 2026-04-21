@@ -98,6 +98,7 @@ dependencies = [
  "aerosync-domain",
  "aerosync-proto",
  "async-trait",
+ "chrono",
  "dirs-next",
  "rustls",
  "rustls-pki-types",

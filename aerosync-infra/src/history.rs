@@ -7,7 +7,7 @@
 //!
 //! History records gain optional `receipt_id`, `receipt_state`,
 //! `acked_at`, `nack_reason`, `cancel_reason` fields populated when
-//! the transfer carried a [`Receipt`](crate::core::receipt::Receipt).
+//! the transfer carried a [`Receipt`](aerosync_domain::receipt::Receipt).
 //! The store tracks terminal state per receipt via the
 //! [`HistoryStore::record_receipt_terminal`] hook and exposes a
 //! recovery iterator [`HistoryStore::iter_unfinished_receipts`] for
@@ -23,28 +23,24 @@
 //! paths so every existing caller (`aerosync::core::history::*`,
 //! `aerosync::core::*`) keeps resolving without source changes.
 //!
-//! ## v0.3.0 Phase 2.3 status (file-move deferred)
+//! ## v0.3.0 Phase 3.4b migration
 //!
-//! [`HistoryStore`] now `impl`s
-//! [`aerosync_domain::storage::HistoryStorage`] below — that part
-//! of Phase 2.3 lands here in commit-form so Phase 2.4 can wire
-//! `Arc<dyn HistoryStorage>` through the engine. The wholesale
-//! `git mv src/core/history.rs → aerosync-infra/src/history.rs`
-//! is **deferred to Phase 3** because [`HistoryStore::spawn_watch_bridge`]
-//! takes `Arc<aerosync::core::receipt::Receipt<S>>`, and `receipt`
-//! still lives in this root crate. Moving `history` first would
-//! create an `aerosync-infra → aerosync` reverse dependency that
-//! Cargo refuses (the root `aerosync` already depends on
-//! `aerosync-infra`). Phase 3 promotes `Receipt` /
-//! `TransferSession` to `aerosync-domain`, at which point the
-//! `git mv` becomes free of the cycle and lands as Phase 3 follow-up.
+//! `HistoryStore` (and its [`HistoryStorage`] impl) moved here from
+//! `src/core/history.rs` after Phase 3.4a promoted `Receipt` to
+//! [`aerosync_domain`], unblocking the `aerosync-infra → aerosync`
+//! cycle that previously prevented the wholesale move.
+//! [`HistoryStore::spawn_watch_bridge`] now references
+//! [`aerosync_domain::receipt::Receipt`] directly. The legacy
+//! `aerosync::core::history::*` import path keeps resolving via the
+//! `pub use aerosync_infra::history;` shim in `src/core/mod.rs` —
+//! same back-compat pattern as Phase 2.2 (`resume`).
 
 pub use aerosync_domain::storage::{
     HistoryEntry, HistoryFilter, HistoryQuery, HistoryStorage, ReceiptStateLabel,
 };
 
-use crate::core::metadata::MetadataJson;
-use crate::{AeroSyncError, Result};
+use aerosync_domain::metadata::MetadataJson;
+use aerosync_domain::{AeroSyncError, Result};
 use aerosync_proto::{Lifecycle, Metadata};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -409,12 +405,12 @@ impl HistoryStore {
     /// field matches.
     pub fn spawn_watch_bridge<S>(
         self: &Arc<Self>,
-        receipt: Arc<crate::core::receipt::Receipt<S>>,
+        receipt: Arc<aerosync_domain::receipt::Receipt<S>>,
     ) -> tokio::task::JoinHandle<()>
     where
         S: Send + Sync + 'static,
     {
-        use crate::core::receipt::{CompletedTerminal, FailedTerminal, State};
+        use aerosync_domain::receipt::{CompletedTerminal, FailedTerminal, State};
 
         let store = Arc::clone(self);
         let id = receipt.id();
@@ -699,7 +695,7 @@ mod tests {
 
     // ── RFC-002 §8.2 receipt-state extension tests ───────────────────
 
-    use crate::core::receipt::{Event, Receipt, Sender};
+    use aerosync_domain::receipt::{Event, Receipt, Sender};
 
     /// Build a history entry pre-tagged with a receipt id and append
     /// it; returns the receipt id used.
@@ -970,7 +966,7 @@ mod tests {
 
     // ── RFC-003 Group B: metadata persistence + filtering tests ──────
 
-    use crate::core::metadata::MetadataBuilder;
+    use aerosync_domain::metadata::MetadataBuilder;
 
     fn meta_with(trace: &str, lifecycle: Lifecycle, k: &str, v: &str) -> Metadata {
         let mut m = MetadataBuilder::new()

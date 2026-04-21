@@ -73,7 +73,19 @@ pub mod tls;
 /// adding a single block doc on the re-export — the field-level docs
 /// live with the canonical definitions in `aerosync_domain::storage`.
 pub mod resume;
-// pub mod history;     // Phase 2.3 (deferred — see src/core/history.rs)
+
+/// JSONL transfer-history store ([`history::HistoryStore`]) implementing
+/// [`aerosync_domain::storage::HistoryStorage`]. Migrated from
+/// `src/core/history.rs` in v0.3.0 Phase 3.4b after Phase 3.4a
+/// promoted `Receipt` to `aerosync-domain` (the previous
+/// `aerosync-infra → aerosync` cycle that blocked this move is now
+/// resolved). Re-exports the `HistoryEntry` / `HistoryFilter` /
+/// `HistoryQuery` / `HistoryStorage` / `ReceiptStateLabel` symbols
+/// from [`aerosync_domain::storage`] so the legacy
+/// `aerosync::core::history::*` import path keeps resolving via the
+/// `pub use aerosync_infra::history;` shim in `src/core/mod.rs` —
+/// same back-compat pattern as Phase 2.2 (`resume`).
+pub mod history;
 
 // ── Phase 4 modules ───────────────────────────────────────────────────
 //

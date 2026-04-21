@@ -70,3 +70,8 @@ tracing = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+# `chrono` is used by the `history.rs` test suite to construct typed
+# RFC-3339 timestamps (`HistoryQuery` filters round-trip through
+# `chrono::DateTime<Utc>`). Same minimal feature set as the domain
+# crate to keep the dev-dep footprint tight.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }

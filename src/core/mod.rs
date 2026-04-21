@@ -20,7 +20,19 @@ pub mod discovery;
 pub use aerosync_domain::error;
 pub mod error_advice;
 pub mod file_manager;
-pub mod history;
+// `history` migrated to `aerosync-infra` in v0.3.0 Phase 3.4b after
+// Phase 3.4a promoted `Receipt` to `aerosync-domain` (which broke
+// the `aerosync-infra → aerosync` cycle that blocked the move
+// during Phase 2.3). The `pub use` re-export keeps every existing
+// path (`crate::core::history::HistoryStore`,
+// `aerosync::core::history::HistoryEntry`, etc.) resolving for the
+// 8 in-workspace callers (transfer.rs, incoming_file.rs, py
+// records, py client, 2 cross-rfc tests, frozen-api docs, metadata
+// cross-ref) without forcing any import-site update. The downstream
+// `pub use history::{...}` block below still works because
+// `history` is now in scope as an alias for
+// `aerosync_infra::history`.
+pub use aerosync_infra::history;
 pub mod incoming_file;
 // `metadata` migrated to `aerosync-domain` in v0.3.0 Phase 1e. The
 // `pub use` re-export keeps `crate::core::metadata::*` and
