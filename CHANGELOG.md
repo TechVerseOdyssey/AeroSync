@@ -7,9 +7,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> Next development cycle. Empty for now — see
-> [`docs/v0.3.0-refactor-plan.md`](docs/v0.3.0-refactor-plan.md) for
-> the v0.3.0 DDD refactor scope.
+> Next development cycle (v0.4 staging). v0.3.0 carve-outs that did
+> not ship: TransferEngine ↔ TransferSession integration (Phase 3.4e),
+> ReceiverSession wired through FileReceiver (Phase 3.5),
+> PyO3 `Receipt.session_id` getter (Phase 3.4f), wire-proto
+> `session_id` field (Phase 3.4g) — all paired with v0.4 WAN ship per
+> RFC-004. See [`docs/ARCHITECTURE_AND_DESIGN.md`](docs/ARCHITECTURE_AND_DESIGN.md)
+> §12.1 for the full v0.4 work queue.
+
+## [0.3.0-rc1] - 2026-04-18
+
+> DDD-shaped internal split. v0.2.x callers continue to compile and
+> run unchanged — every old `aerosync::core::*` import path is
+> preserved via `pub use` shims. The new `aerosync-domain` and
+> `aerosync-infra` crates are explicitly **internal** for v0.3.0
+> (may break in v0.4) and should not be depended on directly. No
+> wire-format changes — v0.2.x senders / receivers continue to interop.
+
+### Changed
+
+- **Workspace topology**: introduced two new internal crates
+  alongside the existing `aerosync` / `aerosync-mcp` /
+  `aerosync-proto` / `aerosync-py`:
+  - **`aerosync-domain`** — pure value objects + state machines, no
+    I/O. Hosts `error`, `metadata`, `receipt`, `session`,
+    `manifest`, `transfer_session` (aggregate root + `EventLog` +
+    `ReceiptLedger`), and the `storage` trait surface
+    (`ResumeStorage` + `HistoryStorage` async traits).
+  - **`aerosync-infra`** — filesystem / TLS / persistence
+    implementations of those traits. Hosts `tls`, `audit`,
+    `resume` (file-backed `ResumeStore` with crash-safe atomic
+    writes — Phase 2.2 fix), and `history` (file-backed
+    `HistoryStore` + the `spawn_watch_bridge` free fn).
+  - The root `aerosync` crate now contains only the application +
+    protocol layers (`TransferEngine`, `FileReceiver`, HTTP/QUIC/
+    S3/FTP transports, MCP wiring, CLI). All previously-defined
+    types continue to resolve from their old paths
+    (`aerosync::core::error::AeroSyncError`,
+    `aerosync::core::receipt::Receipt`, etc.) via `pub use` shims
+    in `src/core/mod.rs`.
+- **`TransferEngine` / `AutoAdapter` / `HttpTransfer` accept trait
+  objects** for the storage hooks (Phase 3.4d-ii):
+  - `TransferEngine.history_store` is now
+    `Option<Arc<dyn HistoryStorage>>`. Existing
+    `with_history_store(Arc<HistoryStore>)` continues to work; new
+    `with_history_storage(Arc<dyn HistoryStorage>)` accepts any
+    implementation.
+  - `AutoAdapter.resume_store` and `HttpTransfer.resume_store` are
+    now `Option<Arc<dyn ResumeStorage>>` with the analogous
+    concrete + opaque builder pair (`with_resume_store` /
+    `with_resume_storage`, `new_with_client_and_resume` /
+    `new_with_client_and_resume_storage`).
+  - This unblocks SQLite / cloud / in-memory storage backends in
+    v0.5+ without forcing engine churn.
+- **`ResumeStore::save` is now crash-safe** (Phase 2.2): writes go
+  through a `tempfile + rename` so a process crash mid-save can no
+  longer leave a torn JSON file at the canonical path. Closes a
+  long-standing footgun where a `kill -9` during a chunk-completion
+  flush could brick resume on next start.
+
+### Added
+
+- **`aerosync-domain::transfer_session::TransferSession`** aggregate
+  root (Phase 3.3): bundles `SessionId` + `SessionKind` + status
+  state machine + `FileManifest` + `EventLog` (bounded ring-buffer
+  of `SessionEvent`s) + `ReceiptLedger` (per-task receipt
+  snapshots). Pure domain — no engine integration yet (3.4e
+  deferred to v0.4). 18 unit tests.
+- **`aerosync-domain::manifest::FileManifest`** + `FileEntry`,
+  `Hash`, `ChunkPlan`, `ChunkSpec` (Phase 3.2): typed payload
+  description for a transfer session, with path-safety invariants
+  (no absolute paths, no `..` traversal) and pure-arithmetic chunk
+  slicing for resumable upload. 24 unit tests.
+- **`aerosync-domain::receipt::State::outcome()`** projection helper
+  (Phase 3.4c): converts a terminal `State` into the simpler
+  `Outcome` enum, used by `ReceiptLedger::record` to cache the
+  observable terminal alongside the snapshot.
+- **`aerosync_infra::history::spawn_watch_bridge`** free function
+  (Phase 3.4d-i): the watch→history bridge that previously lived
+  as an inherent method on `HistoryStore` is now also exposed as a
+  free fn over `Arc<dyn HistoryStorage>`. The inherent method
+  continues to exist as a thin wrapper.
+- **`HistoryStorage::append_silent`** default trait method (Phase
+  3.4d-i): fire-and-forget append that the engine hot path uses so
+  a missed JSONL write never surfaces as a transfer failure.
+- **`MIGRATION-v0.3.0.md`** — paths-only migration guide for
+  external consumers (Phase 4c).
+- **`docs/v0.3.0-frozen-api.md`** (Phase 0): codifies the API
+  surface that v0.3.0 promised not to break, including Rust public
+  API, wire proto, Python SDK, MCP tools, CLI commands, and HTTP
+  endpoints. Used as the regression baseline for the entire
+  refactor.
+
+### Documentation
+
+- **`ARCHITECTURE_AND_DESIGN.md`** §2-§4 rewritten to describe the
+  v0.3.0 workspace topology + DDD layering (Phase 4c). §11 (which
+  was a v0.1 "现有代码可复用清单" with stale paths like
+  `core/error.rs`) and §12 (which listed already-shipped modules as
+  TODO) rewritten to reflect v0.3 reality + a forward-looking
+  v0.4/v0.5 work queue (Phase 4 wrap commit).
+- **`README.md`** Status block now mentions the new `aerosync-domain`
+  and `aerosync-infra` crates with the internal-only disclaimer
+  ("may break in v0.4 — do not depend on directly") and bumps the
+  test count from 560+ to 630+ to match the current workspace.
+- All `#[allow(missing_docs)]` retired on `aerosync_domain::storage`,
+  `aerosync_infra::audit`, `aerosync_domain::metadata`, and
+  `aerosync_infra::resume` (Phases 4a + 4b + 4d).
 
 ## [0.2.1] - 2026-04-19
 
