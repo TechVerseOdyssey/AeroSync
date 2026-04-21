@@ -410,67 +410,91 @@ impl HistoryStore {
     where
         S: Send + Sync + 'static,
     {
-        use aerosync_domain::receipt::{CompletedTerminal, FailedTerminal, State};
-
-        let store = Arc::clone(self);
-        let id = receipt.id();
-        let mut rx = receipt.watch();
-        tokio::spawn(async move {
-            // Drive until terminal or watch channel closes.
-            loop {
-                let snapshot = rx.borrow_and_update().clone();
-                if let Some((label, reason)) = match snapshot {
-                    State::Initiated
-                    | State::StreamOpened
-                    | State::DataTransferred
-                    | State::StreamClosed
-                    | State::Processing => None,
-                    State::Completed(CompletedTerminal::Acked) => {
-                        Some((ReceiptStateLabel::Acked, None))
-                    }
-                    // Forward-compat wildcard required because
-                    // `CompletedTerminal` is `#[non_exhaustive]` and
-                    // this match is now in a different crate from the
-                    // enum (post-Phase 3.4a `Receipt` move). Treat
-                    // any future Completed variant as "acked" — it's
-                    // by definition a successful terminal.
-                    State::Completed(_) => Some((ReceiptStateLabel::Acked, None)),
-                    State::Failed(FailedTerminal::Nacked { reason }) => {
-                        Some((ReceiptStateLabel::Nacked, Some(reason)))
-                    }
-                    State::Failed(FailedTerminal::Cancelled { reason }) => {
-                        Some((ReceiptStateLabel::Cancelled, Some(reason)))
-                    }
-                    State::Failed(FailedTerminal::Errored { code, detail }) => Some((
-                        ReceiptStateLabel::Errored,
-                        Some(format!("code={code} {detail}")),
-                    )),
-                    // Same forward-compat rationale as above. Unknown
-                    // failed variants fall under `Errored` so the audit
-                    // trail still records a useful diagnostic.
-                    State::Failed(_) => Some((
-                        ReceiptStateLabel::Errored,
-                        Some("unknown failed terminal variant".to_string()),
-                    )),
-                } {
-                    let _ = store.record_receipt_terminal(id, label, reason).await;
-                    return;
-                }
-
-                if rx.changed().await.is_err() {
-                    // Watch channel closed without reaching terminal.
-                    let _ = store
-                        .record_receipt_terminal(
-                            id,
-                            ReceiptStateLabel::StreamLost,
-                            Some("receipt watch channel closed before terminal".to_string()),
-                        )
-                        .await;
-                    return;
-                }
-            }
-        })
+        spawn_watch_bridge(Arc::clone(self) as Arc<dyn HistoryStorage>, receipt)
     }
+}
+
+/// Free-function form of [`HistoryStore::spawn_watch_bridge`]. Given
+/// any [`HistoryStorage`] trait object and a [`aerosync_domain::receipt::Receipt`],
+/// spawns a tokio task that watches the receipt and persists every
+/// terminal transition via [`HistoryStorage::record_receipt_terminal`].
+///
+/// Extracted in v0.3.0 Phase 3.4d-i so [`crate::TransferEngine`] (and
+/// any future custom storage backend such as SQLite or an in-memory
+/// mock) can subscribe to receipt watch channels without depending on
+/// the concrete [`HistoryStore`] type. The inherent
+/// [`HistoryStore::spawn_watch_bridge`] method is kept as a thin
+/// wrapper so existing callers continue to compile.
+///
+/// The task ends when the watch channel closes or a terminal state is
+/// observed. The returned `JoinHandle` is exposed for tests and
+/// explicit cancellation; production callers can ignore it. The
+/// bridge passes `receipt.id()` as the `record_id` argument — the
+/// caller is responsible for having previously appended a history
+/// entry whose `receipt_id` field matches.
+pub fn spawn_watch_bridge<S>(
+    store: Arc<dyn HistoryStorage>,
+    receipt: Arc<aerosync_domain::receipt::Receipt<S>>,
+) -> tokio::task::JoinHandle<()>
+where
+    S: Send + Sync + 'static,
+{
+    use aerosync_domain::receipt::{CompletedTerminal, FailedTerminal, State};
+
+    let id = receipt.id();
+    let mut rx = receipt.watch();
+    tokio::spawn(async move {
+        loop {
+            let snapshot = rx.borrow_and_update().clone();
+            if let Some((label, reason)) = match snapshot {
+                State::Initiated
+                | State::StreamOpened
+                | State::DataTransferred
+                | State::StreamClosed
+                | State::Processing => None,
+                State::Completed(CompletedTerminal::Acked) => {
+                    Some((ReceiptStateLabel::Acked, None))
+                }
+                // Forward-compat wildcard required because
+                // `CompletedTerminal` is `#[non_exhaustive]` and this
+                // match lives in a different crate from the enum.
+                // Treat any future Completed variant as "acked" — it's
+                // by definition a successful terminal.
+                State::Completed(_) => Some((ReceiptStateLabel::Acked, None)),
+                State::Failed(FailedTerminal::Nacked { reason }) => {
+                    Some((ReceiptStateLabel::Nacked, Some(reason)))
+                }
+                State::Failed(FailedTerminal::Cancelled { reason }) => {
+                    Some((ReceiptStateLabel::Cancelled, Some(reason)))
+                }
+                State::Failed(FailedTerminal::Errored { code, detail }) => Some((
+                    ReceiptStateLabel::Errored,
+                    Some(format!("code={code} {detail}")),
+                )),
+                // Same forward-compat rationale as above. Unknown
+                // failed variants fall under `Errored` so the audit
+                // trail still records a useful diagnostic.
+                State::Failed(_) => Some((
+                    ReceiptStateLabel::Errored,
+                    Some("unknown failed terminal variant".to_string()),
+                )),
+            } {
+                let _ = store.record_receipt_terminal(id, label, reason).await;
+                return;
+            }
+
+            if rx.changed().await.is_err() {
+                let _ = store
+                    .record_receipt_terminal(
+                        id,
+                        ReceiptStateLabel::StreamLost,
+                        Some("receipt watch channel closed before terminal".to_string()),
+                    )
+                    .await;
+                return;
+            }
+        }
+    })
 }
 
 // ──────────────────────────── HistoryStorage impl ─────────────────────────────

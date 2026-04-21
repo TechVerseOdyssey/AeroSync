@@ -582,6 +582,18 @@ pub trait HistoryStorage: Send + Sync + 'static {
     /// Look up a single entry by receipt id. `None` when no entry
     /// has the matching `receipt_id`.
     async fn query_by_receipt(&self, receipt_id: Uuid) -> Result<Option<HistoryEntry>>;
+
+    /// Fire-and-forget [`Self::append`]: write `entry` and silently
+    /// drop any error. Used on the `TransferEngine::send` hot path
+    /// where a missed history record must not surface as a transfer
+    /// failure (the in-memory receipt is the source of truth — the
+    /// JSONL log is an audit aid). Default impl just calls
+    /// [`Self::append`] and discards the [`Result`]; concrete impls
+    /// may override to skip the serialize cost when persistence is
+    /// disabled (e.g. an in-memory mock).
+    async fn append_silent(&self, entry: HistoryEntry) {
+        let _ = self.append(entry).await;
+    }
 }
 
 // ──────────────────────────── Tests ────────────────────────────────────────────
