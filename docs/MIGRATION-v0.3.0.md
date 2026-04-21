@@ -141,16 +141,28 @@ This is a **strict contract strengthening** — the documented behaviour ("on su
 
 ## 4. What is deferred (transparent to users)
 
+### 4.1 Landed in v0.3.0-rc1 (no longer deferred)
+
+| Item | Phase | Commit |
+|------|-------|--------|
+| `TransferEngine` / `AutoAdapter` / `HttpTransfer` switch to `Arc<dyn ResumeStorage>` / `Arc<dyn HistoryStorage>` injection (concrete-typed builders kept for back-compat) | 3.4d | `3da365a` + `b7c024d` |
+| `Receipt` state machine extraction into `aerosync_domain::receipt` | 3.4a | landed |
+| `history.rs` physical move into `aerosync_infra::history` (Receipt promotion broke the cycle) | 3.4b | landed |
+| `SessionId` / `SessionKind` / `SessionStatus` / `FileManifest` / `FileEntry` value objects in `aerosync_domain` | 3.1 + 3.2 | `2d53c0f` etc. |
+| `TransferSession` aggregate root + `EventLog` + `ReceiptLedger` / `ReceiptEntry` | 3.3 + 3.4c | `f27fac6` etc. |
+| Retire last `#[allow(missing_docs)]` on `aerosync_infra::resume` re-exports + workspace `cargo doc -D warnings` clean | 4d | landed |
+
+### 4.2 Still deferred to v0.4 (will batch with WAN ship)
+
 | Item | Phase | Visibility |
 |------|-------|------------|
-| `TransferEngine` / `FileReceiver` switch to `Arc<dyn ResumeStorage>` / `Arc<dyn HistoryStorage>` injection | 2.4 | Internal only — public API unchanged |
-| `TransferSession` aggregate root in `aerosync_domain::session` | 3 | New optional `Receipt.session_id` getter on Python side; old `transfer_id` stays |
-| `Receipt` state machine extraction into `aerosync_domain::receipt` | 3 | Same as above — root crate keeps re-exporting `aerosync::core::receipt::*` |
-| `history.rs` physical move into `aerosync-infra::history` | 2.3 | Internal — file currently lives in `src/core/history.rs` and `impl HistoryStorage` ; circular dep on `Receipt` blocks the move until Phase 3 |
-| Last `#[allow(missing_docs)]` on `aerosync_infra::resume` re-exports | 4d | Internal lint hygiene only |
-| `config` module split into `aerosync-infra::config` | 4 (later) | Internal — does not affect TOML schema |
+| `TransferEngine` ↔ `TransferSession` integration (engine actually constructs/owns a session) | 3.4e | Public API: `Receipt` gains `session_id` accessor; `TransferEngine::send` may return both. Deferred to avoid two breaking shape changes. |
+| PyO3 `Receipt.session_id` getter exposing the new field | 3.4f | Python SDK additive — gated on 3.4e |
+| Protobuf wire field `session_id` on `MetadataEnvelope` | 3.4g | Wire-additive (proto field number reserved); requires v0.4 wire bump-or-additive policy decision |
+| `ReceiverSession` wired through `FileReceiver.accept` | 3.5 | Receiver-side equivalent of 3.4e; same batch |
+| `config` module split into `aerosync_infra::config` | 4 (later) | Internal — does not affect TOML schema |
 
-None of these affect external embedders before v0.3.0 ships, and none are scheduled to break the frozen contract in v0.3.x.
+None of the v0.4 deferrals affect external embedders today; none break the v0.3.0 frozen contract within the v0.3.x line.
 
 ## 5. Build / regenerate steps
 

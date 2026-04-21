@@ -94,12 +94,17 @@ graph LR
 | 2.3  | `HistoryStore impl HistoryStorage`（文件位置仍在 `src/core/history.rs`，移动延后） | `158dc07` |
 | 4    | 文档闭环（本节 + Phase 4b/4c） | `0d1b940`、`67934f3`、当前 commit |
 
-未完成（推迟到 v0.3.x 或 v0.4.0）：
+v0.3.0-rc1 收口状态：
 
-- **Phase 2.4**：`TransferEngine` / `FileReceiver` 切换到 `Arc<dyn ResumeStorage>` / `Arc<dyn HistoryStorage>` 注入。当前仍直接持有具体类型，trait 已就位但消费方未迁移。
-- **Phase 2.3 文件迁移**：`history.rs` 物理位置仍在 `src/core/`——因为 `HistoryStore::spawn_watch_bridge` 需要根 crate 的 `Receipt`，迁移会引入循环依赖。
-- **Phase 3**：`TransferSession` 聚合根 + `Receipt` 状态机迁入 `aerosync-domain::session` / `aerosync-domain::receipt`。
-- **Phase 4d**：`aerosync_infra::resume` 上残留的 `#[allow(missing_docs)]`（仅作用于 `ChunkState` / `ResumeState` 的 re-export，不是新代码）。
+- **Phase 2.3 文件迁移**：`history.rs` 已在 Phase 3.4b 移到 `aerosync-infra/src/history.rs`（`Receipt` 已先一步在 3.4a 升到 domain，循环依赖解开）。
+- **Phase 2.4 / 3.4d**：`TransferEngine` / `AutoAdapter` / `HttpTransfer` 已全部接受 `Arc<dyn ResumeStorage>` / `Arc<dyn HistoryStorage>`，并保留具体类型 builder 作为向后兼容入口（commit `3da365a` + `b7c024d`）。
+- **Phase 3**：`SessionId` / `SessionKind` / `SessionStatus` / `FileManifest` / `FileEntry` / `TransferSession` / `EventLog` / `ReceiptLedger` / `ReceiptEntry` 全部落地于 `aerosync-domain` 的 `session` / `manifest` / `transfer_session` / `receipt` 模块（commits `2d53c0f`、`f27fac6` 等）。
+- **Phase 4d**：`aerosync_infra::resume` 上的 `#[allow(missing_docs)]` 已退役（见 `aerosync-infra/src/lib.rs` 头部块注释），全 workspace `cargo doc -D warnings` 干净。
+
+延后到 v0.4（与 WAN ship 合批，避免重复破坏 API）：
+
+- **Phase 3.4e/f/g**：`TransferEngine` ↔ `TransferSession` 集成、PyO3 `Receipt.session_id` getter、protobuf wire 加 `session_id` 字段——三者形状互锁，统一在 v0.4 设计 ReceiverSession 时一次完成。
+- **Phase 3.5**：`ReceiverSession` 接 `FileReceiver.accept` 路径，与上面 3.4e 同批。
 
 ---
 
