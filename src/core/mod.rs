@@ -60,6 +60,13 @@ pub mod progress;
 // `aerosync_domain::receipt`.
 pub use aerosync_domain::receipt;
 pub mod receipt_registry;
+// `receipt_journal` is a brand-new module in v0.3.0 Phase 2 (RFC-002
+// §8 follow-up): a SQLite-backed durable log of every observed
+// receipt state transition. Lives in `aerosync-infra` because it
+// owns IO; re-exported here so the legacy
+// `aerosync::core::receipt_journal::*` import path resolves alongside
+// every other infra module.
+pub use aerosync_infra::receipt_journal;
 pub mod receipts_http;
 // `resume` migrated to `aerosync-infra` in v0.3.0 Phase 2.2 with one
 // behavioural upgrade — `ResumeStore::save` is now crash-safe via
@@ -83,7 +90,10 @@ pub mod sniff;
 pub(crate) use aerosync_infra::tls;
 pub mod transfer;
 
-pub use aerosync_domain::storage::{HistoryStorage, ResumeStorage};
+pub use aerosync_domain::storage::{
+    HistoryStorage, ReceiptJournalRecord, ReceiptJournalStorage, ReceiptSide, RecoverableReceipt,
+    ResumeStorage,
+};
 pub use audit::{
     AuditEntry, AuditEvent, AuditLogger, AuditRecord, AuditResult, Direction as AuditDirection,
 };
@@ -112,6 +122,7 @@ pub use receipt::{
     Receiver as ReceiptReceiver, Sender as ReceiptSender, State as ReceiptState,
     StateError as ReceiptStateError,
 };
+pub use receipt_journal::{spawn_journal_bridge, SqliteReceiptJournal, CURRENT_SCHEMA_VERSION};
 pub use receipt_registry::ReceiptRegistry;
 pub use receipts_http::{
     router as receipts_http_router, AckBody, CancelBody, IdempotencyCache, NackBody,

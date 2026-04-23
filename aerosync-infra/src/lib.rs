@@ -74,6 +74,19 @@ pub mod tls;
 /// live with the canonical definitions in `aerosync_domain::storage`.
 pub mod resume;
 
+/// SQLite-backed receipt journal ([`receipt_journal::SqliteReceiptJournal`])
+/// implementing [`aerosync_domain::storage::ReceiptJournalStorage`].
+/// New in v0.3.0 Phase 2 (RFC-002 §8 follow-up): a durable,
+/// append-only log of every observed receipt state transition keyed
+/// by `receipt_id`, enabling crash-recovery enumeration of in-flight
+/// receipts and re-emission of recently terminal verdicts. The JSONL
+/// `HistoryStore` only persists *terminal* receipt states alongside
+/// the per-transfer [`history::HistoryEntry`]; the journal closes the
+/// gap so a crash between `Initiated` and a terminal state still
+/// leaves a recoverable trail. Schema migrations are tracked via
+/// `PRAGMA user_version` (see [`receipt_journal::CURRENT_SCHEMA_VERSION`]).
+pub mod receipt_journal;
+
 /// JSONL transfer-history store ([`history::HistoryStore`]) implementing
 /// [`aerosync_domain::storage::HistoryStorage`]. Migrated from
 /// `src/core/history.rs` in v0.3.0 Phase 3.4b after Phase 3.4a

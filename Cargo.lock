@@ -102,6 +102,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dirs-next",
+ "rusqlite",
  "rustls",
  "rustls-pki-types",
  "serde",

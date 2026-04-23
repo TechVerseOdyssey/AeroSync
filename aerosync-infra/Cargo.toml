@@ -67,6 +67,14 @@ uuid = { workspace = true }
 # root crate so log filter syntax stays uniform.
 tracing = { workspace = true }
 
+# Bundled SQLite — backs the RFC-002 §8 receipt journal
+# (`receipt_journal::SqliteReceiptJournal`). The `bundled` feature
+# compiles SQLite from source so we don't need a system libsqlite3
+# (matches the existing dep in `aerosync-mcp::task_store`, no new
+# license / advisory surface). MIT/Apache-licensed; already cleared
+# by `deny.toml`.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }

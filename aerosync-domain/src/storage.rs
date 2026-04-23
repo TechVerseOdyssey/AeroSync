@@ -597,6 +597,191 @@ pub trait HistoryStorage: Send + Sync + 'static {
     }
 }
 
+// ──────────────────────────── Receipt journal types ───────────────────────────
+//
+// RFC-002 §8 (Persistence) — durable, append-only log of every receipt
+// state transition. The JSONL `HistoryStore` only persists *terminal*
+// transitions (and only when a `HistoryEntry` for the transfer exists),
+// so a crash between `Initiated` and a terminal state would lose every
+// observation about an in-flight receipt. The journal closes that gap:
+// every event flows through an append-only SQLite log keyed by
+// `receipt_id`, enabling crash-recovery enumeration of in-flight
+// receipts and re-emission of the latest terminal state for receipts
+// the application missed because the process was down.
+//
+// The implementation lives in `aerosync_infra::receipt_journal`; this
+// crate only owns the trait shape and the value objects so the engine,
+// CLI, MCP, and Python bindings can reference them without depending
+// on any specific persistence backend.
+
+/// Which side of the wire owns a receipt event — used by
+/// [`ReceiptJournalStorage`] to disambiguate sender-side vs.
+/// receiver-side receipts that happen to share an id (e.g. a loopback
+/// integration test) and to drive the recovery iterator's filter.
+///
+/// The string spellings (`"send"` / `"receive"`) match the existing
+/// [`HistoryEntry::direction`] vocabulary so a downstream UI can
+/// render either source without translating.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReceiptSide {
+    /// Sender side (originator of the transfer).
+    Send,
+    /// Receiver side (consumer of the transfer).
+    Receive,
+}
+
+impl ReceiptSide {
+    /// Stable wire string. Matches [`HistoryEntry::direction`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReceiptSide::Send => "send",
+            ReceiptSide::Receive => "receive",
+        }
+    }
+
+    /// Parse a side string. Accepts `"send"` and `"receive"` only.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "send" => Some(ReceiptSide::Send),
+            "receive" => Some(ReceiptSide::Receive),
+            _ => None,
+        }
+    }
+}
+
+/// One row of the receipt journal — a single observed state transition.
+///
+/// The row is built by the watch-bridge in
+/// `aerosync_infra::receipt_journal::spawn_journal_bridge`; the
+/// [`ReceiptJournalStorage`] impl persists it as-is. `recorded_at` is
+/// set by the bridge (Unix seconds) so the persistence layer stays
+/// time-source-agnostic.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReceiptJournalRecord {
+    /// The receipt being observed.
+    pub receipt_id: Uuid,
+    /// Which side of the wire owns this receipt.
+    pub side: ReceiptSide,
+    /// The state observed by this event. Spelled with the wire-stable
+    /// strings used by the recovery API — the seven generic states
+    /// (`initiated` / `stream-opened` / `data-transferred` /
+    /// `stream-closed` / `processing`) plus the terminal labels
+    /// shared with [`ReceiptStateLabel`] (`acked` / `nacked` /
+    /// `cancelled` / `errored` / `stream-lost`).
+    pub state: String,
+    /// Whether this state is terminal (no further transitions
+    /// expected). Pre-computed so the recovery iterator does not have
+    /// to re-derive it per row.
+    pub is_terminal: bool,
+    /// Free-form reason carried by `Nacked` / `Cancelled` / `Errored`
+    /// / `StreamLost`; absent for non-terminal transitions and for
+    /// `Acked`.
+    pub reason: Option<String>,
+    /// Numeric error code carried by `Errored`; absent otherwise.
+    pub code: Option<u32>,
+    /// History-record id this receipt was attached to, when known —
+    /// gives the recovery iterator a path back to the durable
+    /// [`HistoryEntry`] for filename / size / metadata context.
+    pub history_id: Option<Uuid>,
+    /// Filename context (snapshot of [`HistoryEntry::filename`] at
+    /// journal time); allows the recovery iterator to render a useful
+    /// summary even when the history record has been pruned.
+    pub filename: Option<String>,
+    /// Peer context (snapshot of [`HistoryEntry::remote_ip`] at
+    /// journal time).
+    pub peer: Option<String>,
+    /// Wall-clock Unix seconds when the bridge recorded the event.
+    pub recorded_at: u64,
+}
+
+/// View of the most recent state observed for a single receipt —
+/// returned by [`ReceiptJournalStorage::list_recoverable`] and
+/// [`ReceiptJournalStorage::list_recent_terminal`]. One row per
+/// `receipt_id`, projecting the latest [`ReceiptJournalRecord`].
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecoverableReceipt {
+    /// Stable receipt id.
+    pub receipt_id: Uuid,
+    /// Which side of the wire owns this receipt.
+    pub side: ReceiptSide,
+    /// Latest observed state spelling. Same vocabulary as
+    /// [`ReceiptJournalRecord::state`].
+    pub state: String,
+    /// `true` when [`Self::state`] is terminal.
+    pub is_terminal: bool,
+    /// Reason / code carried by the latest terminal event, when
+    /// applicable.
+    pub reason: Option<String>,
+    /// Numeric error code carried by the latest `Errored` event.
+    pub code: Option<u32>,
+    /// History record this receipt was attached to.
+    pub history_id: Option<Uuid>,
+    /// Filename context for diagnostic display.
+    pub filename: Option<String>,
+    /// Peer context for diagnostic display.
+    pub peer: Option<String>,
+    /// Wall-clock Unix seconds of the latest observation.
+    pub last_event_at: u64,
+}
+
+/// Async storage abstraction for the receipt journal (RFC-002 §8).
+///
+/// The journal is an **append-only** log of every observed receipt
+/// state transition. It complements [`HistoryStorage`], which only
+/// records terminal states alongside file-transfer rows: the journal
+/// is the durable source of truth for "which receipts are still
+/// in-flight after a crash" and "what was the last terminal state
+/// the application observed before the process restarted".
+///
+/// ## Implementor contract
+///
+/// - **`record_event`** MUST be append-only: an event is never
+///   rewritten or deleted (terminal transitions still append a new
+///   row, they do not patch the previous one). Concurrent calls from
+///   multiple async tasks MUST serialize internally.
+/// - **`record_event`** SHOULD be **crash-safe** (the canonical impl
+///   wraps a `rusqlite::Connection` in an async mutex with WAL
+///   journaling so a torn write either lands fully or not at all).
+/// - **`list_recoverable`** returns one row per receipt whose latest
+///   journal row is **non-terminal**, sorted by `last_event_at`
+///   descending. Used by startup recovery and by the `aerosync
+///   receipt recover` CLI / Python `aerosync.recover()` surface.
+/// - **`list_recent_terminal`** returns one row per receipt whose
+///   latest row is terminal, sorted by `last_event_at` descending.
+///   Used to re-emit the terminal verdict to the application after a
+///   restart.
+/// - **`latest_state`** returns the most recent journal row for one
+///   receipt, or `Ok(None)` when no row exists.
+/// - All methods MUST be cancel-safe.
+#[async_trait::async_trait]
+pub trait ReceiptJournalStorage: Send + Sync + 'static {
+    /// Append `record` to the journal. Errors propagate to the caller
+    /// so the watch-bridge can downgrade them to a `tracing::warn!`
+    /// rather than panicking the spawning runtime.
+    async fn record_event(&self, record: ReceiptJournalRecord) -> Result<()>;
+
+    /// Snapshot every receipt whose latest observation is
+    /// **non-terminal**. `limit == 0` means "no cap"; non-zero values
+    /// truncate to the most recent N rows.
+    async fn list_recoverable(&self, limit: usize) -> Result<Vec<RecoverableReceipt>>;
+
+    /// Snapshot every receipt whose latest observation is **terminal**
+    /// and was recorded within the last `since_secs` seconds. Used by
+    /// the recovery surface to re-emit terminal verdicts the
+    /// application missed because the process was down. `limit == 0`
+    /// means "no cap".
+    async fn list_recent_terminal(
+        &self,
+        since_secs: u64,
+        limit: usize,
+    ) -> Result<Vec<RecoverableReceipt>>;
+
+    /// Return the most-recent journal projection for `receipt_id`, or
+    /// `Ok(None)` when the receipt has never been recorded.
+    async fn latest_state(&self, receipt_id: Uuid) -> Result<Option<RecoverableReceipt>>;
+}
+
 // ──────────────────────────── Tests ────────────────────────────────────────────
 //
 // Pure-data tests for ResumeState (chunk math, mark_chunk_done
@@ -708,6 +893,45 @@ mod tests {
         s.mark_chunk_done(0);
         s.mark_chunk_done(0);
         assert_eq!(s.completed_chunks.len(), 1);
+    }
+
+    #[test]
+    fn receipt_side_round_trips_through_str() {
+        for side in [ReceiptSide::Send, ReceiptSide::Receive] {
+            let s = side.as_str();
+            assert_eq!(ReceiptSide::parse(s), Some(side));
+        }
+        assert!(ReceiptSide::parse("nope").is_none());
+        assert!(ReceiptSide::parse("").is_none());
+    }
+
+    #[test]
+    fn receipt_side_serde_uses_lowercase_send_receive() {
+        let s = serde_json::to_string(&ReceiptSide::Send).unwrap();
+        assert_eq!(s, "\"send\"");
+        let r = serde_json::to_string(&ReceiptSide::Receive).unwrap();
+        assert_eq!(r, "\"receive\"");
+        let back: ReceiptSide = serde_json::from_str("\"send\"").unwrap();
+        assert_eq!(back, ReceiptSide::Send);
+    }
+
+    #[test]
+    fn receipt_journal_record_round_trips_through_serde() {
+        let rec = ReceiptJournalRecord {
+            receipt_id: Uuid::nil(),
+            side: ReceiptSide::Receive,
+            state: "processing".into(),
+            is_terminal: false,
+            reason: None,
+            code: None,
+            history_id: Some(Uuid::nil()),
+            filename: Some("a.bin".into()),
+            peer: Some("10.0.0.5".into()),
+            recorded_at: 1_700_000_000,
+        };
+        let s = serde_json::to_string(&rec).unwrap();
+        let back: ReceiptJournalRecord = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, rec);
     }
 
     #[test]
