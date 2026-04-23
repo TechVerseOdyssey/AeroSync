@@ -23,18 +23,23 @@ of the refactor release.
 
 ### Implemented in the codebase
 
-- Placeholder `wan` modules and Cargo feature flags.
+- Placeholder `src/wan` modules and Cargo feature flags (`wan-rendezvous`,
+  `wan-relay`) in the main `aerosync` crate.
+- **Workspace crate `aerosync-rendezvous` (v0.4 week-1 scaffold):** axum
+  binary + RFC §5.4 SQLite schema (sqlx migrate) + `GET /health` and
+  `GET /v1/status`. No registration / JWT / WebSocket yet — see task
+  table §15.
 - A few API and config hooks reserved for future WAN work, such as
-  `rendezvous_url`.
+  `Config.rendezvous_url` in the Python SDK.
 - Architecture and frozen-API documentation that reserve the v0.4 WAN
-  surface without claiming runtime support today.
+  surface without claiming end-to-end WAN transfer today.
 
 ### Not yet implemented
 
-- Rendezvous server, relay, hole punching, identity/ACL workflow, WAN
-  CLI flows, and the MCP tools described later in this RFC.
-- Most of the implementation task table in this document remains future
-  work.
+- HTTP API §4.2 (`/v1/peers/*`, sessions, relay), hole punching, identity/ACL
+  workflow, WAN CLI flows, and the new MCP tools in §13.1.
+- Most rows in the implementation task table (§15) after task #1–#2
+  remain future work.
 
 ### Current source of truth
 

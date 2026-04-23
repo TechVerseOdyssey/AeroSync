@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **RFC-003**: Full SQLite/JSON1 **index** for history — metadata filters remain correct but **O(N)** on JSONL scan (same as before); dedicated index DB deferred per RFC-003 §7 horizon note.
 
+### Added (RFC-004 Phase 3 — scaffold)
+
+- **New workspace crate `aerosync-rendezvous`**: SQLite schema from RFC-004 §5.4,
+  embedded sqlx migrations, HTTP `GET /health` + `GET /v1/status`. Binary:
+  `cargo run -p aerosync-rendezvous`. See `aerosync-rendezvous/README.md`.
+
 ## [0.3.0-rc1] - 2026-04-18
 
 > DDD-shaped internal split. v0.2.x callers continue to compile and

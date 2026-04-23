@@ -224,6 +224,7 @@ members = [
     "aerosync-mcp",
     "aerosync-proto",
     "aerosync-py",
+    "aerosync-rendezvous",
 ]
 resolver = "2"
 
@@ -249,6 +250,7 @@ aerosync-proto = { path = "aerosync-proto", version = "0.3.0-rc1" }
 # `docs/v0.3.0-refactor-plan.md` and `docs/v0.3.0-frozen-api.md` §1.6.
 aerosync-domain = { path = "aerosync-domain", version = "0.3.0-rc1" }
 aerosync-infra = { path = "aerosync-infra", version = "0.3.0-rc1" }
+aerosync-rendezvous = { path = "aerosync-rendezvous", version = "0.3.0-rc1" }
 # Wire-protocol stack (RFC-002). prost / prost-build are pinned at the
 # workspace level so aerosync-proto and any future consumer (e.g. the
 # Python binding crate) reference the same versions.
