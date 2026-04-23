@@ -4,6 +4,11 @@ Design documents for substantial protocol, API, or architectural
 changes. RFCs land here as **Draft** before any code is merged; they
 are the contract between design and implementation.
 
+Some RFCs below intentionally remain **Draft** even though substantial
+parts have shipped. In those cases, the per-RFC **Implementation
+status** section records what actually landed, what diverged from the
+original text, and what was deferred to a later version.
+
 ## RFC lifecycle
 
 ```
@@ -20,27 +25,28 @@ Draft  →  Review  →  Accepted  →  Implemented  →  (Superseded)
 
 ## Index
 
-| #   | Title                       | Status | Target | Depends on |
-| --- | --------------------------- | ------ | ------ | ---------- |
-| 001 | [Python SDK](RFC-001-python-sdk.md)             | Draft  | v0.2.0 | RFC-002, RFC-003 |
-| 002 | [Receipt Protocol](RFC-002-receipt-protocol.md) | Draft  | v0.2.0 | —          |
-| 003 | [Metadata Envelope](RFC-003-metadata-envelope.md) | Draft  | v0.2.0 | RFC-002    |
-| 004 | [WAN Rendezvous & NAT Traversal](RFC-004-wan-rendezvous.md) | Draft  | v0.4   | RFC-002, RFC-003 |
+| # | Title | Status | Target | Implementation reality | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| 001 | [Python SDK](RFC-001-python-sdk.md) | Draft | v0.2.0 | Core SDK shipped; RFC text partially stale | RFC-002, RFC-003 |
+| 002 | [Receipt Protocol](RFC-002-receipt-protocol.md) | Draft | v0.2.0 | Core protocol shipped; persistence/recovery gaps remain | — |
+| 003 | [Metadata Envelope](RFC-003-metadata-envelope.md) | Draft | v0.2.0 | Core schema + transport propagation shipped | RFC-002 |
+| 004 | [WAN Rendezvous & NAT Traversal](RFC-004-wan-rendezvous.md) | Draft | v0.4 | Design accepted as roadmap; implementation deferred to v0.4 | RFC-002, RFC-003 |
 
 ## v0.2.0 milestone summary
 
-The three Draft RFCs above together define everything needed for the
-"AI file bus" v0.2 release. v0.2 is the first formally specified
-release of AeroSync; the published v0.1.0 binaries are treated as a
-closed pre-alpha and are **not** considered as upgrade peers.
+The first three RFCs above defined the v0.2 "AI file bus" scope. Their
+core behavior has since landed across `v0.2.0`, `v0.2.1`, and the
+`v0.3.0-rc1` documentation freeze, even though the RFC process state
+still reads **Draft**. See each document's **Implementation status**
+section for drift, deferments, and the current source-of-truth docs.
 
-| RFC                         | Engineer-days |
-| --------------------------- | ------------- |
-| RFC-001 Python SDK          | 34.5          |
-| RFC-002 Receipt Protocol    | 20.5          |
-| RFC-003 Metadata Envelope   | 9.5           |
+| RFC | Engineer-days |
+| --- | --- |
+| RFC-001 Python SDK | 34.5 |
+| RFC-002 Receipt Protocol | 20.5 |
+| RFC-003 Metadata Envelope | 9.5 |
 | Cross-cutting (CHANGELOG, cross-RFC integration smoke, launch) | 4 |
-| **Total**                   | **68.5**      |
+| **Total** | **68.5** |
 
 At 5 focused engineer-days per week:
 

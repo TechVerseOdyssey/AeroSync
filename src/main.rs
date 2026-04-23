@@ -29,7 +29,7 @@ use uuid::Uuid;
 #[command(
     name = "aerosync",
     about = "High-performance cross-network file transfer for agents",
-    version = "0.2.0"
+    version = env!("CARGO_PKG_VERSION")
 )]
 struct Cli {
     /// 详细日志输出

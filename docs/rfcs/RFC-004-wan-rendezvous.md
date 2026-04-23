@@ -1,15 +1,47 @@
 # RFC-004: WAN Rendezvous & NAT Traversal
 
-| Field          | Value                                                |
-| -------------- | ---------------------------------------------------- |
-| Status         | Draft                                                |
-| Author         | TechVerseOdyssey                                     |
-| Created        | 2026-04-18                                           |
-| Target version | v0.3.0                                               |
-| Wire version   | additive to `aerosync-wire/1`; new `aerosync-rendezvous/1` ALPN |
-| Estimated work | ~35 engineer-days                                    |
-| Depends on     | RFC-002 (Receipt), RFC-003 (Metadata)                |
-| Supersedes     | none                                                 |
+| Field | Value |
+| --- | --- |
+| Status | Draft |
+| Author | TechVerseOdyssey |
+| Created | 2026-04-18 |
+| Target version | v0.4.0 |
+| Wire version | additive to `aerosync-wire/1`; new `aerosync-rendezvous/1` ALPN |
+| Estimated work | ~35 engineer-days |
+| Depends on | RFC-002 (Receipt), RFC-003 (Metadata) |
+| Supersedes | none |
+
+## Implementation status (2026-04-22)
+
+This RFC intentionally remains **Draft** and is now explicitly tracked
+as a **v0.4.0** item rather than `v0.3.0`. The reason for the target
+change is that `v0.3.0` was used to complete the internal
+domain/infra/application split and freeze the public API surface first;
+the actual WAN rendezvous / NAT traversal runtime work was deferred to
+the next cycle to avoid stacking a major networking initiative on top
+of the refactor release.
+
+### Implemented in the codebase
+
+- Placeholder `wan` modules and Cargo feature flags.
+- A few API and config hooks reserved for future WAN work, such as
+  `rendezvous_url`.
+- Architecture and frozen-API documentation that reserve the v0.4 WAN
+  surface without claiming runtime support today.
+
+### Not yet implemented
+
+- Rendezvous server, relay, hole punching, identity/ACL workflow, WAN
+  CLI flows, and the MCP tools described later in this RFC.
+- Most of the implementation task table in this document remains future
+  work.
+
+### Current source of truth
+
+- Treat this RFC as the design roadmap.
+- Treat `docs/v0.3.0-frozen-api.md`, `docs/ARCHITECTURE_AND_DESIGN.md`,
+  and `CHANGELOG.md` as the best summary of what is actually present in
+  the repository today.
 
 ## 1. Summary
 
@@ -44,7 +76,7 @@ safe, and the SDK / MCP surface that exposes it.
 
 > **Compatibility scope.** RFC-004 is **additive** to `aerosync-wire/1`.
 > Existing v0.2 LAN peers do not need to know about rendezvous to
-> keep working. v0.3 peers that opt into rendezvous gain a new
+> keep working. v0.4 peers that opt into rendezvous gain a new
 > control-plane ALPN `aerosync-rendezvous/1` for talking to the
 > rendezvous server, while their data plane keeps `aerosync/1`.
 
@@ -370,7 +402,7 @@ the `relay_usage` table at session close. An operator can cap by:
   separate port (default 7891). Adds ~200 lines of code.
 - **Multi-host**: `aerosync-relay` binary, separate deployment,
   rendezvous picks the geographically nearest relay from a registered
-  set. Out of scope for v0.3.0.
+  set. Out of scope for v0.4.0.
 
 ## 8. R4: Identity & auth
 
@@ -382,7 +414,7 @@ Two AeroSync installations with the same identity key are the
 **same peer** (think `~/.ssh/id_ed25519`).
 
 `aerosync identity show` prints peer_id + public key.
-`aerosync identity rotate` generates a fresh key (default v0.3.0:
+`aerosync identity rotate` generates a fresh key (default v0.4.0:
 manual; auto-rotation in v0.4).
 
 ### 8.2 Rendezvous JWT
@@ -516,7 +548,7 @@ the project operates. Self-hosters pin their own rendezvous via
 
 ### 9.4 Aliases & vanity names
 
-Out of scope for v0.3.0. Future RFC may add `aerosync alias add foo`
+Out of scope for v0.4.0. Future RFC may add `aerosync alias add foo`
 to map `foo@my-rendezvous` to the same peer_id as the canonical name.
 
 ## 10. R6: Deployment model
@@ -530,7 +562,7 @@ docker run -d \
   -v rendezvous-data:/data \
   -e DOMAIN=rendezvous.example.com \
   -e TLS_CERT=/data/cert.pem -e TLS_KEY=/data/key.pem \
-  aerosync/rendezvous:v0.3.0
+  aerosync/rendezvous:v0.4.0
 
 # User
 aerosync config set rendezvous_url https://rendezvous.example.com
@@ -550,14 +582,14 @@ aerosync receive --name alice  # listens
 
 The managed offering, **if the project chooses to run it**:
 - Free tier: 100 GB/mo relay, 1k sessions/mo, no SLA
-- No paid tier in v0.3; revisit after 6 months of usage data
+- No paid tier in v0.4; revisit after 6 months of usage data
 - Source-available rendezvous binary so any user can bring their own
 
 ### 10.3 Migration from v0.2 (LAN-only)
 
 v0.2 deployments continue to work without rendezvous. To opt in:
 
-1. Upgrade to v0.3.
+1. Upgrade to v0.4.
 2. Set `rendezvous_url` in `~/.aerosync/config.toml` (or env).
 3. Run `aerosync identity init` (one-time).
 4. Existing LAN flows still use mDNS — rendezvous is only consulted
@@ -648,7 +680,7 @@ between the two peers — the relay just splices.
 class Config:
     # ... existing v0.2 fields ...
 
-    # NEW in v0.3 (RFC-004)
+    # NEW in v0.4 (RFC-004)
     rendezvous_url: str | None = None       # https://rendezvous.example.com
     identity_path: Path | None = None        # default: ~/.aerosync/identity.key
     peer_name: str | None = None             # the local-part for this peer
@@ -720,16 +752,16 @@ aerosync receive --name alice             # auto-registers if rendezvous configu
 | #  | Question                                                                                | Default (ships unless changed)                                                  |
 | -- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | Q1 | Do we operate a public `aerosync.cloud`?                                                | **Yes**, with 6-month free-tier SLA commitment in writing                       |
-| Q2 | Can peers re-register the same name with a new pubkey (key rotation)?                   | **No** for v0.3.0; manual `aerosync identity rotate` requires a new name        |
+| Q2 | Can peers re-register the same name with a new pubkey (key rotation)?                   | **No** for v0.4.0; manual `aerosync identity rotate` requires a new name        |
 | Q3 | Does the rendezvous expose a peer-listing endpoint?                                     | **No** by default (privacy); per-namespace operator can opt-in                  |
 | Q4 | What's the default JWT lifetime?                                                        | **24h**, refreshed via heartbeat                                                |
-| Q5 | Do we ship the relay in the same binary as rendezvous?                                  | **Yes** for v0.3.0 (single binary); split possible in v0.3.1                   |
-| Q6 | What capability bit signals "willing to relay for others"?                              | Defer to v0.3.1; v0.3.0 only the rendezvous operator runs relays                |
-| Q7 | Should ACL support `deny` rules, not just allowlist?                                    | **No** for v0.3.0; allowlist-only keeps the model simple                        |
+| Q5 | Do we ship the relay in the same binary as rendezvous?                                  | **Yes** for v0.4.0 (single binary); split possible in v0.4.1                   |
+| Q6 | What capability bit signals "willing to relay for others"?                              | Defer to v0.4.1; v0.4.0 only the rendezvous operator runs relays                |
+| Q7 | Should ACL support `deny` rules, not just allowlist?                                    | **No** for v0.4.0; allowlist-only keeps the model simple                        |
 | Q8 | Should we encrypt `~/.aerosync/identity.key` at rest with a passphrase?                 | **No** by default (matches `~/.ssh/id_ed25519` ergonomics); CLI flag for opt-in |
 | Q9 | What happens when both peers initiate to each other simultaneously (glare)?             | Rendezvous deduplicates by `(min(peer_id), max(peer_id))`; first wins           |
 | Q10| End-to-end payload encryption (so a malicious relay can't see plaintext)?               | **Defer** to RFC-005 (Identity + Sealed Transfers)                              |
-| Q11| Federation across multiple rendezvous?                                                  | **No** for v0.3.0; one peer = one rendezvous                                    |
+| Q11| Federation across multiple rendezvous?                                                  | **No** for v0.4.0; one peer = one rendezvous                                    |
 | Q12| WebRTC compat (for browser peers)?                                                      | **No**; raw QUIC only. Browser support waits for QUIC-in-browser maturity       |
 
 ## 15. Implementation tasks
@@ -761,7 +793,7 @@ aerosync receive --name alice             # auto-registers if rendezvous configu
 | 23  | NAT traversal coverage matrix: tested combinations (cone-cone, cone-symmetric, etc.) + report    | Rust+Ops | 2.0  |
 | 24  | RFC-004 → docs/protocol/wan-rendezvous-v1.md (user-facing wire spec)                             | Docs     | 1.0  |
 | 25  | docs/wan-quickstart.md (end-to-end "set up your own rendezvous + run two peers" walkthrough)     | Docs     | 1.0  |
-| 26  | CHANGELOG v0.3.0 + migration notes from v0.2 + launch blog                                       | Docs     | 1.0  |
+| 26  | CHANGELOG v0.4.0 + migration notes from v0.2 + launch blog                                       | Docs     | 1.0  |
 | 27  | Cross-RFC integration smoke (RFC-002 + RFC-003 + RFC-004 e2e over WAN-style setup)               | Rust     | 1.5  |
 | 28  | Hardening, release candidate, real-NAT field testing                                             | All      | 2.0  |
 |     | **Total**                                                                                        |          | **~32.5** |
@@ -775,7 +807,7 @@ Add ~30% for review cycles + design-partner feedback + the inevitable
 NAT-zoo bugs that only surface against real ISP hardware: practical
 calendar range **~6-10 weeks**.
 
-## 16. Sequencing for v0.3.0
+## 16. Sequencing for v0.4.0
 
 ```
 week 1   Tasks 1-4 (rendezvous server core: registry, heartbeat, lookup, JWT)

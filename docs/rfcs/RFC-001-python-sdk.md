@@ -9,6 +9,44 @@
 | Estimated work | ~34.5 engineer-days                                  |
 | Depends on     | RFC-002 (Receipt protocol), RFC-003 (Metadata)       |
 
+## Implementation status (2026-04-22)
+
+This RFC intentionally remains **Draft**, but the Python SDK itself is
+already substantially implemented and shipped. The current workspace
+contains a full `aerosync-py` package, the `CHANGELOG.md` documents
+shipped follow-ups through `v0.2.1`, and `docs/v0.3.0-frozen-api.md`
+now describes the effective public contract more accurately than some
+older examples in this RFC.
+
+### Implemented in the codebase
+
+- Core package layout, maturin/PyO3 binding, `py.typed`, and typed
+  Python entry points.
+- `client()`, `receiver()`, `version()`, `Config`, `Client`,
+  `Receiver`, `IncomingFile`, `Receipt`, and the exported error
+  hierarchy.
+- Send/receive/history flows, receipt watching, metadata propagation,
+  and the Python quickstart paths used by the current docs and tests.
+
+### Drift from the original RFC text
+
+- `discover()` is implemented as an awaitable returning `list[Peer]`,
+  not the original `AsyncIterator[Peer]` sketch.
+- `Receipt.watch()` and send-time progress callbacks became the primary
+  observation APIs; the RFC's standalone `Receipt.progress()` shape was
+  not implemented as written.
+- The current public contract is best read from
+  `docs/v0.3.0-frozen-api.md`, not from every literal type signature in
+  this RFC.
+
+### Still open or deferred
+
+- PyPI release operations, trusted-publisher rollout, and some
+  docs-site/cookbook deliverables remain operational or documentation
+  work rather than code gaps.
+- The approval checklist at the end of this RFC has not been updated to
+  reflect what already shipped.
+
 ## 1. Summary
 
 Ship a Python package `aerosync` (on PyPI) that lets a Python application

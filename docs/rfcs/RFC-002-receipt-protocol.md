@@ -10,6 +10,40 @@
 | Estimated work | ~20.5 engineer-days                                |
 | Depends on     | none (RFC-001 and RFC-003 depend on this)          |
 
+## Implementation status (2026-04-22)
+
+This RFC intentionally remains **Draft**, but the receipt protocol is
+already substantially implemented and user-visible across Rust, Python,
+HTTP/QUIC, and MCP. `CHANGELOG.md` records the initial v0.2 rollout and
+the v0.2.1 follow-up that completed the QUIC receipt + metadata path,
+while `docs/v0.3.0-frozen-api.md` reflects the stabilized public
+surface.
+
+### Implemented in the codebase
+
+- Protobuf wire types for control and receipt frames.
+- Receipt state handling in Rust, Python receipt/incoming-file surfaces,
+  and MCP receipt-related tools.
+- HTTP receipt endpoints and QUIC control-stream receipt delivery.
+- Internal receipt/state infrastructure preserved through the
+  `v0.3.0-rc1` domain/infra refactor.
+
+### Drift from the original RFC text
+
+- Some route names, stream-layout details, and MCP tool names differ
+  from the original sketches even though the shipped behavior matches
+  the intent.
+- The frozen public contract is better captured by
+  `docs/v0.3.0-frozen-api.md` and the changelog than by every literal
+  path and example in this RFC.
+
+### Still open or deferred
+
+- Durable persistence and recovery do not yet fully match the original
+  SQLite-heavy design ideal.
+- Some verification/approval checklist items at the end of this RFC are
+  still unchecked despite the implementation being live.
+
 ## 1. Summary
 
 Today AeroSync's transfer is a one-way push: the sender knows when it

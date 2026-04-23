@@ -10,6 +10,37 @@
 | Estimated work | ~9.5 engineer-days                               |
 | Depends on     | RFC-002 (`aerosync/1` ALPN, protobuf wire)       |
 
+## Implementation status (2026-04-22)
+
+This RFC intentionally remains **Draft**, but the metadata envelope is
+already implemented as shipped product behavior. The schema, builder,
+validation rules, CLI/MCP entry points, and HTTP/QUIC propagation are
+live in the codebase, and `docs/v0.3.0-frozen-api.md` +
+`docs/protocol/metadata-v1.md` now describe the effective contract more
+accurately than some older examples in this RFC.
+
+### Implemented in the codebase
+
+- Protobuf `Metadata` schema and well-known fields.
+- Builder/validation logic with size and key/value limits.
+- HTTP and QUIC metadata propagation, receiver exposure, and history
+  persistence/query support.
+- CLI and MCP support for sending metadata and filtering history.
+
+### Drift from the original RFC text
+
+- Some user-facing names evolved since this draft (for example,
+  history-query surface naming and some example flows).
+- The stable behavior should be read from `docs/v0.3.0-frozen-api.md`
+  and `docs/protocol/metadata-v1.md` first.
+
+### Still open or deferred
+
+- SQLite/JSON1 indexing and a richer Python-side typed metadata/history
+  surface are still incomplete relative to the original RFC ambition.
+- The approval checklist at the end of this RFC has not been updated to
+  reflect the shipped state.
+
 ## 1. Summary
 
 Every transfer in v0.2 carries a structured **metadata envelope** that

@@ -32,6 +32,26 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets --verbose
 
+  feature-matrix:
+    name: Feature matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-feature-matrix
+      - name: Build workspace
+        run: cargo build --workspace --verbose
+      - name: Build workspace (HTTP only)
+        run: cargo build --workspace --no-default-features --features http --verbose
+      - name: Build workspace (QUIC only)
+        run: cargo build --workspace --no-default-features --features quic --verbose
+      - name: Build workspace (all features)
+        run: cargo build --workspace --all-features --verbose
+      - name: Test workspace (all features, Rust crates)
+        run: cargo test --workspace --all-features --exclude aerosync-py --verbose
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
