@@ -209,6 +209,13 @@ tokio-tungstenite = "0.20"
 # Path-only — adds nothing to the external dependency surface or `cargo deny`
 # advisories.
 aerosync-mcp = { path = "aerosync-mcp" }
+# Phase-1 wrap-up (Task B): drive the frozen CLI surface end-to-end from
+# integration tests under `tests/cli_*`. `assert_cmd` shells the bin built
+# by Cargo and asserts on exit code + stdout/stderr; `predicates` provides
+# the contains/regex matchers we pair with it. Both are dev-only and
+# carry no runtime cost for downstream consumers.
+assert_cmd = "2"
+predicates = "3"
 
 [workspace]
 members = [
