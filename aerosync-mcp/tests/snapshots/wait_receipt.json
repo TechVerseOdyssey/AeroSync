@@ -1,0 +1,35 @@
+{
+  "description": "Block until the named receipt reaches a terminal (Acked / Nacked / Cancelled / Errored) state, or until timeout_ms elapses. Returns the receipt's current state under either outcome.",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for the `wait_receipt` MCP tool.",
+    "properties": {
+      "mcp_auth_token": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "receipt_id": {
+        "description": "Receipt id (UUID) returned by a previous `send_file` or via\n`TransferEngine::send`.",
+        "type": "string"
+      },
+      "timeout_ms": {
+        "default": null,
+        "description": "Maximum wait in milliseconds. Defaults to 30000 (30 s).\nA value of 0 means \"return immediately with the current state\".",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "receipt_id"
+    ],
+    "title": "WaitReceiptParams",
+    "type": "object"
+  }
+}

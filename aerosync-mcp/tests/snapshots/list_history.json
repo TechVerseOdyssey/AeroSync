@@ -1,0 +1,91 @@
+{
+  "description": "List file transfer history. Returns recent send/receive records with speed, status, and error info.",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "lifecycle": {
+        "default": null,
+        "description": "Filter by lifecycle hint: `transient | durable | ephemeral`.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "limit": {
+        "description": "Maximum number of records to return (default: 20).",
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "mcp_auth_token": {
+        "default": null,
+        "description": "Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "metadata_filter": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "default": null,
+        "description": "Filter by user_metadata key/value pairs. Multiple entries\nAND together. A record matches only if every requested key\nis present with the requested value.",
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "received": {
+        "description": "Show only incoming (received) transfers.",
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "sent": {
+        "description": "Show only outgoing (sent) transfers.",
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "since": {
+        "default": null,
+        "description": "Inclusive lower bound on `completed_at`, RFC-3339 timestamp.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "success_only": {
+        "description": "Show only successful transfers.",
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "trace_id": {
+        "default": null,
+        "description": "Filter by `metadata.trace_id` (exact match).",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "until": {
+        "default": null,
+        "description": "Inclusive upper bound on `completed_at`, RFC-3339 timestamp.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "ListHistoryParams",
+    "type": "object"
+  }
+}

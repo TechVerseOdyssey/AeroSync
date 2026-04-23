@@ -1,0 +1,59 @@
+{
+  "description": "Open a one-shot receiver for an incoming file from a known peer. Returns the receiver address + bearer token; the agent on the other side must invoke send_file targeting this address. For full pull-mode (where this MCP server contacts the peer directly) use the v0.3.0 rendezvous (RFC-004).",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for `request_file` — the symmetric pull-side counterpart to\n`send_file`. The tool opens a one-shot HTTP receiver bound to `listen`\n(default `127.0.0.1:0`), generates an HMAC bearer token (unless one is\nsupplied), and returns the bound address + token so an agent on the\nother end can `send_file` into it.\n\nThe \"notify the peer\" half of pull-mode is intentionally out of scope\nfor v0.2.1 — that requires either a pre-existing channel or the\nv0.3.0+ rendezvous (RFC-004). Today the LLM (or human) on the other\nside wires the two tools together by pasting `address` + `auth_token`\ninto their own `send_file` call.",
+    "properties": {
+      "auth_token": {
+        "default": null,
+        "description": "Optional HMAC secret the peer must use to mint the bearer token.\nIf omitted (the common case), the tool generates a fresh ephemeral\nsecret + signed bearer and returns the bearer in `auth_token`.\nDistinct from `mcp_auth_token` which protects this MCP channel.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "from_peer": {
+        "description": "Logical name of the peer expected to push (informational; surfaced\nin the audit log and in the human-readable `instructions` field of\nthe response).",
+        "type": "string"
+      },
+      "idle_timeout_secs": {
+        "default": 300,
+        "description": "Maximum time (seconds) to wait for the peer's push before tearing\ndown the receiver (default: 300). Guards against stuck handles.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "listen": {
+        "default": null,
+        "description": "Listen address for the one-shot receiver, e.g. `\"127.0.0.1:0\"`\n(default — let the OS pick a free port). Pass an explicit port\nlike `\"0.0.0.0:7790\"` only when the peer cannot reach localhost\n(e.g. cross-host within a trusted LAN).",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "mcp_auth_token": {
+        "default": null,
+        "description": "Local MCP auth token. Required only when the server has\n`AEROSYNC_MCP_SECRET` set.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "one_shot": {
+        "default": true,
+        "description": "Auto-shutdown the receiver after the first received file\n(default: true). Set to `false` for batch pulls (the receiver\nwill then live until `idle_timeout_secs` elapses or\n`stop_receiver` is called).",
+        "type": "boolean"
+      },
+      "save_dir": {
+        "description": "Local directory where the incoming file(s) will be saved. Created\nif it does not exist.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "from_peer",
+      "save_dir"
+    ],
+    "title": "RequestFileParams",
+    "type": "object"
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "description": "Recursively send an entire directory to a remote address. Preserves directory structure. Returns immediately with a task_id; use get_transfer_status to poll progress.",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "conversation_id": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "correlation_id": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "destination": {
+        "description": "Destination address (same formats as `send_file`).",
+        "type": "string"
+      },
+      "lifecycle": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "mcp_auth_token": {
+        "default": null,
+        "description": "Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "metadata": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "default": null,
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "no_verify": {
+        "description": "Skip the end-to-end SHA-256 integrity check (default: false).",
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "source": {
+        "description": "Absolute or relative path to the source directory.",
+        "type": "string"
+      },
+      "token": {
+        "description": "Optional auth token for the remote receiver. Distinct from `mcp_auth_token`.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "trace_id": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "source",
+      "destination"
+    ],
+    "title": "SendDirectoryParams",
+    "type": "object"
+  }
+}

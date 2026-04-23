@@ -1,0 +1,27 @@
+{
+  "description": "Scan the local network for AeroSync receivers using mDNS discovery. Returns a list of available receivers with their addresses and capabilities.",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "mcp_auth_token": {
+        "default": null,
+        "description": "Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "timeout": {
+        "description": "How long to wait for mDNS responses, in seconds (default: 3).",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "title": "DiscoverParams",
+    "type": "object"
+  }
+}

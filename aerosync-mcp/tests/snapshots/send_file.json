@@ -1,0 +1,113 @@
+{
+  "description": "Send a single file to a remote address. Automatically negotiates QUIC or HTTP protocol. Returns immediately with a task_id; use get_transfer_status to poll progress.",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "content_type": {
+        "default": null,
+        "description": "Override the auto-sniffed content type (skip the magic-byte\nsniffer).",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "conversation_id": {
+        "default": null,
+        "description": "Well-known `conversation_id`.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "correlation_id": {
+        "default": null,
+        "description": "Free-form correlation id.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "destination": {
+        "description": "Destination address: `host:port`, `http://host:port/upload`, `quic://...`, `s3://bucket/key` or `ftp://...`.",
+        "type": "string"
+      },
+      "lifecycle": {
+        "default": null,
+        "description": "Lifecycle hint: one of `transient | durable | ephemeral`.\nHints are not enforced by AeroSync in v0.2.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "limit": {
+        "description": "Optional upload bandwidth cap, e.g. \"10MB\", \"512KB\".",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "mcp_auth_token": {
+        "default": null,
+        "description": "Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "metadata": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "default": null,
+        "description": "User metadata as a flat JSON object of `key=value` strings.\nExample: `{\"tenant\": \"acme\", \"agent\": \"cleaner\"}`. Values must\nbe UTF-8 strings; binary payloads must be base64-encoded by\nthe caller (RFC-003 §10 Q2).",
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "no_verify": {
+        "description": "Skip the end-to-end SHA-256 integrity check (default: false).",
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "parent_file_ids": {
+        "default": null,
+        "description": "Lineage: ids of files that produced this one. Maps to\n`metadata.parent_file_ids`.",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "source": {
+        "description": "Absolute or relative path to the source file.",
+        "type": "string"
+      },
+      "token": {
+        "description": "Optional auth token for the remote receiver (HMAC-SHA256 bearer). Distinct from `mcp_auth_token`.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "trace_id": {
+        "default": null,
+        "description": "Well-known `trace_id` (RFC-003 §4.2). Free-form string.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "source",
+      "destination"
+    ],
+    "title": "SendFileParams",
+    "type": "object"
+  }
+}

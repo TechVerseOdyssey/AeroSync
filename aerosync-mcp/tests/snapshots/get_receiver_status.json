@@ -1,0 +1,18 @@
+{
+  "description": "Get the status of the receiver server and list all files received so far.",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "mcp_auth_token": {
+        "default": null,
+        "description": "Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "NoParams",
+    "type": "object"
+  }
+}

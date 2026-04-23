@@ -1,0 +1,76 @@
+{
+  "description": "Start a file receiver server in the background. The server listens for incoming files and saves them to the specified directory. Use stop_receiver to shut it down.",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "auth_token": {
+        "description": "Require senders to present this token (HMAC bearer). Leave empty to disable auth. Distinct from `mcp_auth_token`.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "https": {
+        "description": "Enable HTTPS with an auto-generated self-signed certificate (default: false).",
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "https_port": {
+        "description": "HTTPS listen port (default: 7790).",
+        "format": "uint16",
+        "maximum": 65535,
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "mcp_auth_token": {
+        "default": null,
+        "description": "Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "overwrite": {
+        "description": "Allow overwriting existing files with the same name (default: false).",
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "port": {
+        "description": "HTTP listen port (default: 7788).",
+        "format": "uint16",
+        "maximum": 65535,
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "quic_port": {
+        "description": "QUIC listen port (default: 7789).",
+        "format": "uint16",
+        "maximum": 65535,
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "save_to": {
+        "description": "Directory where received files are saved (default: \"./received\").",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "StartReceiverParams",
+    "type": "object"
+  }
+}

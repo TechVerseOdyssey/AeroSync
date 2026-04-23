@@ -1,0 +1,33 @@
+{
+  "description": "Cancel an in-flight transfer by receipt id. Records a Cancelled terminal with the supplied reason. No-op (success) if the receipt is already terminal.",
+  "input_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Parameters for the `cancel_receipt` MCP tool.",
+    "properties": {
+      "mcp_auth_token": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "reason": {
+        "default": null,
+        "description": "Free-form reason recorded in the resulting Cancelled terminal.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "receipt_id": {
+        "description": "Receipt id (UUID) of the in-flight transfer to cancel.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "receipt_id"
+    ],
+    "title": "CancelReceiptParams",
+    "type": "object"
+  }
+}
