@@ -328,6 +328,14 @@ pub struct ListHistoryParams {
     #[serde(default)]
     pub until: Option<String>,
 
+    /// Filter by sealed `metadata.content_type` substring (case-insensitive).
+    #[serde(default)]
+    pub content_type_contains: Option<String>,
+
+    /// When true, response `data.recoverable_receipts` lists non-terminal receipts from the SQLite journal.
+    #[serde(default)]
+    pub include_recoverable_receipts: Option<bool>,
+
     /// Local MCP auth token. Required only when the server has `AEROSYNC_MCP_SECRET` set.
     #[serde(default, alias = "_auth_token")]
     pub mcp_auth_token: Option<String>,
@@ -1496,8 +1504,45 @@ impl AeroSyncMcpServer {
         }
         let store_path = HistoryStore::default_path();
         if !store_path.exists() {
+            let mut recoverable_receipts: Vec<serde_json::Value> = Vec::new();
+            if params.include_recoverable_receipts.unwrap_or(false) {
+                use aerosync::core::receipt_journal::SqliteReceiptJournal;
+                use aerosync::core::ReceiptJournalStorage;
+                let jp = SqliteReceiptJournal::default_path();
+                if jp.exists() {
+                    if let Ok(journal) = SqliteReceiptJournal::open(&jp).await {
+                        let lim = params.limit.unwrap_or(20);
+                        if let Ok(rr) = journal.list_recoverable(lim).await {
+                            recoverable_receipts = rr
+                                .iter()
+                                .map(|r| {
+                                    json!({
+                                        "receipt_id": r.receipt_id.to_string(),
+                                        "side": r.side.as_str(),
+                                        "state": &r.state,
+                                        "is_terminal": r.is_terminal,
+                                        "filename": r.filename,
+                                        "peer": r.peer,
+                                        "last_event_at": r.last_event_at,
+                                        "reason": r.reason,
+                                        "code": r.code,
+                                    })
+                                })
+                                .collect();
+                        }
+                    }
+                }
+            }
             return Ok(CallToolResult::success(vec![Content::text(
-                json!({"success": true, "data": {"records": [], "message": "No transfer history yet"}}).to_string()
+                json!({
+                    "success": true,
+                    "data": {
+                        "records": [],
+                        "message": "No transfer history yet",
+                        "recoverable_receipts": recoverable_receipts
+                    }
+                })
+                .to_string(),
             )]));
         }
 
@@ -1564,6 +1609,7 @@ impl AeroSyncMcpServer {
             lifecycle,
             since,
             until,
+            content_type_contains: params.content_type_contains,
             ..Default::default()
         };
 
@@ -1593,12 +1639,43 @@ impl AeroSyncMcpServer {
                     })
                     .collect();
 
+                let mut recoverable_receipts: Vec<serde_json::Value> = Vec::new();
+                if params.include_recoverable_receipts.unwrap_or(false) {
+                    use aerosync::core::receipt_journal::SqliteReceiptJournal;
+                    use aerosync::core::ReceiptJournalStorage;
+                    let jp = SqliteReceiptJournal::default_path();
+                    if jp.exists() {
+                        if let Ok(journal) = SqliteReceiptJournal::open(&jp).await {
+                            let lim = params.limit.unwrap_or(20);
+                            if let Ok(rr) = journal.list_recoverable(lim).await {
+                                recoverable_receipts = rr
+                                    .iter()
+                                    .map(|r| {
+                                        json!({
+                                            "receipt_id": r.receipt_id.to_string(),
+                                            "side": r.side.as_str(),
+                                            "state": &r.state,
+                                            "is_terminal": r.is_terminal,
+                                            "filename": r.filename,
+                                            "peer": r.peer,
+                                            "last_event_at": r.last_event_at,
+                                            "reason": r.reason,
+                                            "code": r.code,
+                                        })
+                                    })
+                                    .collect();
+                            }
+                        }
+                    }
+                }
+
                 Ok(CallToolResult::success(vec![Content::text(
                     json!({
                         "success": true,
                         "data": {
                             "total": records.len(),
-                            "records": records
+                            "records": records,
+                            "recoverable_receipts": recoverable_receipts
                         }
                     })
                     .to_string(),
@@ -2550,6 +2627,8 @@ mod tests {
                     lifecycle: None,
                     since: Some("yesterday".into()),
                     until: None,
+                    content_type_contains: None,
+                    include_recoverable_receipts: None,
                     mcp_auth_token: None,
                 },
             ))
@@ -2829,6 +2908,8 @@ mod tests {
                     lifecycle: Some("transient".into()),
                     since: None,
                     until: None,
+                    content_type_contains: None,
+                    include_recoverable_receipts: None,
                     mcp_auth_token: None,
                 },
             ))

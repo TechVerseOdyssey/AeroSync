@@ -631,7 +631,15 @@ impl PyClient {
     /// open a fresh `HistoryStore` keyed by the default path. Users
     /// who want a different path will route through `Config` once
     /// w6 task #11 lands.
-    #[pyo3(signature = (*, limit=100, direction="all", metadata_filter=None, history_path=None))]
+    #[pyo3(signature = (
+        *,
+        limit=100,
+        direction="all",
+        metadata_filter=None,
+        history_path=None,
+        trace_id=None,
+        content_type_contains=None
+    ))]
     fn history<'py>(
         &self,
         py: Python<'py>,
@@ -639,6 +647,8 @@ impl PyClient {
         direction: &str,
         metadata_filter: Option<HashMap<String, String>>,
         history_path: Option<PathBuf>,
+        trace_id: Option<String>,
+        content_type_contains: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let dir = match direction {
             "all" => None,
@@ -657,6 +667,8 @@ impl PyClient {
                 direction: dir,
                 limit,
                 metadata_eq: metadata_filter.unwrap_or_default(),
+                trace_id,
+                content_type_contains,
                 ..Default::default()
             };
             let rows = store.query(&q).await.map_err(engine_err_to_py)?;

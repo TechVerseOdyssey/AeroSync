@@ -3,6 +3,22 @@
   "input_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
+      "content_type_contains": {
+        "default": null,
+        "description": "Filter by sealed `metadata.content_type` substring (case-insensitive).",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "include_recoverable_receipts": {
+        "default": null,
+        "description": "When true, response `data.recoverable_receipts` lists non-terminal receipts from the SQLite journal.",
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
       "lifecycle": {
         "default": null,
         "description": "Filter by lifecycle hint: `transient | durable | ephemeral`.",

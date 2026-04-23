@@ -46,7 +46,7 @@ pub mod runtime;
 use client::PyClient;
 use receipt::{PyReceipt, PyReceiptWatcher};
 use receiver::{PyIncomingFile, PyReceiver};
-use records::{PyHistoryEntry, PyPeer, PyProgress};
+use records::{PyHistoryEntry, PyPeer, PyProgress, PyRecoverableReceipt};
 
 /// Returns the PyPI package version (= `Cargo.toml` version).
 ///
@@ -174,6 +174,34 @@ fn discover(py: Python<'_>, timeout: f64) -> PyResult<Bound<'_, PyAny>> {
     })
 }
 
+/// Returns recoverable (non-terminal) receipt rows from the SQLite journal (`RFC-002` §8).
+///
+/// Uses [`aerosync::core::receipt_journal::SqliteReceiptJournal::default_path`] when
+/// `journal_path` is omitted.
+#[pyfunction]
+#[pyo3(signature = (journal_path=None))]
+fn recover(py: Python<'_>, journal_path: Option<std::path::PathBuf>) -> PyResult<Bound<'_, PyAny>> {
+    use aerosync::core::receipt_journal::SqliteReceiptJournal;
+    use aerosync::core::ReceiptJournalStorage;
+    let path = journal_path.unwrap_or_else(SqliteReceiptJournal::default_path);
+    runtime::future_into_py(py, async move {
+        if !path.exists() {
+            return Ok(Vec::<PyRecoverableReceipt>::new());
+        }
+        let j = SqliteReceiptJournal::open(&path)
+            .await
+            .map_err(errors::engine_err_to_py)?;
+        let rows = j
+            .list_recoverable(0)
+            .await
+            .map_err(errors::engine_err_to_py)?;
+        Ok(rows
+            .into_iter()
+            .map(PyRecoverableReceipt::from)
+            .collect::<Vec<_>>())
+    })
+}
+
 /// `#[pymodule]` entry point. Maturin invokes this when Python
 /// imports `aerosync._native`.
 #[pymodule]
@@ -182,6 +210,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(make_client, m)?)?;
     m.add_function(wrap_pyfunction!(make_receiver, m)?)?;
     m.add_function(wrap_pyfunction!(discover, m)?)?;
+    m.add_function(wrap_pyfunction!(recover, m)?)?;
     m.add_function(wrap_pyfunction!(receiver::_test_make_incoming_file, m)?)?;
     m.add_function(wrap_pyfunction!(receiver::_test_encode_metadata_header, m)?)?;
 
@@ -193,6 +222,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPeer>()?;
     m.add_class::<PyProgress>()?;
     m.add_class::<PyHistoryEntry>()?;
+    m.add_class::<PyRecoverableReceipt>()?;
 
     exceptions::register(m)?;
 

@@ -41,11 +41,11 @@ older examples in this RFC.
 
 ### Still open or deferred
 
-- PyPI release operations, trusted-publisher rollout, and some
-  docs-site/cookbook deliverables remain operational or documentation
-  work rather than code gaps.
-- The approval checklist at the end of this RFC has not been updated to
-  reflect what already shipped.
+- PyPI release operations, trusted-publisher rollout, and CI for wheels remain
+  operational rather than binding gaps.
+- Cookbook delivered at [`docs/python/cookbook.md`](../python/cookbook.md).
+- The approval checklist at the end of this RFC should be reconciled against
+  `docs/v0.3.0-frozen-api.md` before tagging v0.3.0 GA.
 
 ## 1. Summary
 

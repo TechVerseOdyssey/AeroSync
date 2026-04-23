@@ -193,6 +193,17 @@ impl HistoryStore {
             let cutoff = until.timestamp().max(0) as u64;
             all.retain(|e| e.completed_at <= cutoff);
         }
+        if let Some(ref needle) = q.content_type_contains {
+            if !needle.is_empty() {
+                let needle_lc = needle.to_lowercase();
+                all.retain(|e| {
+                    e.metadata
+                        .as_ref()
+                        .map(|m| m.content_type.to_lowercase().contains(&needle_lc))
+                        .unwrap_or(false)
+                });
+            }
+        }
 
         all.sort_by_key(|e| std::cmp::Reverse(e.completed_at));
 
@@ -1096,6 +1107,51 @@ mod tests {
             .unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].filename, "f1.bin");
+    }
+
+    #[tokio::test]
+    async fn test_query_filter_by_content_type_substring() {
+        let (store, _dir) = tmp_store().await;
+        let mut m_png = MetadataBuilder::new()
+            .content_type("image/png")
+            .build()
+            .unwrap();
+        m_png.id = Uuid::new_v4().to_string();
+        m_png.from_node = "a".into();
+        m_png.to_node = "b".into();
+        m_png.protocol = "h".into();
+        let mut m_txt = MetadataBuilder::new()
+            .content_type("text/plain")
+            .build()
+            .unwrap();
+        m_txt.id = Uuid::new_v4().to_string();
+        m_txt.from_node = "a".into();
+        m_txt.to_node = "b".into();
+        m_txt.protocol = "h".into();
+        store
+            .append(
+                HistoryEntry::success("a.png", None, 1, None, None, "h", "send", 1)
+                    .with_metadata_proto(&m_png),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                HistoryEntry::success("b.txt", None, 1, None, None, "h", "send", 1)
+                    .with_metadata_proto(&m_txt),
+            )
+            .await
+            .unwrap();
+
+        let res = store
+            .query(&HistoryFilter {
+                content_type_contains: Some("image/".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].filename, "a.png");
     }
 
     #[tokio::test]

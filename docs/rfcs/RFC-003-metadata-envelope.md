@@ -36,10 +36,12 @@ accurately than some older examples in this RFC.
 
 ### Still open or deferred
 
-- SQLite/JSON1 indexing and a richer Python-side typed metadata/history
-  surface are still incomplete relative to the original RFC ambition.
-- The approval checklist at the end of this RFC has not been updated to
-  reflect the shipped state.
+- SQLite/JSON1 **index** for history queries is still deferred (queries remain
+  **correct** via JSONL linear scan); Python `HistoryEntry` now surfaces
+  `trace_id`, `content_type`, and `user_metadata` plus `history(..., trace_id=,
+  content_type_contains=)`.
+- The approval checklist at the end of this RFC has not been mechanically
+  audited against this paragraph — treat `docs/v0.3.0-frozen-api.md` as canonical.
 
 ## 1. Summary
 

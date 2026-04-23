@@ -248,6 +248,16 @@ enum Commands {
         /// 结束时间（含），RFC-3339 格式
         #[arg(long, value_name = "RFC3339")]
         until: Option<String>,
+
+        /// 按 sealed metadata.content_type 子串过滤（不区分大小写）
+        #[arg(long, value_name = "SUBSTRING")]
+        content_type: Option<String>,
+    },
+
+    /// 查询 durable receipt journal（RFC-002 §8 SQLite 日志）
+    Receipt {
+        #[command(subcommand)]
+        action: ReceiptAction,
     },
 
     /// 订阅接收端 WebSocket 事件流（实时感知文件到达）
@@ -329,6 +339,26 @@ enum TokenAction {
     Revoke {
         /// Token 字符串或前缀（前 8 字符即可）
         token_prefix: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReceiptAction {
+    /// 列出可恢复的 receipt（默认），或最近已终态的 receipt
+    List {
+        /// 列出最近 SECS 秒内已进入终态的 receipt（与默认可恢复列表互斥）
+        #[arg(long, value_name = "SECS")]
+        recent_terminal_within_secs: Option<u64>,
+        #[arg(long, default_value = "50")]
+        limit: usize,
+        #[arg(long, value_name = "PATH")]
+        journal: Option<PathBuf>,
+    },
+    /// 按时间顺序打印某一 receipt 的全部 journal 事件
+    Show {
+        receipt_id: String,
+        #[arg(long, value_name = "PATH")]
+        journal: Option<PathBuf>,
     },
 }
 
@@ -485,6 +515,7 @@ async fn main() -> anyhow::Result<()> {
             lifecycle,
             since,
             until,
+            content_type,
         } => {
             cmd_history(
                 limit,
@@ -496,8 +527,13 @@ async fn main() -> anyhow::Result<()> {
                 lifecycle,
                 since,
                 until,
+                content_type,
             )
             .await?;
+        }
+
+        Commands::Receipt { action } => {
+            cmd_receipt(action).await?;
         }
 
         Commands::Watch {
@@ -1264,6 +1300,109 @@ async fn cmd_status(host: String) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ──────────────────────────── receipt journal ─────────────────────────────
+
+async fn cmd_receipt(action: ReceiptAction) -> anyhow::Result<()> {
+    use aerosync::core::receipt_journal::SqliteReceiptJournal;
+    use aerosync::core::ReceiptJournalStorage;
+
+    let resolve_path = |j: Option<PathBuf>| j.unwrap_or_else(SqliteReceiptJournal::default_path);
+
+    match action {
+        ReceiptAction::List {
+            recent_terminal_within_secs,
+            limit,
+            journal,
+        } => {
+            let path = resolve_path(journal);
+            if !path.exists() {
+                println!("No receipt journal at {}.", path.display());
+                return Ok(());
+            }
+            let j = SqliteReceiptJournal::open(&path)
+                .await
+                .map_err(|e| anyhow::anyhow!("open receipt journal: {e}"))?;
+            let rows = if let Some(secs) = recent_terminal_within_secs {
+                j.list_recent_terminal(secs, limit)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("list recent terminal receipts: {e}"))?
+            } else {
+                j.list_recoverable(limit)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("list recoverable receipts: {e}"))?
+            };
+            if rows.is_empty() {
+                println!("No matching receipt journal entries.");
+                return Ok(());
+            }
+            println!("{} record(s):\n", rows.len());
+            for r in &rows {
+                println!(
+                    "  {}  {:9}  terminal={:<5}  {:<16}  file={:<20}  peer={:<16}  last_event_at={}",
+                    r.receipt_id,
+                    r.side.as_str(),
+                    r.is_terminal,
+                    r.state,
+                    r.filename.as_deref().unwrap_or("-"),
+                    r.peer.as_deref().unwrap_or("-"),
+                    r.last_event_at
+                );
+                if let Some(ref reason) = r.reason {
+                    println!("      reason: {reason}");
+                }
+            }
+        }
+        ReceiptAction::Show {
+            receipt_id,
+            journal,
+        } => {
+            let id = Uuid::parse_str(receipt_id.trim())
+                .map_err(|e| anyhow::anyhow!("Invalid receipt UUID {:?}: {}", receipt_id, e))?;
+            let path = resolve_path(journal);
+            if !path.exists() {
+                println!("No receipt journal at {}.", path.display());
+                return Ok(());
+            }
+            let j = SqliteReceiptJournal::open(&path)
+                .await
+                .map_err(|e| anyhow::anyhow!("open receipt journal: {e}"))?;
+            let evs = j
+                .list_events_for_receipt(id)
+                .await
+                .map_err(|e| anyhow::anyhow!("read receipt events: {e}"))?;
+            if evs.is_empty() {
+                println!("No events for receipt {}.", id);
+                return Ok(());
+            }
+            println!("{} event(s) for {}:\n", evs.len(), id);
+            for (i, ev) in evs.iter().enumerate() {
+                println!(
+                    "  {:>3}. at={}  {:9}  terminal={:<5}  {}",
+                    i + 1,
+                    ev.recorded_at,
+                    ev.side.as_str(),
+                    ev.is_terminal,
+                    ev.state
+                );
+                if let Some(ref p) = ev.peer {
+                    println!("      peer: {p}");
+                }
+                if let Some(ref f) = ev.filename {
+                    println!("      file: {f}");
+                }
+                if let Some(ref reason) = ev.reason {
+                    println!("      reason: {reason}");
+                }
+                if let Some(c) = ev.code {
+                    println!("      code: {c}");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // ──────────────────────────── history ───────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -1277,6 +1416,7 @@ async fn cmd_history(
     lifecycle: Option<String>,
     since: Option<String>,
     until: Option<String>,
+    content_type: Option<String>,
 ) -> anyhow::Result<()> {
     use aerosync::core::{HistoryQuery, HistoryStore};
 
@@ -1311,6 +1451,7 @@ async fn cmd_history(
         lifecycle,
         since,
         until,
+        content_type_contains: content_type,
         ..Default::default()
     };
 

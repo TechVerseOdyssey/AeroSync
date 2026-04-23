@@ -95,3 +95,6 @@ class HistoryEntry:
     completed_at: datetime | None = None
     receipt_id: str | None = None
     receipt_state: str | None = None
+    trace_id: str | None = None
+    content_type: str | None = None
+    user_metadata: dict[str, str] | None = None

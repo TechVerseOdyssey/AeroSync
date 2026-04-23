@@ -480,6 +480,9 @@ pub struct HistoryQuery {
     pub since: Option<chrono::DateTime<chrono::Utc>>,
     /// Match only entries with `completed_at <= until` (inclusive).
     pub until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Match entries whose sealed `metadata.content_type` contains this
+    /// substring (case-insensitive). Empty / absent ⇒ no constraint.
+    pub content_type_contains: Option<String>,
 }
 
 /// Alias for [`HistoryQuery`] under the RFC-003 plan name. Both

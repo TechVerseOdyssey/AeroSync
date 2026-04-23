@@ -410,6 +410,32 @@ impl SqliteReceiptJournal {
         }
         Ok(out)
     }
+
+    /// Full chronological event log for one receipt id (CLI `receipt show`).
+    pub async fn list_events_for_receipt(
+        &self,
+        receipt_id: Uuid,
+    ) -> Result<Vec<ReceiptJournalRecord>> {
+        let id_str = receipt_id.to_string();
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT receipt_id, side, state, is_terminal, reason, code,
+                        history_id, filename, peer, recorded_at
+                 FROM receipt_events
+                 WHERE receipt_id = ?1
+                 ORDER BY event_id ASC",
+            )
+            .map_err(map_sql_err)?;
+        let rows = stmt
+            .query_map(params![id_str], row_to_journal_record)
+            .map_err(map_sql_err)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(map_sql_err)?);
+        }
+        Ok(out)
+    }
 }
 
 // ─────────────────────────── helpers ───────────────────────────────────────
@@ -444,6 +470,50 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn row_to_journal_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReceiptJournalRecord> {
+    let id_str: String = row.get(0)?;
+    let side_str: String = row.get(1)?;
+    let state: String = row.get(2)?;
+    let is_terminal: i64 = row.get(3)?;
+    let reason: Option<String> = row.get(4)?;
+    let code: Option<i64> = row.get(5)?;
+    let history_id_str: Option<String> = row.get(6)?;
+    let filename: Option<String> = row.get(7)?;
+    let peer: Option<String> = row.get(8)?;
+    let recorded_at: i64 = row.get(9)?;
+
+    let receipt_id = Uuid::parse_str(&id_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let side = ReceiptSide::parse(&side_str).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                "unknown receipt side: {side_str}"
+            )),
+        )
+    })?;
+    let history_id = match history_id_str {
+        Some(s) => Some(Uuid::parse_str(&s).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e))
+        })?),
+        None => None,
+    };
+    Ok(ReceiptJournalRecord {
+        receipt_id,
+        side,
+        state,
+        is_terminal: is_terminal != 0,
+        reason,
+        code: code.map(|c| c as u32),
+        history_id,
+        filename,
+        peer,
+        recorded_at: recorded_at.max(0) as u64,
+    })
 }
 
 fn row_to_recoverable(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecoverableReceipt> {

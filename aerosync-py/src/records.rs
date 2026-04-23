@@ -15,6 +15,7 @@
 
 use aerosync::core::history::{HistoryEntry, ReceiptStateLabel};
 use aerosync::core::AeroSyncPeer;
+use aerosync::core::RecoverableReceipt;
 use pyo3::prelude::*;
 
 /// `Peer` — a single AeroSync peer discovered via mDNS or rendezvous.
@@ -133,12 +134,37 @@ pub struct PyHistoryEntry {
     pub completed_at: Option<u64>,
     pub receipt_id: Option<String>,
     pub receipt_state: Option<String>,
+    pub trace_id: Option<String>,
+    pub content_type: Option<String>,
+    pub user_metadata: Option<std::collections::HashMap<String, String>>,
+}
+
+/// Snapshot of one recoverable receipt row from the SQLite journal (RFC-002 §8).
+#[pyclass(
+    get_all,
+    frozen,
+    module = "aerosync._native",
+    name = "RecoverableReceipt",
+    skip_from_py_object
+)]
+#[derive(Clone, Debug)]
+pub struct PyRecoverableReceipt {
+    pub receipt_id: String,
+    pub side: String,
+    pub state: String,
+    pub is_terminal: bool,
+    pub reason: Option<String>,
+    pub code: Option<u32>,
+    pub history_id: Option<String>,
+    pub filename: Option<String>,
+    pub peer: Option<String>,
+    pub last_event_at: u64,
 }
 
 #[pymethods]
 impl PyHistoryEntry {
     #[new]
-    #[pyo3(signature = (id, direction, file_name, size_bytes, sha256=None, completed_at=None, receipt_id=None, receipt_state=None))]
+    #[pyo3(signature = (id, direction, file_name, size_bytes, sha256=None, completed_at=None, receipt_id=None, receipt_state=None, trace_id=None, content_type=None, user_metadata=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         id: String,
@@ -149,6 +175,9 @@ impl PyHistoryEntry {
         completed_at: Option<u64>,
         receipt_id: Option<String>,
         receipt_state: Option<String>,
+        trace_id: Option<String>,
+        content_type: Option<String>,
+        user_metadata: Option<std::collections::HashMap<String, String>>,
     ) -> Self {
         Self {
             id,
@@ -159,6 +188,9 @@ impl PyHistoryEntry {
             completed_at,
             receipt_id,
             receipt_state,
+            trace_id,
+            content_type,
+            user_metadata,
         }
     }
 
@@ -183,6 +215,22 @@ fn label_to_str(label: ReceiptStateLabel) -> &'static str {
 
 impl From<HistoryEntry> for PyHistoryEntry {
     fn from(e: HistoryEntry) -> Self {
+        let (trace_id, content_type, user_metadata) = match &e.metadata {
+            Some(m) => (
+                m.trace_id.clone(),
+                if m.content_type.is_empty() {
+                    None
+                } else {
+                    Some(m.content_type.clone())
+                },
+                if m.user_metadata.is_empty() {
+                    None
+                } else {
+                    Some(m.user_metadata.clone())
+                },
+            ),
+            None => (None, None, None),
+        };
         Self {
             id: e.id.to_string(),
             direction: e.direction,
@@ -192,6 +240,26 @@ impl From<HistoryEntry> for PyHistoryEntry {
             completed_at: Some(e.completed_at),
             receipt_id: e.receipt_id.map(|u| u.to_string()),
             receipt_state: e.receipt_state.map(|l| label_to_str(l).to_string()),
+            trace_id,
+            content_type,
+            user_metadata,
+        }
+    }
+}
+
+impl From<RecoverableReceipt> for PyRecoverableReceipt {
+    fn from(r: RecoverableReceipt) -> Self {
+        Self {
+            receipt_id: r.receipt_id.to_string(),
+            side: r.side.as_str().to_string(),
+            state: r.state,
+            is_terminal: r.is_terminal,
+            reason: r.reason,
+            code: r.code,
+            history_id: r.history_id.map(|u| u.to_string()),
+            filename: r.filename,
+            peer: r.peer,
+            last_event_at: r.last_event_at,
         }
     }
 }

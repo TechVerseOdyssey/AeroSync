@@ -26,11 +26,13 @@ from aerosync._native import (
     Progress,
     Receipt,
     Receiver,
+    RecoverableReceipt,
     TimeoutError,
     TransferFailed,
     client,
     discover,
     receiver,
+    recover,
     version,
 )
 from aerosync._types import HistoryEntry as _DocHistoryEntry
@@ -72,9 +74,11 @@ __all__ = [
     "Progress",
     "Receipt",
     "Receiver",
+    "RecoverableReceipt",
     "client",
     "discover",
     "receiver",
+    "recover",
     "version",
     # Native classes are re-exported under leading-underscore aliases
     # so advanced users can still reach them; the public surface uses

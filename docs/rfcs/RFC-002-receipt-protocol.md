@@ -39,10 +39,12 @@ surface.
 
 ### Still open or deferred
 
-- Durable persistence and recovery do not yet fully match the original
-  SQLite-heavy design ideal.
-- Some verification/approval checklist items at the end of this RFC are
-  still unchecked despite the implementation being live.
+- Durable persistence landed as `SqliteReceiptJournal` + CLI `aerosync receipt`
+  / Python `aerosync.recover()` / MCP `list_history(include_recoverable_receipts=…)`.
+  Full parity with every originally sketched SQLite table name / route still
+  differs — read `docs/v0.3.0-frozen-api.md`.
+- Some verification/approval checklist items at the end of this RFC may still
+  be unchecked; reconcile when cutting v0.3.0 GA.
 
 ## 1. Summary
 

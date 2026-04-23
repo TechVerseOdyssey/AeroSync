@@ -65,7 +65,7 @@ fn top_level_help_lists_frozen_commands() {
     commands.retain(|name| name != "help");
 
     let expected = [
-        "send", "receive", "token", "status", "resume", "history", "watch", "discover",
+        "send", "receive", "token", "status", "resume", "history", "receipt", "watch", "discover",
     ];
 
     for name in expected {

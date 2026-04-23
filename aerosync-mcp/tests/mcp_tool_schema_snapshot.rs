@@ -297,6 +297,11 @@ async fn light_tools_are_callable_with_minimal_args() {
         records.is_array(),
         "list_history must return a `records` array, got {parsed}"
     );
+    let rr = &parsed["data"]["recoverable_receipts"];
+    assert!(
+        rr.is_array(),
+        "list_history must return a `recoverable_receipts` array, got {parsed}"
+    );
 
     // ── discover_receivers: short timeout, must complete fast and
     //    return a JSON array of peers (typically empty in CI). ──

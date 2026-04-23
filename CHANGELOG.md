@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > RFC-004. See [`docs/ARCHITECTURE_AND_DESIGN.md`](docs/ARCHITECTURE_AND_DESIGN.md)
 > §12.1 for the full v0.4 work queue.
 
+### Added (Phase 2 RFC-001/002/003 follow-up)
+
+- **CLI**: `aerosync receipt list|show` over the SQLite receipt journal; `aerosync history --content-type` metadata filter.
+- **MCP**: `list_history` optional `content_type_contains`, `include_recoverable_receipts`, and stable `data.recoverable_receipts` array (11 tools unchanged).
+- **Python**: `aerosync.recover()`, `RecoverableReceipt`, richer `HistoryEntry` metadata fields (`trace_id`, `content_type`, `user_metadata`), `Client.history(trace_id=..., content_type_contains=...)`.
+- **Docs**: [`docs/python/cookbook.md`](docs/python/cookbook.md).
+
+### Not done here
+
+- **RFC-003**: Full SQLite/JSON1 **index** for history — metadata filters remain correct but **O(N)** on JSONL scan (same as before); dedicated index DB deferred per RFC-003 §7 horizon note.
+
 ## [0.3.0-rc1] - 2026-04-18
 
 > DDD-shaped internal split. v0.2.x callers continue to compile and
