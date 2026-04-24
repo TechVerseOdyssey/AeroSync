@@ -14,6 +14,9 @@ use sqlx::Row;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+/// `X-AeroSync-Namespace`: empty or DNS-like label set (e.g. `acme` / `org.prod`). Max 64 bytes.
+pub const NAMESPACE_HEADER: &str = "X-AeroSync-Namespace";
+
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     pub name: String,
@@ -27,6 +30,7 @@ pub struct RegisterRequest {
 #[derive(Debug, Serialize)]
 pub struct RegisterResponse {
     pub peer_id: String,
+    pub namespace: String,
     pub jwt: String,
     /// RFC-3339 UTC
     pub jwt_expires_at: String,
@@ -49,6 +53,7 @@ pub struct HeartbeatResponse {
 #[derive(Debug, Serialize)]
 pub struct PeerLookupResponse {
     pub peer_id: String,
+    pub namespace: String,
     pub name: String,
     /// Base64-encoded raw public key bytes.
     pub public_key: String,
@@ -64,7 +69,7 @@ fn peer_id_from_pubkey(pubkey: &[u8]) -> String {
     format!("sha256:{}", hex::encode(d))
 }
 
-fn authorization_bearer(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn authorization_bearer(headers: &HeaderMap) -> Option<&str> {
     let hv = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
@@ -77,12 +82,42 @@ fn observed_from_connect(addr: SocketAddr) -> String {
     format!("{}:{}", addr.ip(), addr.port())
 }
 
+/// Parse and validate `X-AeroSync-Namespace`. Empty string = default global namespace.
+pub fn parse_namespace_from_headers(
+    headers: &HeaderMap,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let raw = headers
+        .get(NAMESPACE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(s) = raw else {
+        return Ok(String::new());
+    };
+    if s.len() > 64 {
+        return Err(bad_req("namespace must be at most 64 bytes"));
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        return Err(bad_req(
+            "namespace may only use ASCII alnum, '.', '-', and '_'",
+        ));
+    }
+    Ok(s.to_string())
+}
+
 pub async fn register_peer(
     State(state): State<Arc<AppState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, (StatusCode, Json<Value>)> {
+    if state.register_ratelimit.check_key(&remote.ip()).is_err() {
+        return Err(too_many_register());
+    }
+    let namespace = parse_namespace_from_headers(&headers)?;
     let pubkey_bytes = B64
         .decode(body.public_key.trim())
         .map_err(|_| bad_req("public_key must be standard base64"))?;
@@ -105,12 +140,14 @@ pub async fn register_peer(
 
     let now = unix_now();
 
-    let existing =
-        sqlx::query("SELECT peer_id, public_key FROM peers WHERE name = ?1 COLLATE NOCASE")
-            .bind(&body.name)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(internal)?;
+    let existing = sqlx::query(
+        "SELECT peer_id, public_key FROM peers WHERE namespace = ?1 AND name = ?2 COLLATE NOCASE",
+    )
+    .bind(&namespace)
+    .bind(&body.name)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?;
 
     match existing {
         Some(row) => {
@@ -135,10 +172,11 @@ pub async fn register_peer(
         }
         None => {
             sqlx::query(
-                "INSERT INTO peers (peer_id, name, public_key, capabilities, observed_addr, last_seen_at, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO peers (peer_id, namespace, name, public_key, capabilities, observed_addr, last_seen_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )
             .bind(&peer_id)
+            .bind(&namespace)
             .bind(&body.name)
             .bind(&pubkey_bytes[..])
             .bind(body.capabilities as i64)
@@ -156,6 +194,7 @@ pub async fn register_peer(
         &state.jwt_issuer,
         &peer_id,
         &body.name,
+        &namespace,
         state.jwt_ttl_secs,
     )
     .map_err(internal)?;
@@ -166,6 +205,7 @@ pub async fn register_peer(
 
     Ok(Json(RegisterResponse {
         peer_id,
+        namespace,
         jwt,
         jwt_expires_at,
         observed_addr: observed,
@@ -177,20 +217,24 @@ pub async fn heartbeat(
     headers: HeaderMap,
     Json(body): Json<HeartbeatRequest>,
 ) -> Result<Json<HeartbeatResponse>, (StatusCode, Json<Value>)> {
-    let token = authorization_bearer(&headers).ok_or_else(|| unauthorized())?;
+    let token = authorization_bearer(&headers).ok_or_else(unauthorized)?;
     let claims = verify_bearer(token, state.decoding_key.as_ref(), &state.jwt_issuer)
         .map_err(|_| unauthorized())?;
 
     let observed = body.observed_addr.clone();
     let now = unix_now();
 
-    let row = sqlx::query("SELECT peer_id FROM peers WHERE peer_id = ?1")
+    let row = sqlx::query("SELECT peer_id, namespace FROM peers WHERE peer_id = ?1")
         .bind(&claims.sub)
         .fetch_optional(&state.pool)
         .await
         .map_err(internal)?;
-    if row.is_none() {
+    let Some(row) = row else {
         return Err(unauthorized());
+    };
+    let ns: String = row.try_get("namespace").map_err(internal)?;
+    if ns != claims.ns {
+        return Err(forbidden());
     }
 
     sqlx::query(
@@ -208,6 +252,7 @@ pub async fn heartbeat(
         &state.jwt_issuer,
         &claims.sub,
         &claims.name,
+        &ns,
         state.jwt_ttl_secs,
     )
     .map_err(internal)?;
@@ -227,16 +272,22 @@ pub async fn lookup_peer(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<PeerLookupResponse>, (StatusCode, Json<Value>)> {
-    let _ = verify_bearer(
-        authorization_bearer(&headers).ok_or_else(|| unauthorized())?,
+    let namespace = parse_namespace_from_headers(&headers)?;
+    let claims = verify_bearer(
+        authorization_bearer(&headers).ok_or_else(unauthorized)?,
         state.decoding_key.as_ref(),
         &state.jwt_issuer,
     )
     .map_err(|_| unauthorized())?;
+    if namespace != claims.ns {
+        return Err(forbidden());
+    }
 
     let row = sqlx::query(
-        "SELECT peer_id, name, public_key, capabilities, observed_addr, last_seen_at FROM peers WHERE name = ?1 COLLATE NOCASE",
+        "SELECT peer_id, namespace, name, public_key, capabilities, observed_addr, last_seen_at
+         FROM peers WHERE namespace = ?1 AND name = ?2 COLLATE NOCASE",
     )
+    .bind(&namespace)
     .bind(&name)
     .fetch_optional(&state.pool)
     .await
@@ -245,6 +296,7 @@ pub async fn lookup_peer(
     let row = row.ok_or_else(|| not_found("peer"))?;
 
     let peer_id: String = row.try_get("peer_id").map_err(internal)?;
+    let nspace: String = row.try_get("namespace").map_err(internal)?;
     let nm: String = row.try_get("name").map_err(internal)?;
     let pk: Vec<u8> = row.try_get("public_key").map_err(internal)?;
     let caps: i64 = row.try_get("capabilities").map_err(internal)?;
@@ -253,30 +305,13 @@ pub async fn lookup_peer(
 
     Ok(Json(PeerLookupResponse {
         peer_id,
+        namespace: nspace,
         name: nm,
         public_key: B64.encode(&pk),
         capabilities: caps as u64,
         observed_addr: addr,
         last_seen_at: seen,
     }))
-}
-
-pub async fn not_implemented_sessions() -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({
-            "error": "sessions/initiate not implemented yet (RFC-004 week 2+)"
-        })),
-    )
-}
-
-pub async fn not_implemented_relay() -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({
-            "error": "relay endpoints not implemented yet (RFC-004 R3)"
-        })),
-    )
 }
 
 fn unix_now() -> u64 {
@@ -287,7 +322,7 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-fn bad_req(msg: &'static str) -> (StatusCode, Json<Value>) {
+pub(crate) fn bad_req(msg: &'static str) -> (StatusCode, Json<Value>) {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": msg })))
 }
 
@@ -295,21 +330,32 @@ fn conflict(msg: &'static str) -> (StatusCode, Json<Value>) {
     (StatusCode::CONFLICT, Json(json!({ "error": msg })))
 }
 
-fn unauthorized() -> (StatusCode, Json<Value>) {
+fn too_many_register() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({ "error": "register rate limit exceeded; retry after a few seconds" })),
+    )
+}
+
+pub(crate) fn unauthorized() -> (StatusCode, Json<Value>) {
     (
         StatusCode::UNAUTHORIZED,
         Json(json!({ "error": "missing or invalid Bearer JWT" })),
     )
 }
 
-fn not_found(kind: &'static str) -> (StatusCode, Json<Value>) {
+pub(crate) fn forbidden() -> (StatusCode, Json<Value>) {
+    (StatusCode::FORBIDDEN, Json(json!({ "error": "forbidden" })))
+}
+
+pub(crate) fn not_found(kind: &'static str) -> (StatusCode, Json<Value>) {
     (
         StatusCode::NOT_FOUND,
         Json(json!({ "error": format!("unknown {kind}") })),
     )
 }
 
-fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, Json<Value>) {
+pub(crate) fn internal<E: std::fmt::Display>(e: E) -> (StatusCode, Json<Value>) {
     tracing::error!("internal error: {e}");
     (
         StatusCode::INTERNAL_SERVER_ERROR,

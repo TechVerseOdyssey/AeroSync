@@ -39,8 +39,12 @@ blurb below matches the **tree as of 2026-04**; for release notes use
     fresh tokens; **lookup** requires Bearer JWT.
   - `POST /v1/peers/register`, `POST /v1/peers/heartbeat`, `GET /v1/peers/:name`
     (`:name` is the registered peer name; see handler for conflict rules).
-  - `POST /v1/sessions/initiate` and relay paths registered as **HTTP 501**
-    stubs (placeholders for later punch/relay work).
+  - P2: optional header **`X-AeroSync-Namespace`**, unique **`(namespace, name)`**,
+    **`POST /v1/sessions/initiate`**, **`GET /v1/sessions/{id}/ws`** (signaling stub;
+    not full ICE/QUIC over WS yet), per-IP **register** rate limit (HTTP 429).
+    Protocol notes and 501/relay story: [`RFC-004-p2-protocol-security.md`](./RFC-004-p2-protocol-security.md).
+  - **Relay** paths `POST/GET /v1/relay/...` still **HTTP 501** (R3) with
+    **structured** JSON.
   - Process must be started with a PKCS#8 RSA private key PEM
     (`--jwt-rsa-private-key` or `RENDEZVOUS_JWT_RSA_PRIVATE_KEY_PATH`); see
     `aerosync-rendezvous/README.md`.
@@ -52,8 +56,10 @@ blurb below matches the **tree as of 2026-04**; for release notes use
 
 ### Not yet implemented (vs this RFC)
 
-- WebSocket or QUIC **signaling**, **UDP hole punching**, and a **working**
-  byte relay with accounting (R3) — 501 routes only.
+- **UDP hole punching**, end-to-end candidate exchange, and a **working**
+  byte relay with accounting (R3) — **relay** routes 501; WS is only a
+  **stub** (no production ICE/relay yet; see
+  [RFC-004-p2-protocol-security.md](./RFC-004-p2-protocol-security.md)).
 - **Identity/ACL** beyond “JWT from our RSA key + register-time name/key”;
   **§13.1 MCP tools** (`register_peer` server-side, etc.) as a first-class
   product surface.

@@ -1,6 +1,6 @@
 //! `aerosync-rendezvous` binary — RFC-004 control-plane server (registry + JWT).
 
-use aerosync_rendezvous::{connect_database, jwt, serve, AppState};
+use aerosync_rendezvous::{connect_database, default_register_ratelimit, jwt, serve, AppState};
 use clap::Parser;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use std::net::SocketAddr;
@@ -53,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
         jwt_ttl_secs: cli.jwt_ttl_secs,
         encoding_key,
         decoding_key,
+        register_ratelimit: default_register_ratelimit(),
     });
 
     serve(addr, state).await

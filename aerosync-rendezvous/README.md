@@ -4,8 +4,7 @@ Standalone **rendezvous control plane** for RFC-004 (WAN peer registry + future
 signaling). Ships as its own binary so operators can deploy one SQLite file +
 reverse-proxy TLS without pulling the full `aerosync` receiver stack.
 
-**Status:** Week-1 scope — SQLite schema (RFC §5.4), RS256 JWT, `POST /v1/peers/register`,
-`POST /v1/peers/heartbeat`, `GET /v1/peers/:name`, plus HTTP **501** stubs for sessions/relay.
+**Status:** Control plane + P2 partial — SQLite schema (RFC §5.4), RS256 JWT, `POST /v1/peers/register` (per-IP rate limit), `POST /v1/peers/heartbeat`, `GET /v1/peers/:name` (optional `X-AeroSync-Namespace`), `POST /v1/sessions/initiate`, `GET /v1/sessions/{id}/ws` (signaling stub). **Relay** routes still return **501** until R3. See [`docs/rfcs/RFC-004-p2-protocol-security.md`](../docs/rfcs/RFC-004-p2-protocol-security.md).
 
 ## Run (dev)
 

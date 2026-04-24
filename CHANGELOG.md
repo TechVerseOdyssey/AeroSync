@@ -31,8 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workspace crate `aerosync-rendezvous`**: RFC-004 §5.4 SQLite schema, sqlx
   migrations, RS256 JWT (`--jwt-rsa-private-key` / `RENDEZVOUS_JWT_RSA_PRIVATE_KEY_PATH`),
   `POST /v1/peers/register`, `POST /v1/peers/heartbeat`, `GET /v1/peers/:name`, plus
-  `GET /health`, `/v1/status`, `/v1/version`. Session and relay HTTP routes return
-  **501** until hole punch / relay land. See `aerosync-rendezvous/README.md`.
+  `GET /health`, `/v1/status`, `/v1/version`. **P2 (partial):** multitenant
+  `X-AeroSync-Namespace` + JWT `ns` + `POST /v1/sessions/initiate` + `GET /v1/sessions/{id}/ws`
+  (signaling stub), per-IP **register** rate limit (429), extended **501** JSON for relay
+  routes. See `aerosync-rendezvous/README.md` and
+  [`docs/rfcs/RFC-004-p2-protocol-security.md`](docs/rfcs/RFC-004-p2-protocol-security.md).
 - **Root `aerosync` (feature `wan-rendezvous`, default):** `RendezvousClient`,
   `parse_peer_at_rendezvous` (`peer@rendezvous-host:port` destinations),
   `AutoAdapter::with_rendezvous_token` and `with_rendezvous_token_from_env`

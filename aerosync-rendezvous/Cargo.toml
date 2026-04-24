@@ -21,7 +21,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1"] }
+axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1", "query", "ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -37,9 +37,11 @@ sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "sqlite",
 ] }
+governor = { version = "0.6", default-features = true }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+uuid.workspace = true
 
 [dev-dependencies]
 rand = "0.8"

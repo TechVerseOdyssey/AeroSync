@@ -13,6 +13,9 @@ pub struct RendezvousClaims {
     pub exp: u64,
     pub scope: Vec<String>,
     pub name: String,
+    /// Multitenant registry partition; empty = default (legacy single-tenant / open registration).
+    #[serde(default)]
+    pub ns: String,
 }
 
 pub fn issue_token(
@@ -20,6 +23,7 @@ pub fn issue_token(
     issuer: &str,
     peer_id: &str,
     name: &str,
+    namespace: &str,
     ttl_secs: u64,
 ) -> anyhow::Result<(String, u64)> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -35,6 +39,7 @@ pub fn issue_token(
             "relay".to_string(),
         ],
         name: name.to_string(),
+        ns: namespace.to_string(),
     };
     let header = Header::new(Algorithm::RS256);
     let token = encode(&header, &claims, encoding_key)?;

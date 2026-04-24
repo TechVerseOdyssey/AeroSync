@@ -1,23 +1,26 @@
 //! WAN rendezvous server library (RFC-004).
 //!
 //! Week-1 scope: SQLite schema, RS256 JWT, `/v1/peers/register`, `/heartbeat`,
-//! `/v1/peers/{name}`. Session WS + relay return HTTP 501 stubs.
+//! `/v1/peers/{name}`. P2: `POST /v1/sessions/initiate` + `GET /v1/sessions/{id}/ws` (signaling stub);
+//! relay remains HTTP 501 with structured body until R3.
 
 pub mod jwt;
 pub mod peers;
+pub mod sessions;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    routing::{get, post},
-    Json, Router,
-};
+use axum::routing::post;
+use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
+use governor::Quota;
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
+
+/// Per-IP register rate: ~4/s sustained, burst 12 (abuse + tenant-squatting pressure release).
+pub type RegisterRatelimit = governor::DefaultKeyedRateLimiter<IpAddr>;
 
 /// Shared server state.
 pub struct AppState {
@@ -26,6 +29,7 @@ pub struct AppState {
     pub jwt_ttl_secs: u64,
     pub encoding_key: Arc<EncodingKey>,
     pub decoding_key: Arc<DecodingKey>,
+    pub register_ratelimit: Arc<RegisterRatelimit>,
 }
 
 /// Open or create the SQLite database and apply embedded migrations.
@@ -45,6 +49,13 @@ pub async fn connect_database(database_path: &Path) -> anyhow::Result<SqlitePool
     Ok(pool)
 }
 
+/// Build the default per-IP register limiter (GCRA / token bucket; see `governor`).
+pub fn default_register_ratelimit() -> Arc<RegisterRatelimit> {
+    let q = Quota::per_second(NonZeroU32::new(4).expect("4"))
+        .allow_burst(NonZeroU32::new(12).expect("12"));
+    Arc::new(governor::RateLimiter::keyed(q))
+}
+
 async fn health() -> Json<Value> {
     Json(json!({
         "status": "ok",
@@ -56,7 +67,11 @@ async fn health() -> Json<Value> {
 async fn version_info() -> Json<Value> {
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "protocols": ["aerosync-wire/1", "rfc004-rendezvous-v1-scaffold"],
+        "protocols": [
+            "aerosync-wire/1",
+            "rfc004-rendezvous-v1",
+            "rfc004-p2-sessions-partial"
+        ],
     }))
 }
 
@@ -88,17 +103,15 @@ pub fn app_router(state: Arc<AppState>) -> Router {
         .route("/v1/peers/register", post(peers::register_peer))
         .route("/v1/peers/heartbeat", post(peers::heartbeat))
         .route("/v1/peers/:name", get(peers::lookup_peer))
-        .route(
-            "/v1/sessions/initiate",
-            post(peers::not_implemented_sessions),
-        )
+        .route("/v1/sessions/initiate", post(sessions::initiate_session))
+        .route("/v1/sessions/:id/ws", get(sessions::session_websocket))
         .route(
             "/v1/relay/:session_id/up",
-            post(peers::not_implemented_relay),
+            post(sessions::not_implemented_relay),
         )
         .route(
             "/v1/relay/:session_id/down",
-            get(peers::not_implemented_relay),
+            get(sessions::not_implemented_relay),
         )
         .with_state(state)
 }
@@ -160,6 +173,7 @@ mod tests {
             jwt_ttl_secs: 3600,
             encoding_key: enc,
             decoding_key: dec,
+            register_ratelimit: default_register_ratelimit(),
         });
 
         use axum::body::Body;
@@ -196,6 +210,7 @@ mod tests {
             .await
             .unwrap();
         let reg: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(reg["namespace"], "");
         let jwt = reg["jwt"].as_str().unwrap().to_string();
 
         let req2 = Request::builder()
