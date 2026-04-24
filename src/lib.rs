@@ -21,8 +21,8 @@ pub mod wan;
 pub use crate::core::AeroSyncMdns;
 pub use crate::core::{
     AeroSyncError, AuditLogger, AuthConfig, AuthManager, FileManager, FileReceiver, HistoryStore,
-    ProgressMonitor, Result, ResumeStore, ServerConfig, TlsConfig, TransferConfig, TransferEngine,
-    TransferTask,
+    ProgressMonitor, Result, ResumeStore, ServerConfig, SessionId, TlsConfig, TransferConfig,
+    TransferEngine, TransferTask,
 };
 pub use crate::protocols::{AutoAdapter, HttpConfig, HttpTransfer};
 #[cfg(feature = "quic")]

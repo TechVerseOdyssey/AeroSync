@@ -11,11 +11,15 @@ use crate::core::resume::{ResumeState, ResumeStore, DEFAULT_CHUNK_SIZE};
 use crate::core::sniff::{sniff_content_type, SNIFF_PEEK_BYTES};
 use crate::core::{AeroSyncError, ProgressMonitor, Result, TransferProgress};
 use crate::protocols::http::{HttpReceiptAck, HttpReceiptDecision};
+use aerosync_domain::manifest::{FileEntry, FileManifest};
+use aerosync_domain::session::{SessionId, SessionKind, SessionStatus};
 use aerosync_domain::storage::HistoryStorage;
+use aerosync_domain::transfer_session::{ProtocolKind, TransferSession};
 use aerosync_infra::history::spawn_watch_bridge as history_spawn_watch_bridge;
 use aerosync_proto::Metadata;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -163,6 +167,41 @@ impl TransferTask {
     }
 }
 
+/// One outbound [`TransferSession`] per `send_with_metadata` (single-file manifest today).
+fn build_outbound_transfer_session(task: &TransferTask) -> Result<TransferSession> {
+    let source_root = task
+        .source_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let rel = task
+        .source_path
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("unknown"));
+    let entry = FileEntry::new(rel, task.file_size);
+    let manifest = FileManifest::new(std::iter::once(entry))
+        .map_err(|e| AeroSyncError::InvalidConfig(format!("transfer session manifest: {e}")))?;
+    let kind = SessionKind::Send {
+        destination: task.destination.clone(),
+        source_root,
+    };
+    let protocol = if task.destination.starts_with("quic://") {
+        ProtocolKind::Quic
+    } else if task.destination.starts_with("s3://") {
+        ProtocolKind::S3
+    } else if task.destination.starts_with("ftp://") || task.destination.starts_with("ftps://") {
+        ProtocolKind::Ftp
+    } else {
+        ProtocolKind::Http
+    };
+    let mut session = TransferSession::new(kind, manifest, protocol);
+    session
+        .transition_to(SessionStatus::Active)
+        .map_err(|e| AeroSyncError::InvalidConfig(format!("transfer session: {e}")))?;
+    Ok(session)
+}
+
 // ────────────────────────── protocol trait (core-side) ──────────────────────
 
 /// 进度更新消息（核心层自有类型，不依赖 protocols crate）
@@ -244,6 +283,12 @@ pub struct TransferEngine {
     /// lands as part of `quic_receipt`; until then this map is the
     /// canonical source of truth on the sender.
     sealed_metadata: Arc<RwLock<std::collections::HashMap<Uuid, Metadata>>>,
+    /// Phase 3.4e: one domain [`TransferSession`] per outbound
+    /// `send_with_metadata` (removed from this map when the engine
+    /// bridge observes a terminal task status).
+    transfer_sessions: Arc<RwLock<HashMap<SessionId, TransferSession>>>,
+    /// Maps [`TransferTask::id`] to session id for the bridge and cancel paths.
+    task_to_session: Arc<RwLock<HashMap<Uuid, SessionId>>>,
 }
 
 impl TransferEngine {
@@ -265,6 +310,8 @@ impl TransferEngine {
             task_to_receipt: Arc::new(RwLock::new(std::collections::HashMap::new())),
             node_id: Arc::new(RwLock::new(default_node_id())),
             sealed_metadata: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            transfer_sessions: Arc::new(RwLock::new(HashMap::new())),
+            task_to_session: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -554,10 +601,30 @@ impl TransferEngine {
         mut task: TransferTask,
         metadata: Metadata,
     ) -> Result<Arc<Receipt<Sender>>> {
+        let transfer_session = build_outbound_transfer_session(&task)?;
+        let session_id = transfer_session.id;
+        self.transfer_sessions
+            .write()
+            .await
+            .insert(session_id, transfer_session);
+
         let receipt_id = Uuid::new_v4();
-        let sealed = self.seal_system_fields(&task, metadata, receipt_id).await?;
-        validate_metadata(&sealed)
-            .map_err(|e| AeroSyncError::InvalidConfig(format!("metadata validation: {e}")))?;
+        let sealed = match self
+            .seal_system_fields(&task, metadata, receipt_id, session_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                self.transfer_sessions.write().await.remove(&session_id);
+                return Err(e);
+            }
+        };
+        if let Err(e) = validate_metadata(&sealed) {
+            self.transfer_sessions.write().await.remove(&session_id);
+            return Err(AeroSyncError::InvalidConfig(format!(
+                "metadata validation: {e}"
+            )));
+        }
         // Stash the sealed envelope on the task itself so the adapter
         // (HTTP today, QUIC after batch C) can read it back without
         // having to reach into the engine's `sealed_metadata` map. The
@@ -569,7 +636,10 @@ impl TransferEngine {
             .await
             .insert(receipt_id, sealed);
 
-        let receipt: Arc<Receipt<Sender>> = Arc::new(Receipt::<Sender>::new(receipt_id));
+        let receipt: Arc<Receipt<Sender>> = Arc::new(Receipt::<Sender>::new_with_session(
+            receipt_id,
+            Some(session_id),
+        ));
         self.receipt_registry.insert(Arc::clone(&receipt));
 
         // Move to StreamOpened immediately so observers see at least
@@ -614,6 +684,10 @@ impl TransferEngine {
             .write()
             .await
             .insert(task_id, receipt_id);
+        self.task_to_session
+            .write()
+            .await
+            .insert(task_id, session_id);
 
         // Bridge: poll the ProgressMonitor for terminal status and
         // mirror it into the Receipt state machine. Polling at 20ms
@@ -624,8 +698,11 @@ impl TransferEngine {
         let monitor = Arc::clone(&self.progress_monitor);
         let registry = Arc::clone(&self.receipt_registry);
         let task_to_receipt = Arc::clone(&self.task_to_receipt);
+        let task_to_session = Arc::clone(&self.task_to_session);
+        let transfer_sessions = Arc::clone(&self.transfer_sessions);
         let sealed_metadata = Arc::clone(&self.sealed_metadata);
         let bridge_receipt = Arc::clone(&receipt);
+        let sid = session_id;
         tokio::spawn(async move {
             // Hard upper bound so a stuck monitor can't leak the task.
             let deadline = std::time::Instant::now() + Duration::from_secs(60 * 60 * 24);
@@ -636,6 +713,11 @@ impl TransferEngine {
                         code: 504,
                         detail: "transfer-engine bridge deadline exceeded".to_string(),
                     });
+                    if let Some(s) = transfer_sessions.write().await.get_mut(&sid) {
+                        let _ = s.transition_to(SessionStatus::Failed {
+                            reason: "transfer-engine bridge deadline exceeded".to_string(),
+                        });
+                    }
                     break;
                 }
                 let snapshot = {
@@ -644,6 +726,9 @@ impl TransferEngine {
                 };
                 match snapshot.map(|p| p.status) {
                     Some(TransferStatus::Completed) => {
+                        if let Some(s) = transfer_sessions.write().await.get_mut(&sid) {
+                            let _ = s.transition_to(SessionStatus::Completed);
+                        }
                         // Drive Open/StreamOpened → DataTransferred → StreamClosed → Processing.
                         // Each apply_event is a no-op if already past
                         // that state (e.g. on retry).
@@ -653,6 +738,11 @@ impl TransferEngine {
                         break;
                     }
                     Some(TransferStatus::Failed(reason)) => {
+                        if let Some(s) = transfer_sessions.write().await.get_mut(&sid) {
+                            let _ = s.transition_to(SessionStatus::Failed {
+                                reason: reason.clone(),
+                            });
+                        }
                         let _ = bridge_receipt.apply_event(Event::Error {
                             code: 1,
                             detail: reason,
@@ -660,6 +750,9 @@ impl TransferEngine {
                         break;
                     }
                     Some(TransferStatus::Cancelled) => {
+                        if let Some(s) = transfer_sessions.write().await.get_mut(&sid) {
+                            let _ = s.transition_to(SessionStatus::Cancelled);
+                        }
                         let _ = bridge_receipt.apply_event(Event::Cancel {
                             reason: "transfer cancelled".to_string(),
                         });
@@ -674,6 +767,8 @@ impl TransferEngine {
             // is the GC hook for that.
             let _ = registry; // explicit borrow so we keep the Arc alive
             task_to_receipt.write().await.remove(&task_id);
+            task_to_session.write().await.remove(&task_id);
+            let _ = transfer_sessions.write().await.remove(&sid);
             // Sealed metadata is no longer needed once the receipt
             // reaches a terminal state — the QUIC adapter only reads
             // it for live transfers. Drop it here to keep memory
@@ -706,6 +801,7 @@ impl TransferEngine {
         task: &TransferTask,
         mut metadata: Metadata,
         receipt_id: Uuid,
+        session_id: SessionId,
     ) -> Result<Metadata> {
         let file_name = task
             .source_path
@@ -738,6 +834,7 @@ impl TransferEngine {
         metadata.sha256 = task.sha256.clone().unwrap_or_default();
         metadata.file_name = file_name;
         metadata.protocol = protocol;
+        metadata.session_id = session_id.to_string();
 
         Ok(metadata)
     }
@@ -1735,6 +1832,10 @@ mod tests {
             .expect("sealed metadata present");
 
         assert_eq!(sealed.id, receipt.id().to_string());
+        assert_eq!(
+            sealed.session_id,
+            receipt.session_id().expect("v0.4 session").to_string()
+        );
         assert_eq!(sealed.from_node, "alice");
         assert_eq!(sealed.to_node, "archiver");
         assert_eq!(sealed.protocol, "http");
@@ -1764,6 +1865,10 @@ mod tests {
         );
         let receipt = engine.send(task).await.unwrap();
         let sealed = engine.metadata_for(receipt.id()).await.unwrap();
+        assert_eq!(
+            sealed.session_id,
+            receipt.session_id().expect("session").to_string()
+        );
         assert_eq!(sealed.from_node, "alice");
         assert_eq!(sealed.to_node, "bob");
         assert_eq!(sealed.protocol, "quic");

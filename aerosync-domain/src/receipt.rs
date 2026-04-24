@@ -45,6 +45,8 @@ use std::marker::PhantomData;
 use tokio::sync::watch;
 use uuid::Uuid;
 
+use crate::session::SessionId;
+
 // ─────────────────────────────────────────────────────────────────────
 // Phantom side markers
 // ─────────────────────────────────────────────────────────────────────
@@ -261,6 +263,8 @@ pub enum StateError {
 /// machine and storage are identical.
 pub struct Receipt<Side> {
     id: Uuid,
+    /// v0.4: logical transfer batch id (one per `TransferEngine::send`); distinct from per-file [`Self::id`].
+    session_id: Option<SessionId>,
     state_tx: watch::Sender<State>,
     _side: PhantomData<Side>,
 }
@@ -277,9 +281,15 @@ impl<Side> Receipt<Side> {
     /// let r: Receipt<Receiver> = Receipt::new(Uuid::new_v4());
     /// ```
     pub fn new(receipt_id: Uuid) -> Self {
+        Self::new_with_session(receipt_id, None)
+    }
+
+    /// Like [`Self::new`] but attaches the v0.4 session identifier when present.
+    pub fn new_with_session(receipt_id: Uuid, session_id: Option<SessionId>) -> Self {
         let (tx, _rx) = watch::channel(State::Initiated);
         Self {
             id: receipt_id,
+            session_id,
             state_tx: tx,
             _side: PhantomData,
         }
@@ -289,6 +299,11 @@ impl<Side> Receipt<Side> {
     /// any UUID in tests).
     pub fn id(&self) -> Uuid {
         self.id
+    }
+
+    /// Optional v0.4 `TransferSession` / wire `Metadata.session_id` (batch scope).
+    pub fn session_id(&self) -> Option<SessionId> {
+        self.session_id
     }
 
     /// Snapshot of the current state. Cheap; clones the inner state.

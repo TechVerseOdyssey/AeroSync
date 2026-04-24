@@ -6,6 +6,7 @@ use crate::core::metrics::Metrics;
 use crate::core::receipts_http::{router as receipts_http_router, ReceiptHttpState};
 use crate::core::routing::{Router as AeroRouter, RouterConfig};
 use crate::{AeroSyncError, Result};
+use aerosync_domain::session::SessionId;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Multipart, Path as AxPath, Query, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
@@ -177,10 +178,37 @@ pub enum WsEvent {
 
 pub type WsBroadcast = broadcast::Sender<WsEvent>;
 
+/// v0.4+ receiver: maps a sealed wire `Metadata.session_id` to
+/// [`ReceivedFile::id`] in arrival order (in-memory, process lifetime).
+type SessionReceivedIndex = Arc<RwLock<HashMap<SessionId, Vec<Uuid>>>>;
+
+async fn index_received_file_for_session(
+    index: &SessionReceivedIndex,
+    metadata: &Option<aerosync_proto::Metadata>,
+    file_id: Uuid,
+) {
+    let Some(m) = metadata else {
+        return;
+    };
+    let s = m.session_id.as_str();
+    if s.is_empty() {
+        return;
+    }
+    let Ok(u) = Uuid::parse_str(s) else {
+        return;
+    };
+    let sid = SessionId::from_uuid(u);
+    index.write().await.entry(sid).or_default().push(file_id);
+}
+
 pub struct FileReceiver {
     config: Arc<RwLock<ServerConfig>>,
     status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    /// v0.4+ optional: transfer session id → file ids, for multi-file
+    /// batches (same semantics as
+    /// [`FileReceiver::received_ids_for_session`]).
+    session_received_index: SessionReceivedIndex,
     http_handle: Option<tokio::task::JoinHandle<()>>,
     https_handle: Option<tokio::task::JoinHandle<()>>,
     #[cfg(feature = "quic")]
@@ -221,6 +249,7 @@ impl FileReceiver {
             config: Arc::new(RwLock::new(config)),
             status: Arc::new(RwLock::new(ServerStatus::Stopped)),
             received_files: Arc::new(RwLock::new(Vec::new())),
+            session_received_index: Arc::new(RwLock::new(HashMap::new())),
             http_handle: None,
             https_handle: None,
             #[cfg(feature = "quic")]
@@ -364,6 +393,7 @@ impl FileReceiver {
             let http_cfg = config.clone();
             let status = Arc::clone(&self.status);
             let received_files = Arc::clone(&self.received_files);
+            let session_received_index = Arc::clone(&self.session_received_index);
             let auth = auth_manager.clone();
             let audit_http = audit_logger.clone();
             let metrics_http = Arc::clone(&self.metrics);
@@ -377,6 +407,7 @@ impl FileReceiver {
                     http_cfg,
                     status.clone(),
                     received_files,
+                    session_received_index,
                     auth,
                     audit_http,
                     metrics_http,
@@ -416,6 +447,7 @@ impl FileReceiver {
             let quic_cfg = config.clone();
             let status = Arc::clone(&self.status);
             let received_files = Arc::clone(&self.received_files);
+            let session_received_index = Arc::clone(&self.session_received_index);
             let auth = auth_manager.clone();
             let audit_quic = audit_logger.clone();
 
@@ -426,6 +458,7 @@ impl FileReceiver {
                     quic_cfg,
                     status.clone(),
                     received_files,
+                    session_received_index,
                     auth,
                     audit_quic,
                     ws_tx_quic,
@@ -451,6 +484,7 @@ impl FileReceiver {
             let https_cfg = config.clone();
             let status = Arc::clone(&self.status);
             let received_files = Arc::clone(&self.received_files);
+            let session_received_index = Arc::clone(&self.session_received_index);
             let auth = auth_manager.clone();
             let audit_https = audit_logger.clone();
             let metrics_https = Arc::clone(&self.metrics);
@@ -463,6 +497,7 @@ impl FileReceiver {
                     https_cfg,
                     status.clone(),
                     received_files,
+                    session_received_index,
                     auth,
                     audit_https,
                     metrics_https,
@@ -585,6 +620,18 @@ impl FileReceiver {
 
     pub async fn get_received_files(&self) -> Vec<ReceivedFile> {
         self.received_files.read().await.clone()
+    }
+
+    /// v0.4+ [`ReceivedFile::id`] values for a transfer session, in
+    /// arrival order. Returns an empty `Vec` when the session is unknown
+    /// or the sender did not set wire `Metadata.session_id`.
+    pub async fn received_ids_for_session(&self, session: SessionId) -> Vec<Uuid> {
+        self.session_received_index
+            .read()
+            .await
+            .get(&session)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub async fn get_server_urls(&self) -> Vec<String> {
@@ -716,6 +763,7 @@ struct AppState {
     metrics: Arc<Metrics>,
     ws_tx: WsBroadcast,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    session_received_index: SessionReceivedIndex,
     chunk_arrivals: ChunkArrivalMap,
     /// RFC-002 §6.4 receipt HTTP control surface (SSE + ack/nack/cancel).
     /// Empty registries on a fresh server; populated by
@@ -728,6 +776,7 @@ impl AppState {
     fn new(
         config: &ServerConfig,
         received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+        session_received_index: SessionReceivedIndex,
         auth_manager: Option<Arc<AuthManager>>,
         audit_logger: Option<Arc<AuditLogger>>,
         metrics: Arc<Metrics>,
@@ -753,6 +802,7 @@ impl AppState {
             metrics,
             ws_tx,
             received_files,
+            session_received_index,
             chunk_arrivals,
             receipts,
         }
@@ -916,6 +966,7 @@ async fn start_https_server(
     config: ServerConfig,
     _status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    session_received_index: SessionReceivedIndex,
     auth_manager: Option<Arc<AuthManager>>,
     audit_logger: Option<Arc<AuditLogger>>,
     metrics: Arc<Metrics>,
@@ -960,6 +1011,7 @@ async fn start_https_server(
     let state = AppState::new(
         &config,
         received_files,
+        session_received_index,
         auth_manager,
         audit_logger,
         metrics,
@@ -1006,6 +1058,7 @@ async fn run_http_server(
     config: ServerConfig,
     _status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    session_received_index: SessionReceivedIndex,
     auth_manager: Option<Arc<AuthManager>>,
     audit_logger: Option<Arc<AuditLogger>>,
     metrics: Arc<Metrics>,
@@ -1016,6 +1069,7 @@ async fn run_http_server(
     let state = AppState::new(
         &config,
         received_files,
+        session_received_index,
         auth_manager,
         audit_logger,
         metrics,
@@ -1274,6 +1328,8 @@ async fn handle_file_upload(
             metadata: received_metadata.clone(),
         };
         state.received_files.write().await.push(received_file);
+        index_received_file_for_session(&state.session_received_index, &received_metadata, file_id)
+            .await;
 
         state.metrics.inc_files_received();
         state.metrics.add_bytes_received(size);
@@ -1759,8 +1815,9 @@ async fn handle_chunk_upload(
                 query.task_id,
                 final_path.display()
             );
+            let chunk_file_id = Uuid::new_v4();
             let record = ReceivedFile {
-                id: Uuid::new_v4(),
+                id: chunk_file_id,
                 original_name: query.filename.clone(),
                 saved_path: final_path.clone(),
                 size: query.total_size,
@@ -1770,6 +1827,12 @@ async fn handle_chunk_upload(
                 metadata: received_metadata.clone(),
             };
             state.received_files.write().await.push(record);
+            index_received_file_for_session(
+                &state.session_received_index,
+                &received_metadata,
+                chunk_file_id,
+            )
+            .await;
             state.metrics.inc_files_received();
 
             if let Some(ref al) = state.audit_logger {
@@ -2016,11 +2079,13 @@ async fn handle_ws_client(
 /// UDP port via `endpoint.local_addr()` before this function takes
 /// ownership of the endpoint.
 #[cfg(feature = "quic")]
+#[allow(clippy::too_many_arguments)]
 async fn run_quic_server(
     endpoint: quinn::Endpoint,
     config: ServerConfig,
     status: Arc<RwLock<ServerStatus>>,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    session_received_index: SessionReceivedIndex,
     auth_manager: Option<Arc<AuthManager>>,
     audit_logger: Option<Arc<AuditLogger>>,
     ws_tx: WsBroadcast,
@@ -2045,6 +2110,7 @@ async fn run_quic_server(
         let allow_overwrite = config.allow_overwrite;
         let max_size = config.max_file_size;
         let files = received_files.clone();
+        let session_index = session_received_index.clone();
         let auth = auth_manager.clone();
         let audit_quic_conn = audit_logger.clone();
         let _status = status.clone();
@@ -2057,6 +2123,7 @@ async fn run_quic_server(
                 allow_overwrite,
                 max_size,
                 files,
+                session_index,
                 auth,
                 audit_quic_conn,
                 ws_tx_conn,
@@ -2324,6 +2391,7 @@ async fn handle_quic_connection(
     allow_overwrite: bool,
     max_size: u64,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    session_received_index: SessionReceivedIndex,
     auth_manager: Option<Arc<AuthManager>>,
     audit_logger: Option<Arc<AuditLogger>>,
     ws_tx: WsBroadcast,
@@ -2457,6 +2525,7 @@ async fn handle_quic_connection(
         // (quinn does not guarantee accept order matches open order).
         let receive_dir_clone = receive_dir.clone();
         let received_files_clone = Arc::clone(&received_files);
+        let session_index_clone = session_received_index.clone();
         let audit_logger_clone = audit_logger.clone();
         let state_clone = Arc::clone(&state);
         let remote_ip_clone = remote_ip.clone();
@@ -2472,6 +2541,7 @@ async fn handle_quic_connection(
                 &receive_dir_clone,
                 allow_overwrite,
                 received_files_clone,
+                session_index_clone,
                 initial_data,
                 &remote_ip_clone,
                 audit_logger_clone.clone(),
@@ -2516,6 +2586,7 @@ async fn handle_quic_file_upload(
     receive_dir: &PathBuf,
     allow_overwrite: bool,
     received_files: Arc<RwLock<Vec<ReceivedFile>>>,
+    session_received_index: SessionReceivedIndex,
     initial_data: Option<Vec<u8>>,
     sender_ip: &str,
     audit_logger: Option<Arc<AuditLogger>>,
@@ -2601,8 +2672,9 @@ async fn handle_quic_file_upload(
         sha256: Some(actual_hash.clone()),
         received_at: std::time::SystemTime::now(),
         sender_ip: Some(sender_ip.to_string()),
-        metadata,
+        metadata: metadata.clone(),
     });
+    index_received_file_for_session(&session_received_index, &metadata, file_id).await;
 
     // Broadcast on the WS event channel so any subscriber — including
     // the Python `Receiver.__anext__` iterator which blocks on
@@ -2830,6 +2902,22 @@ mod tests {
     fn test_sanitize_filename_preserves_alphanumeric() {
         let result = sanitize_filename("ABC123.tar.gz");
         assert_eq!(result, "ABC123.tar.gz");
+    }
+
+    // ── session index (v0.4) ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_index_received_file_for_session_groups_by_session() {
+        use crate::core::metadata::empty_metadata;
+
+        let index: SessionReceivedIndex = Arc::new(RwLock::new(HashMap::new()));
+        let session = SessionId::new();
+        let fid = Uuid::new_v4();
+        let mut m = empty_metadata();
+        m.session_id = session.to_string();
+        super::index_received_file_for_session(&index, &Some(m), fid).await;
+        let g = index.read().await;
+        assert_eq!(g.get(&session), Some(&vec![fid]));
     }
 
     // ── get_unique_file_path ──────────────────────────────────────────────────

@@ -152,6 +152,7 @@ name = "aerosync-py"
 version = "0.3.0-rc1"
 dependencies = [
  "aerosync",
+ "aerosync-domain",
  "aerosync-proto",
  "anyhow",
  "base64",

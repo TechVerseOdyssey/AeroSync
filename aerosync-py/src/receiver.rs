@@ -32,6 +32,7 @@ use aerosync::core::receipt::{Event, Receipt, Receiver as RxSide};
 #[cfg(test)]
 use aerosync::core::server::ServerConfig;
 use aerosync::core::server::{FileReceiver, WsEvent};
+use aerosync_domain::session::SessionId;
 use aerosync_proto::{Lifecycle, Metadata};
 use base64::engine::general_purpose::STANDARD as B64_STD;
 use base64::Engine as _;
@@ -45,6 +46,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
+use uuid::Uuid;
 
 /// Project the optional, well-known [`Lifecycle`] enum value carried
 /// on a wire-decoded [`Metadata`] envelope into the
@@ -255,7 +257,17 @@ impl PyReceiver {
                     // to `Processing` so `await incoming.ack()` is
                     // a one-line happy path. See module-level
                     // "Linkage caveat".
-                    let rcpt: Arc<Receipt<RxSide>> = Arc::new(Receipt::new(f.id));
+                    let session = f.metadata.as_ref().and_then(|m| {
+                        if m.session_id.is_empty() {
+                            None
+                        } else {
+                            Uuid::parse_str(&m.session_id)
+                                .ok()
+                                .map(SessionId::from_uuid)
+                        }
+                    });
+                    let rcpt: Arc<Receipt<RxSide>> =
+                        Arc::new(Receipt::new_with_session(f.id, session));
                     let _ = rcpt.apply_event(Event::Open);
                     let _ = rcpt.apply_event(Event::Close);
                     let _ = rcpt.apply_event(Event::Close);

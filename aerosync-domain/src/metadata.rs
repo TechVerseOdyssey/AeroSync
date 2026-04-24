@@ -306,6 +306,7 @@ impl MetadataBuilder {
             sha256: String::new(),
             file_name: String::new(),
             protocol: String::new(),
+            session_id: String::new(),
             trace_id: self.trace_id,
             conversation_id: self.conversation_id,
             parent_file_ids: self.parent_file_ids,
@@ -447,6 +448,10 @@ pub struct MetadataJson {
     /// `"quic"`, `"s3"`, `"ftp"`, `"mcp"`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub protocol: String,
+    /// Transfer session id (`SessionId`, RFC-003 / v0.4 §12.1). Empty
+    /// when absent on the wire.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub session_id: String,
 
     /// Caller-supplied distributed-tracing id (RFC-003 §3
     /// `well_known.trace_id`). Stable across re-tries of the same
@@ -505,6 +510,7 @@ impl MetadataJson {
             sha256: m.sha256.clone(),
             file_name: m.file_name.clone(),
             protocol: m.protocol.clone(),
+            session_id: m.session_id.clone(),
             trace_id: m.trace_id.clone(),
             conversation_id: m.conversation_id.clone(),
             parent_file_ids: m.parent_file_ids.clone(),
@@ -527,6 +533,7 @@ impl MetadataJson {
             sha256: self.sha256.clone(),
             file_name: self.file_name.clone(),
             protocol: self.protocol.clone(),
+            session_id: self.session_id.clone(),
             trace_id: self.trace_id.clone(),
             conversation_id: self.conversation_id.clone(),
             parent_file_ids: self.parent_file_ids.clone(),

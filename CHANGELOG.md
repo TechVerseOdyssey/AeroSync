@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (v0.4 — Engine ↔ `TransferSession` + wire `session_id`, Phase 3.4e–g)
+
+- **Domain / wire:** `Metadata.session_id` (proto field `10`); `MetadataJson` + builder path;
+  `Receipt` carries optional `SessionId` (`new_with_session`, `session_id()`).
+- **TransferEngine:** each `send` / `send_with_metadata` builds an outbound
+  `TransferSession` (single-file manifest), stamps `session_id` into sealed metadata,
+  updates session status when the engine bridge sees terminal task status, and drops
+  the in-memory session record after cleanup.
+- **Python:** `Receipt.session_id` property; receiver-side synthetic receipts copy
+  `session_id` from decoded metadata when present. Stub (`_native.pyi`) + frozen API doc
+  updated.
+- **Rust receiver surface:** `IncomingFile::session_id()` parses
+  `Metadata.session_id` into `SessionId` (mirrors the Python `Receipt` getter; wire is
+  still the single source of truth).
+- **`FileReceiver`:** in-memory `SessionId` → `ReceivedFile::id` index (HTTP、分片、QUIC
+  入站统一登记); `received_ids_for_session` for batch correlation. Root `SessionId` re-export.
+
+> RFC-004 **WAN** 其余条目（R3 中继、完整打洞/信令、28 项任务等）仍按 RFC 分阶段，不在本批次。
+
 ### Changed (RFC-004 P2 — client)
 
 - **WAN lookup:** `RendezvousClient` sends optional `X-AeroSync-Namespace` (via
@@ -14,13 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when using `AutoAdapter::with_rendezvous_token_from_env`); `PeerLookupBody`
   includes `namespace`. Required when the server issued a JWT with non-empty `ns`.
 
-> Next development cycle (v0.4 staging). v0.3.0 carve-outs that did
-> not ship: TransferEngine ↔ TransferSession integration (Phase 3.4e),
-> ReceiverSession wired through FileReceiver (Phase 3.5),
-> PyO3 `Receipt.session_id` getter (Phase 3.4f), wire-proto
-> `session_id` field (Phase 3.4g) — all paired with v0.4 WAN ship per
-> RFC-004. See [`docs/ARCHITECTURE_AND_DESIGN.md`](docs/ARCHITECTURE_AND_DESIGN.md)
-> §12.1 for the full v0.4 work queue.
+> **§12.1 引擎–会话与 wire `session_id` 已合入**（见 [Unreleased] 上一节）。仍待大型 WAN 合批项：RFC-004
+> R3/打洞/全量 MCP 面等。详见
+> [`docs/ARCHITECTURE_AND_DESIGN.md`](docs/ARCHITECTURE_AND_DESIGN.md) §12.1 与
+> [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md)。
 
 ### Added (Phase 2 RFC-001/002/003 follow-up)
 

@@ -118,6 +118,13 @@ impl PyReceipt {
         self.inner.id().to_string()
     }
 
+    /// v0.4 transfer session id (hyphenated UUID), if the engine stamped
+    /// `Metadata.session_id` on send. `None` for legacy transfers.
+    #[getter]
+    fn session_id(&self) -> Option<String> {
+        self.inner.session_id().map(|s| s.to_string())
+    }
+
     /// Current canonical state label. Cheap snapshot; safe to call
     /// from any thread.
     #[getter]

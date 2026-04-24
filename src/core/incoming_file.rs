@@ -35,6 +35,7 @@
 
 use std::sync::Arc;
 
+use aerosync_domain::session::SessionId;
 use aerosync_proto::Metadata;
 use serde_json::Value;
 use uuid::Uuid;
@@ -72,6 +73,7 @@ impl std::fmt::Debug for IncomingFile {
         f.debug_struct("IncomingFile")
             .field("received", &self.received)
             .field("receipt_id", &self.receipt_id())
+            .field("session_id", &self.session_id())
             .field("has_registry", &self.registry.is_some())
             .finish()
     }
@@ -118,6 +120,17 @@ impl IncomingFile {
     /// frame.
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    /// v0.4+ transfer session id from sealed wire metadata
+    /// ([`Metadata::session_id`]). `None` when the field is empty or
+    /// not a valid UUID (legacy peers or corrupt metadata).
+    pub fn session_id(&self) -> Option<SessionId> {
+        let s = self.metadata.session_id.as_str();
+        if s.is_empty() {
+            return None;
+        }
+        Uuid::parse_str(s).ok().map(SessionId::from_uuid)
     }
 
     /// Receipt id when the transfer carried a [`Receipt`], else
@@ -436,5 +449,25 @@ mod tests {
         assert_eq!(f.metadata().trace_id.as_deref(), Some("run-99"));
         assert_eq!(f.metadata().user_metadata["tenant"], "acme");
         assert_eq!(f.metadata().lifecycle, Some(Lifecycle::Transient as i32));
+    }
+
+    #[test]
+    fn test_session_id_parsed_from_metadata() {
+        let sid = SessionId::new();
+        let mut meta = empty_metadata();
+        meta.session_id = sid.to_string();
+        let f = IncomingFile::new_without_receipt(dummy_received()).with_metadata(meta);
+        assert_eq!(f.session_id(), Some(sid));
+    }
+
+    #[test]
+    fn test_session_id_none_when_empty_or_invalid() {
+        let f = IncomingFile::new_without_receipt(dummy_received());
+        assert!(f.session_id().is_none());
+
+        let mut meta = empty_metadata();
+        meta.session_id = "not-a-uuid".into();
+        let f2 = IncomingFile::new_without_receipt(dummy_received()).with_metadata(meta);
+        assert!(f2.session_id().is_none());
     }
 }

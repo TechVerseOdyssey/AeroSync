@@ -90,6 +90,7 @@ pub mod sniff;
 pub(crate) use aerosync_infra::tls;
 pub mod transfer;
 
+pub use aerosync_domain::session::SessionId;
 pub use aerosync_domain::storage::{
     HistoryStorage, ReceiptJournalRecord, ReceiptJournalStorage, ReceiptSide, RecoverableReceipt,
     ResumeStorage,

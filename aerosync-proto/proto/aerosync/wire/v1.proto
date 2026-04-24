@@ -107,6 +107,11 @@ message Metadata {
   // Wire protocol used for the transfer. One of "quic" | "http" |
   // "s3" | "ftp" in v0.2.
   string protocol = 9;
+  // Transfer session id (domain `SessionId`, hyphenated UUID). One
+  // logical send batch (possibly multi-file in future) shares this id;
+  // distinct from per-file receipt `id` (field 1). Empty when the
+  // sender predates v0.4.
+  string session_id = 10;
 
   // ── Well-known optional fields ──
   optional string trace_id = 20;

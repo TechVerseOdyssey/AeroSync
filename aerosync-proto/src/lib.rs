@@ -114,6 +114,7 @@ mod tests {
             sha256: "ab".repeat(32),
             file_name: "f.bin".into(),
             protocol: "quic".into(),
+            session_id: String::new(),
             trace_id: Some("run-7".into()),
             conversation_id: None,
             parent_file_ids: vec!["blob-a".into()],
