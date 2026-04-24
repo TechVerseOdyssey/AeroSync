@@ -27,3 +27,7 @@ Environment:
 - `RENDEZVOUS_JWT_RSA_PRIVATE_KEY_PATH` — overrides `--jwt-rsa-private-key`.
 
 Optional: `--jwt-issuer`, `--jwt-ttl-secs` (defaults match RFC-004-style deployment notes).
+
+## Operations (TLS, reverse proxy, addresses)
+
+Production notes (bilingual **EN + 中文**): [`docs/operations/rendezvous.md`](../docs/operations/rendezvous.md) — TLS termination, trusting `X-Forwarded-For`, and what gets stored as `observed_addr`.

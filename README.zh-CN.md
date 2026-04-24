@@ -16,7 +16,7 @@
 - **完整性校验**：SHA-256 端到端验证
 - **认证**：HMAC-SHA256 Bearer Token
 - **配置文件**：TOML 格式，CLI 参数优先覆盖
-- **RFC-004 / WAN（分阶段落地）** — 独立工作区成员 **`aerosync-rendezvous`**（自托管控制面：SQLite 注册、JWT、`/v1/peers/*` API，见 [`aerosync-rendezvous/README.md`](aerosync-rendezvous/README.md)）。主程序支持在设置环境变量 **`AEROSYNC_RENDEZVOUS_TOKEN`** 后，将目标写为 **`peer@rendezvous主机:端口`** 以经 rendezvous 查询对端 `observed_addr` 再传输。**NAT 打洞、信令、可用中继** 等仍按 [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md) 规划在 v0.4+，详见 RFC **Implementation status** 与根目录 `CHANGELOG` [Unreleased]。
+- **RFC-004 / WAN（分阶段落地）** — 独立工作区成员 **`aerosync-rendezvous`**（自托管控制面：SQLite 注册、JWT、`/v1/peers/*` API，见 [`aerosync-rendezvous/README.md`](aerosync-rendezvous/README.md)）。主程序支持在设置环境变量 **`AEROSYNC_RENDEZVOUS_TOKEN`** 后，将目标写为 **`peer@rendezvous主机:端口`** 以经 rendezvous 查询对端 `observed_addr` 再传输。运维说明（**中英文**）：[`docs/operations/rendezvous.md`](docs/operations/rendezvous.md)。**NAT 打洞、信令、可用中继** 等仍按 [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md) 规划在 v0.4+，详见 RFC **Implementation status** 与根目录 `CHANGELOG` [Unreleased]。
 
 ## 安装
 

@@ -41,6 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `observed_addr` to an HTTP `/upload` URL; it does **not** implement NAT hole
   punch, working relay, or the full RFC-004 §13.1 MCP tool surface.
 
+### Added (docs / ops)
+
+- [`docs/operations/rendezvous.md`](docs/operations/rendezvous.md) — TLS, reverse
+  proxy, and `X-Forwarded-For` / `observed_addr` notes (English + 中文). Linked
+  from `aerosync-rendezvous/README.md` and root README files.
+
 ## [0.3.0-rc1] - 2026-04-18
 
 > DDD-shaped internal split. v0.2.x callers continue to compile and

@@ -56,14 +56,24 @@ impl RendezvousClient {
             .await
             .map_err(|e| AeroSyncError::InvalidConfig(format!("rendezvous lookup body: {e}")))?;
         if !status.is_success() {
+            let snippet = truncate_error_body(&text, 512);
             return Err(AeroSyncError::InvalidConfig(format!(
-                "rendezvous lookup HTTP {status}: {text}"
+                "rendezvous lookup HTTP {status}: {snippet}"
             )));
         }
         serde_json::from_str(&text).map_err(|e| {
-            AeroSyncError::InvalidConfig(format!("rendezvous lookup JSON: {e}; body={text:?}"))
+            let snippet = truncate_error_body(&text, 512);
+            AeroSyncError::InvalidConfig(format!("rendezvous lookup JSON: {e}; body={snippet}"))
         })
     }
+}
+
+fn truncate_error_body(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}… ({} bytes total)", s.len())
 }
 
 /// Parse `peer@rendezvous-authority` when there is no `://` scheme.
