@@ -25,7 +25,7 @@ Downstream AeroSync senders use the stored `observed_addr` to build `http://{obs
 ## Related
 
 - [RFC-004 implementation status](../rfcs/RFC-004-wan-rendezvous.md#implementation-status-2026-04-24)
-- Main CLI / env: `AEROSYNC_RENDEZVOUS_TOKEN`, destination `name@host:port` — [README.md](../../README.md) and [README.zh-CN.md](../../README.zh-CN.md)
+- Main CLI / env: `AEROSYNC_RENDEZVOUS_TOKEN`, optional **`AEROSYNC_RENDEZVOUS_NAMESPACE`** (P2 multitenant; must match the JWT `ns` claim), destination `name@host:port` — [README.md](../../README.md) and [README.zh-CN.md](../../README.zh-CN.md)
 
 ---
 
@@ -56,4 +56,4 @@ AeroSync 主程序会把 rendezvous 返回的 `observed_addr` 拼成 `http://…
 ## 另见
 
 - [RFC-004 实现状态](../rfcs/RFC-004-wan-rendezvous.md#implementation-status-2026-04-24)
-- 主项目 README [英文](../../README.md) / [中文](../../README.zh-CN.md) 中的 `AEROSYNC_RENDEZVOUS_TOKEN` 与 `peer@host:port` 说明
+- 主项目 README [英文](../../README.md) / [中文](../../README.zh-CN.md) 中的 `AEROSYNC_RENDEZVOUS_TOKEN`、可选 **`AEROSYNC_RENDEZVOUS_NAMESPACE`**（P2 多租户，须与 JWT `ns` 一致）与 `peer@host:port` 说明

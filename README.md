@@ -142,6 +142,8 @@ aerosync send ./report.pdf ftp://ftpserver:21/uploads/report.pdf
 
 ```bash
 export AEROSYNC_RENDEZVOUS_TOKEN='eyJ...'   # Bearer token for GET /v1/peers/{name}
+# Optional (P2 multitenant): must match JWT `ns` if you registered with X-AeroSync-Namespace
+# export AEROSYNC_RENDEZVOUS_NAMESPACE='acme'
 aerosync send ./video.mp4 'alice@rendezvous.example.com:8787'
 # Resolves the peer’s registered address, then uploads over HTTP/QUIC as usual
 ```

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (RFC-004 P2 — client)
+
+- **WAN lookup:** `RendezvousClient` sends optional `X-AeroSync-Namespace` (via
+  `RendezvousClient::new_with_namespace` or env **`AEROSYNC_RENDEZVOUS_NAMESPACE`**
+  when using `AutoAdapter::with_rendezvous_token_from_env`); `PeerLookupBody`
+  includes `namespace`. Required when the server issued a JWT with non-empty `ns`.
+
 > Next development cycle (v0.4 staging). v0.3.0 carve-outs that did
 > not ship: TransferEngine ↔ TransferSession integration (Phase 3.4e),
 > ReceiverSession wired through FileReceiver (Phase 3.5),

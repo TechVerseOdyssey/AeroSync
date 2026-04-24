@@ -56,6 +56,8 @@ aerosync send ./report.pdf ftp://ftpserver:21/uploads/report.pdf
 
 ```bash
 export AEROSYNC_RENDEZVOUS_TOKEN='eyJ...'
+# 可选（P2 多租户）：若注册时用了 X-AeroSync-Namespace，须与 JWT 的 ns 一致
+# export AEROSYNC_RENDEZVOUS_NAMESPACE='acme'
 aerosync send ./video.mp4 'alice@rendezvous.example.com:8787'
 ```
 

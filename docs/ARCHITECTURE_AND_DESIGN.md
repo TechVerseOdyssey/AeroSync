@@ -111,7 +111,7 @@ v0.3.0-rc1 收口状态：
 
 > 本节描述 **仓库 `main` 上已合并** 的最小数据面挂钩；**不**表示 UDP 打洞或中继已可用。权威说明见 [RFC-004 `docs/rfcs/RFC-004-wan-rendezvous.md`](rfcs/RFC-004-wan-rendezvous.md)（**Implementation status** 小节）与根目录 `CHANGELOG.md` [Unreleased]。
 
-1. 可选环境变量 **`AEROSYNC_RENDEZVOUS_TOKEN`**：对独立部署的 `aerosync-rendezvous` 服务做 `GET /v1/peers/{name}` 时携带 `Authorization: Bearer`。
+1. 可选环境变量 **`AEROSYNC_RENDEZVOUS_TOKEN`**：对独立部署的 `aerosync-rendezvous` 服务做 `GET /v1/peers/{name}` 时携带 `Authorization: Bearer`；P2 多租户时另设 **`AEROSYNC_RENDEZVOUS_NAMESPACE`**（与 JWT `ns` 一致）以发送 `X-AeroSync-Namespace`。
 2. 发送方 destination 使用 **`peer@rendezvous-host:port/相对路径...`** 形式（无 `://` 前缀的专用语法）；根 crate 内 [`AutoAdapter`](v0.3.0-frozen-api.md#13-aerosyncprotocols--submodule-frozen-subset) 在走 HTTP/QUIC 等路由前，先向 rendezvous **解析**出对端登记的 `observed_addr`，再重写为 `http://{observed}/upload/...`。
 3. 控制面与数据面分离：**`aerosync-rendezvous`** 仅提供 HTTP API + SQLite 注册；**AeroSync 对端**仍按常规 HTTP/QUIC 在 `observed_addr` 上收文件。NAT 打洞、会话信令、中继字节路径仍为后续里程碑。
 

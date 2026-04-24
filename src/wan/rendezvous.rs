@@ -1,14 +1,21 @@
 //! RFC-004 rendezvous HTTP client (`/v1/peers/*` lookup).
 
 use crate::core::{AeroSyncError, Result};
+use reqwest::header::HeaderName;
 use reqwest::Client;
 use serde::Deserialize;
 use std::sync::Arc;
+
+/// Must match `aerosync-rendezvous` `peers::NAMESPACE_HEADER` (RFC-004 P2 multitenant registry).
+static RENDEZVOUS_NAMESPACE_HEADER: HeaderName = HeaderName::from_static("x-aerosync-namespace");
 
 /// Successful `GET /v1/peers/{name}` JSON body.
 #[derive(Debug, Deserialize)]
 pub struct PeerLookupBody {
     pub peer_id: String,
+    /// Empty when the peer is in the default namespace (P2).
+    #[serde(default)]
+    pub namespace: String,
     pub name: String,
     pub public_key: String,
     pub capabilities: u64,
@@ -21,13 +28,31 @@ pub struct PeerLookupBody {
 pub struct RendezvousClient {
     client: Arc<Client>,
     bearer_token: String,
+    /// Sent as `X-AeroSync-Namespace` on lookup; must match the JWT `ns` claim.
+    namespace: String,
 }
 
 impl RendezvousClient {
+    /// P2 registry partition; empty means default namespace.
+    #[inline]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
     pub fn new(client: Arc<Client>, bearer_token: String) -> Self {
+        Self::new_with_namespace(client, bearer_token, String::new())
+    }
+
+    /// `namespace` is the tenant partition; use `""` for the default (single-tenant) registry.
+    pub fn new_with_namespace(
+        client: Arc<Client>,
+        bearer_token: String,
+        namespace: impl Into<String>,
+    ) -> Self {
         Self {
             client,
             bearer_token,
+            namespace: namespace.into(),
         }
     }
 
@@ -38,18 +63,16 @@ impl RendezvousClient {
             rendezvous_base.trim_end_matches('/'),
             urlencoding::encode(name)
         );
-        let resp = self
-            .client
-            .get(url)
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {}", self.bearer_token),
-            )
-            .send()
-            .await
-            .map_err(|e| {
-                AeroSyncError::InvalidConfig(format!("rendezvous lookup request failed: {e}"))
-            })?;
+        let mut req = self.client.get(url).header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", self.bearer_token),
+        );
+        if !self.namespace.is_empty() {
+            req = req.header(&RENDEZVOUS_NAMESPACE_HEADER, self.namespace.as_str());
+        }
+        let resp = req.send().await.map_err(|e| {
+            AeroSyncError::InvalidConfig(format!("rendezvous lookup request failed: {e}"))
+        })?;
         let status = resp.status();
         let text = resp
             .text()
@@ -103,5 +126,12 @@ mod tests {
     #[test]
     fn parse_rejects_url_scheme() {
         assert!(parse_peer_at_rendezvous("http://x@y").is_none());
+    }
+
+    #[test]
+    fn client_stores_tenant_namespace() {
+        let c = Client::new();
+        let r = RendezvousClient::new_with_namespace(Arc::new(c), "t".into(), "acme");
+        assert_eq!(r.namespace(), "acme");
     }
 }

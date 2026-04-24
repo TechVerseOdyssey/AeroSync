@@ -180,13 +180,36 @@ impl AutoAdapter {
         self
     }
 
-    /// Install rendezvous lookup when `AEROSYNC_RENDEZVOUS_TOKEN` is non-empty.
+    /// Same as [`Self::with_rendezvous_token`] but sets `X-AeroSync-Namespace` (must match JWT `ns`).
     #[cfg(feature = "wan-rendezvous")]
-    pub fn with_rendezvous_token_from_env(self) -> Self {
-        match std::env::var("AEROSYNC_RENDEZVOUS_TOKEN") {
-            Ok(token) if !token.trim().is_empty() => self.with_rendezvous_token(token),
-            _ => self,
+    pub fn with_rendezvous_token_and_namespace(
+        mut self,
+        bearer_token: String,
+        namespace: impl Into<String>,
+    ) -> Self {
+        self.rendezvous = Some(RendezvousClient::new_with_namespace(
+            Arc::clone(&self.shared_client),
+            bearer_token,
+            namespace,
+        ));
+        self
+    }
+
+    /// Install rendezvous lookup when `AEROSYNC_RENDEZVOUS_TOKEN` is non-empty.
+    /// Reads optional `AEROSYNC_RENDEZVOUS_NAMESPACE` for P2 multitenant lookup.
+    #[cfg(feature = "wan-rendezvous")]
+    pub fn with_rendezvous_token_from_env(mut self) -> Self {
+        let ns = std::env::var("AEROSYNC_RENDEZVOUS_NAMESPACE").unwrap_or_default();
+        if let Ok(token) = std::env::var("AEROSYNC_RENDEZVOUS_TOKEN") {
+            if !token.trim().is_empty() {
+                self.rendezvous = Some(RendezvousClient::new_with_namespace(
+                    Arc::clone(&self.shared_client),
+                    token,
+                    ns,
+                ));
+            }
         }
+        self
     }
 
     async fn resolve_task_destination(&self, task: &TransferTask) -> Result<TransferTask> {
