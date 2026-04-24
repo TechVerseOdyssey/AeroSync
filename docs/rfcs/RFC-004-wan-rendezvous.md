@@ -11,42 +11,67 @@
 | Depends on | RFC-002 (Receipt), RFC-003 (Metadata) |
 | Supersedes | none |
 
-## Implementation status (2026-04-22)
+## Implementation status (2026-04-24)
 
-This RFC intentionally remains **Draft** and is now explicitly tracked
-as a **v0.4.0** item rather than `v0.3.0`. The reason for the target
-change is that `v0.3.0` was used to complete the internal
-domain/infra/application split and freeze the public API surface first;
-the actual WAN rendezvous / NAT traversal runtime work was deferred to
-the next cycle to avoid stacking a major networking initiative on top
-of the refactor release.
+This RFC remains **Draft**; the target release line is **v0.4.0**. The
+blurb below matches the **tree as of 2026-04**; for release notes use
+`CHANGELOG.md` [Unreleased] in addition to this section.
 
 ### Implemented in the codebase
 
-- Placeholder `src/wan` modules and Cargo feature flags (`wan-rendezvous`,
-  `wan-relay`) in the main `aerosync` crate.
-- **Workspace crate `aerosync-rendezvous` (v0.4 week-1 scaffold):** axum
-  binary + RFC §5.4 SQLite schema (sqlx migrate) + `GET /health` and
-  `GET /v1/status`. No registration / JWT / WebSocket yet — see task
-  table §15.
-- A few API and config hooks reserved for future WAN work, such as
-  `Config.rendezvous_url` in the Python SDK.
-- Architecture and frozen-API documentation that reserve the v0.4 WAN
-  surface without claiming end-to-end WAN transfer today.
+- **Root crate — feature `wan-rendezvous` (default in current `Cargo.toml`,
+  can be disabled with `--no-default-features`):**
+  - `aerosync::wan::rendezvous::RendezvousClient` — `GET /v1/peers/{name}` with
+    `Authorization: Bearer <JWT>`.
+  - `parse_peer_at_rendezvous` — parses `peer@rendezvous-host:port` when the
+    string has no `://` scheme; path suffixes after the first `/` are kept for
+    multi-file `send` (`peer@host:port/rel/...`).
+  - `AutoAdapter::with_rendezvous_token` and
+    `with_rendezvous_token_from_env` (env **`AEROSYNC_RENDEZVOUS_TOKEN`**);
+    rewrites the transfer destination to `http://{observed}/upload/...` before
+    the HTTP/QUIC/S3/FTP router runs.
+  - CLI `send`, MCP background sends, and the Python `Client` builder chain the
+    env-based helper; `negotiate_protocol` / preflight skip `peer@…` forms so
+    they are not probed as raw `host:port`.
+- **Workspace crate `aerosync-rendezvous` (control plane, week-1 scope):**
+  - RFC §5.4 SQLite schema and embedded sqlx migrations.
+  - RS256 JWT (issuer/TTL configurable); **register** and **heartbeat** return
+    fresh tokens; **lookup** requires Bearer JWT.
+  - `POST /v1/peers/register`, `POST /v1/peers/heartbeat`, `GET /v1/peers/:name`
+    (`:name` is the registered peer name; see handler for conflict rules).
+  - `POST /v1/sessions/initiate` and relay paths registered as **HTTP 501**
+    stubs (placeholders for later punch/relay work).
+  - Process must be started with a PKCS#8 RSA private key PEM
+    (`--jwt-rsa-private-key` or `RENDEZVOUS_JWT_RSA_PRIVATE_KEY_PATH`); see
+    `aerosync-rendezvous/README.md`.
+- **Feature `wan-relay`:** still a **placeholder** module in `src/wan` — no
+  data-plane relay implementation in-tree yet.
+- **Python `Config.rendezvous_url` (and similar hooks):** reserved; week-1
+  lookup uses the **`peer@host:port` destination** plus env token, not a
+  separate base-URL field on `Config`.
 
-### Not yet implemented
+### Not yet implemented (vs this RFC)
 
-- HTTP API §4.2 (`/v1/peers/*`, sessions, relay), hole punching, identity/ACL
-  workflow, WAN CLI flows, and the new MCP tools in §13.1.
-- Most rows in the implementation task table (§15) after task #1–#2
-  remain future work.
+- WebSocket or QUIC **signaling**, **UDP hole punching**, and a **working**
+  byte relay with accounting (R3) — 501 routes only.
+- **Identity/ACL** beyond “JWT from our RSA key + register-time name/key”;
+  **§13.1 MCP tools** (`register_peer` server-side, etc.) as a first-class
+  product surface.
+- **ALPN `aerosync-rendezvous/1`** and the full control/data split described
+  for production; current client talks **HTTP(S)** to the rendezvous HTTP API
+  only.
+- **End-to-end “it just works” WAN** without running a rendezvous, distributing
+  keys, and ensuring `observed_addr` is reachable (NAT asymmetry, TLS to peer,
+  etc. are all out of scope for week-1).
 
 ### Current source of truth
 
-- Treat this RFC as the design roadmap.
-- Treat `docs/v0.3.0-frozen-api.md`, `docs/ARCHITECTURE_AND_DESIGN.md`,
-  and `CHANGELOG.md` as the best summary of what is actually present in
-  the repository today.
+- **Design** — this RFC.
+- **What is actually built** — `CHANGELOG.md` [Unreleased],
+  `aerosync-rendezvous/README.md`, and the source paths referenced above;
+  `docs/ARCHITECTURE_AND_DESIGN.md` and `docs/v0.3.0-frozen-api.md` for broader
+  architecture; the latter reflects the **v0.3.0 API freeze** and may trail
+  unreleased v0.4 work on `main`.
 
 ## 1. Summary
 

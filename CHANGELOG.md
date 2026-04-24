@@ -26,11 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **RFC-003**: Full SQLite/JSON1 **index** for history — metadata filters remain correct but **O(N)** on JSONL scan (same as before); dedicated index DB deferred per RFC-003 §7 horizon note.
 
-### Added (RFC-004 Phase 3 — scaffold)
+### Added (RFC-004 — week 1: control plane + client lookup; not full WAN)
 
-- **New workspace crate `aerosync-rendezvous`**: SQLite schema from RFC-004 §5.4,
-  embedded sqlx migrations, HTTP `GET /health` + `GET /v1/status`. Binary:
-  `cargo run -p aerosync-rendezvous`. See `aerosync-rendezvous/README.md`.
+- **Workspace crate `aerosync-rendezvous`**: RFC-004 §5.4 SQLite schema, sqlx
+  migrations, RS256 JWT (`--jwt-rsa-private-key` / `RENDEZVOUS_JWT_RSA_PRIVATE_KEY_PATH`),
+  `POST /v1/peers/register`, `POST /v1/peers/heartbeat`, `GET /v1/peers/:name`, plus
+  `GET /health`, `/v1/status`, `/v1/version`. Session and relay HTTP routes return
+  **501** until hole punch / relay land. See `aerosync-rendezvous/README.md`.
+- **Root `aerosync` (feature `wan-rendezvous`, default):** `RendezvousClient`,
+  `parse_peer_at_rendezvous` (`peer@rendezvous-host:port` destinations),
+  `AutoAdapter::with_rendezvous_token` and `with_rendezvous_token_from_env`
+  (**`AEROSYNC_RENDEZVOUS_TOKEN`** for `GET /v1/peers/{name}`). CLI `send`, MCP, and
+  Python client wire the env-based helper. This resolves the peer’s
+  `observed_addr` to an HTTP `/upload` URL; it does **not** implement NAT hole
+  punch, working relay, or the full RFC-004 §13.1 MCP tool surface.
 
 ## [0.3.0-rc1] - 2026-04-18
 
