@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still the single source of truth).
 - **`FileReceiver`:** in-memory `SessionId` → `ReceivedFile::id` index (HTTP、分片、QUIC
   入站统一登记); `received_ids_for_session` for batch correlation. Root `SessionId` re-export.
+- **Python `Receiver`:** `await received_ids_for_session(session_id)` mirrors the Rust
+  `FileReceiver` method (list of `ReceivedFile` UUID strings, arrival order).
 
 > RFC-004 **WAN** 其余条目（R3 中继、完整打洞/信令、28 项任务等）仍按 RFC 分阶段，不在本批次。
 

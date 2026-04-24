@@ -175,6 +175,27 @@ impl PyReceiver {
             .map(|addr| addr.to_string())
     }
 
+    /// Returns `ReceivedFile` id strings (UUID) for a v0.4+ transfer
+    /// session, in arrival order. Empty when the session is unknown or
+    /// no wire `Metadata.session_id` was present (see
+    /// `FileReceiver::received_ids_for_session`).
+    #[pyo3(signature = (session_id))]
+    fn received_ids_for_session<'py>(
+        &self,
+        py: Python<'py>,
+        session_id: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let u = Uuid::parse_str(session_id.trim())
+            .map_err(|e| PyValueError::new_err(format!("session_id: {e}")))?;
+        let session = SessionId::from_uuid(u);
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let ids = inner.lock().await.received_ids_for_session(session).await;
+            let out: Vec<String> = ids.into_iter().map(|id| id.to_string()).collect();
+            Ok(out)
+        })
+    }
+
     /// Async context manager entry — subscribes to the WS broadcast
     /// then starts the underlying `FileReceiver`.
     fn __aenter__<'py>(slf: Py<Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
