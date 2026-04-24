@@ -88,12 +88,9 @@ mdns = ["dep:mdns-sd"]
 # crates to gate their own optional code paths.
 mcp-helpers = []
 
-# v0.3.0 placeholders (see `docs/rfcs/RFC-004-wan-rendezvous.md`).
-# These compile to empty modules today (just `pub mod rendezvous {}`
-# / `pub mod relay {}`) so downstream Cargo.toml files can begin
-# referencing the future feature names without a breaking rename.
-# RFC-004: `peer@rendezvous-host` resolution via `GET /v1/peers/{name}` (requires
-# `AEROSYNC_RENDEZVOUS_TOKEN` + rendezvous-side JWT at lookup time).
+# RFC-004 (see `docs/rfcs/RFC-004-wan-rendezvous.md`). Feature names stay stable.
+# `wan-rendezvous`: client + `peer@host` → `GET /v1/peers/{name}` (env `AEROSYNC_RENDEZVOUS_TOKEN` + server JWT).
+# `wan-relay`: stub module until data-plane relay ships.
 wan-rendezvous = []
 wan-relay = []
 
