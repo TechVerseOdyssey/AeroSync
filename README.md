@@ -21,7 +21,7 @@
 | `rclone`   |   ✓    |     ✗     |         ✗         |          ✗           |            ✗             |
 | **AeroSync** | **✓**  |   **✓**   |       **✓**       |        **✓**         |          **✓**           |
 
-Designed for the use case nothing else covers cleanly: **one agent on machine A asks another agent on machine B "send me that 30 GB dataset"**, and it just works — LAN 完整支持（QUIC + mDNS 自动发现，HTTP 回退），WAN 规划中（[RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md)，目标 v0.4），resumable, with a single binary on each side.
+Designed for the use case nothing else covers cleanly: **one agent on machine A asks another agent on machine B "send me that 30 GB dataset"**, and it just works — full **LAN** story (QUIC + mDNS discovery, HTTP fallback), **resumable**, with a **single binary** on each side. For **WAN**, [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md) is rolling out in stages: a separate **`aerosync-rendezvous`** server (registry + JWT) and optional **`peer@rendezvous-host:port`** resolution in the main CLI/SDK (**week 1**, env `AEROSYNC_RENDEZVOUS_TOKEN`) are available on `main`; NAT hole punching, signaling, and a working relay are still **roadmapped for v0.4+** (see RFC *Implementation status*).
 
 ## Status (v0.3.0-rc1)
 
@@ -30,6 +30,7 @@ Designed for the use case nothing else covers cleanly: **one agent on machine A 
 - **Receipt protocol** ([RFC-002](docs/rfcs/RFC-002-receipt-protocol.md)) — sender knows when receiver actually processed; 7-state machine, HTTP SSE control plane (`GET /v1/receipts/:id/events`), idempotent ack/nack/cancel. v0.2.1 wires the QUIC bidi receipt stream end-to-end (`w3c-quic-receipt-wiring` closed) and adds HTTP wire-level `receipt_ack` echo (RFC-002 §6.4).
 - **Metadata envelope** ([RFC-003](docs/rfcs/RFC-003-metadata-envelope.md)) — every transfer carries structured metadata (`trace_id`, `lifecycle`, free-form `user_metadata`); persisted, queryable, propagated identically over HTTP and QUIC. See [`docs/protocol/metadata-v1.md`](docs/protocol/metadata-v1.md).
 - **MCP** — 11 tools for AI agents (push, pull, history, receipts, receipt waiting/cancel). New in v0.2.1: `request_file` symmetric pull tool. See [`docs/mcp-integration.md`](docs/mcp-integration.md).
+- **RFC-004 (WAN) — staged** — workspace crate [`aerosync-rendezvous`](aerosync-rendezvous/README.md) (self-hosted control plane: SQLite + `/v1/peers/*` + RS256 JWT). The root `aerosync` library can resolve **`name@host:port`** destinations when `AEROSYNC_RENDEZVOUS_TOKEN` is set. This is **not** end-to-end NAT traversal yet; see the RFC and [`CHANGELOG.md`](CHANGELOG.md) [Unreleased].
 
 ## Python SDK quickstart (v0.3.0-rc1)
 
@@ -99,7 +100,7 @@ The full Python reference lives under [`aerosync-py/python/aerosync/`](aerosync-
 git clone https://github.com/TechVerseOdyssey/AeroSync.git
 cd AeroSync
 cargo build --release
-# binaries: target/release/aerosync, target/release/aerosync-mcp
+# binaries: target/release/aerosync, target/release/aerosync-mcp, target/release/aerosync-rendezvous
 ```
 
 ### One-line install (macOS / Linux, x86_64 + arm64)
@@ -137,6 +138,14 @@ aerosync send ./data.tar.gz s3://my-bucket/backups/data.tar.gz
 aerosync send ./report.pdf ftp://ftpserver:21/uploads/report.pdf
 ```
 
+**RFC-004 rendezvous (optional, week 1)** — requires a running [`aerosync-rendezvous`](aerosync-rendezvous/README.md) instance, a JWT with lookup scope (e.g. from `POST /v1/peers/register`), and:
+
+```bash
+export AEROSYNC_RENDEZVOUS_TOKEN='eyJ...'   # Bearer token for GET /v1/peers/{name}
+aerosync send ./video.mp4 'alice@rendezvous.example.com:8787'
+# Resolves the peer’s registered address, then uploads over HTTP/QUIC as usual
+```
+
 ## CLI reference
 
 ### `aerosync send`
@@ -148,7 +157,7 @@ aerosync send <SOURCE> <DESTINATION> [OPTIONS]
 | Option            | Description                                                                | Default        |
 | ----------------- | -------------------------------------------------------------------------- | -------------- |
 | `<SOURCE>`        | Source file or directory                                                   | —              |
-| `<DESTINATION>`   | `host:port`, `http://`, `quic://`, `s3://` or `ftp://`                     | —              |
+| `<DESTINATION>`   | `host:port`, `http://`, `quic://`, `s3://`, `ftp://`, or `name@host:port` (RFC-004, needs `AEROSYNC_RENDEZVOUS_TOKEN`) | —              |
 | `-r, --recursive` | Send a directory recursively                                               | false          |
 | `--protocol`      | Force a protocol: `quic` \| `http`                                         | auto-negotiate |
 | `--token`         | Auth token                                                                 | —              |
@@ -267,6 +276,10 @@ aerosync send ./file.tar.gz s3://bucket/prefix/file.tar.gz   # AWS S3
 aerosync send ./file.csv ftp://ftpserver:21/data/file.csv
 ```
 
+### RFC-004 rendezvous lookup (optional)
+
+If **`AEROSYNC_RENDEZVOUS_TOKEN`** is set, destinations of the form **`peer@rendezvous-host:port`** (no `http://` prefix) are sent to the rendezvous HTTP API (`GET /v1/peers/{name}`) and rewritten to the peer’s registered `http://…/upload` URL. You still need a reachable path to that address (see [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md)). Run the control-plane server: `cargo run -p aerosync-rendezvous -- --jwt-rsa-private-key ./key.pem` (see [`aerosync-rendezvous/README.md`](aerosync-rendezvous/README.md)).
+
 ## Resumable transfers
 
 Files larger than 64 MB automatically use chunked upload (32 MB per chunk). State is stored under `~/.aerosync/.aerosync/<task_id>.json`.
@@ -303,6 +316,8 @@ aerosync (CLI)              aerosync-mcp (MCP server for AI agents)
   aerosync::core::*)            Storage traits)
 
  aerosync-proto              wire format (protobuf, ALPN aerosync/1)
+
+ aerosync-rendezvous (optional)   separate binary: RFC-004 registry + HTTP API (not linked into CLI)
 ```
 
 Both `aerosync-domain` and `aerosync-infra` are **internal-only** in v0.3.0 — re-exported through `aerosync::core::*` for back-compat; do not depend on them directly until v0.4.
@@ -318,11 +333,11 @@ Both `aerosync-domain` and `aerosync-infra` are **internal-only** in v0.3.0 — 
 ## Development
 
 ```bash
-cargo test --workspace                    # full test suite
-cargo test -p aerosync-core               # core only
-cargo test -p aerosync-protocols          # protocols only
-cargo test -p aerosync-protocols --test pipeline   # E2E pipeline
-cargo build --release                     # release build
+cargo test --workspace                       # full test suite
+cargo test -p aerosync --lib                 # root crate library tests
+cargo test -p aerosync-rendezvous            # rendezvous server crate
+cargo test -p aerosync --test protocols_pipeline   # E2E pipeline (`tests/`)
+cargo build --release
 ```
 
 Contributions are very welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`SECURITY.md`](SECURITY.md).

@@ -4,6 +4,8 @@
 
 支持大文件（GB 级）断点续传和小文件批量高并发传输，两端均安装 AeroSync 时自动协商升级 QUIC 协议，否则降级为 HTTP / S3 / FTP 等标准协议。
 
+> 完整英文说明见 [README.md](README.md)。
+
 ## 特性
 
 - **自适应协议**：自动探测对端是否支持 QUIC，支持则升级，否则降级 HTTP
@@ -14,6 +16,7 @@
 - **完整性校验**：SHA-256 端到端验证
 - **认证**：HMAC-SHA256 Bearer Token
 - **配置文件**：TOML 格式，CLI 参数优先覆盖
+- **RFC-004 / WAN（分阶段落地）** — 独立工作区成员 **`aerosync-rendezvous`**（自托管控制面：SQLite 注册、JWT、`/v1/peers/*` API，见 [`aerosync-rendezvous/README.md`](aerosync-rendezvous/README.md)）。主程序支持在设置环境变量 **`AEROSYNC_RENDEZVOUS_TOKEN`** 后，将目标写为 **`peer@rendezvous主机:端口`** 以经 rendezvous 查询对端 `observed_addr` 再传输。**NAT 打洞、信令、可用中继** 等仍按 [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md) 规划在 v0.4+，详见 RFC **Implementation status** 与根目录 `CHANGELOG` [Unreleased]。
 
 ## 安装
 
@@ -21,7 +24,7 @@
 git clone https://github.com/TechVerseOdyssey/AeroSync.git
 cd AeroSync
 cargo build --release
-# 二进制位于 target/release/aerosync
+# 二进制：target/release/aerosync、aerosync-mcp、aerosync-rendezvous
 ```
 
 ## 快速开始
@@ -49,6 +52,13 @@ aerosync send ./data.tar.gz s3://my-bucket/backups/data.tar.gz
 aerosync send ./report.pdf ftp://ftpserver:21/uploads/report.pdf
 ```
 
+**RFC-004 rendezvous（可选，week 1）** — 需已部署的 `aerosync-rendezvous`、可 lookup 的 JWT，以及：
+
+```bash
+export AEROSYNC_RENDEZVOUS_TOKEN='eyJ...'
+aerosync send ./video.mp4 'alice@rendezvous.example.com:8787'
+```
+
 ## CLI 参考
 
 ### `aerosync send`
@@ -60,7 +70,7 @@ aerosync send <SOURCE> <DESTINATION> [OPTIONS]
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `<SOURCE>` | 源文件或目录路径 | — |
-| `<DESTINATION>` | 目标地址，支持 `host:port`、`http://`、`quic://`、`s3://`、`ftp://` | — |
+| `<DESTINATION>` | 目标地址：`host:port`、`http://`、`quic://`、`s3://`、`ftp://`，或 `name@host:port`（RFC-004，需 `AEROSYNC_RENDEZVOUS_TOKEN`） | — |
 | `-r, --recursive` | 递归发送目录 | false |
 | `--protocol` | 强制协议：`quic` \| `http` | 自动协商 |
 | `--token` | 认证 Token | — |
@@ -174,6 +184,10 @@ aerosync send ./file.tar.gz s3://bucket/prefix/file.tar.gz
 aerosync send ./file.csv ftp://ftpserver:21/data/file.csv
 ```
 
+### RFC-004 rendezvous 查询（可选）
+
+若设置环境变量 **`AEROSYNC_RENDEZVOUS_TOKEN`**，可将目标写为 **`peer@rendezvous主机:端口`**（**不要**加 `http://` 前缀）。客户端会向 rendezvous 发起 `GET /v1/peers/{name}`，再用返回的地址走原有 HTTP/QUIC 发送流程。控制面需单独运行：`cargo run -p aerosync-rendezvous -- --jwt-rsa-private-key ./key.pem`（详见 [`aerosync-rendezvous/README.md`](aerosync-rendezvous/README.md) 与 [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md)）。
+
 ## 断点续传
 
 大文件（默认 >64MB）自动启用分片上传，每片 32MB。状态保存在 `.aerosync/<task_id>.json`。
@@ -191,21 +205,26 @@ aerosync send ./large_file.bin 192.168.1.10:7788 --no-resume
 
 ## 架构
 
+与英文 [`README.md` 架构一节](README.md#architecture) 一致，当前工作区为 **7 个 crate**（含 **`aerosync-rendezvous`** 控制面、**`aerosync-domain` / `aerosync-infra`** 等）。精要图：
+
 ```
-aerosync (CLI)
-├── aerosync-core
-│   ├── TransferEngine      并发 Worker（FuturesUnordered + Semaphore）
-│   ├── ProgressMonitor     进度跟踪（MultiProgress）
-│   ├── ResumeStore         断点续传状态持久化
-│   ├── FileReceiver        HTTP/QUIC 接收端
-│   └── AuthManager         HMAC-SHA256 Token 认证
-└── aerosync-protocols
-    ├── AutoAdapter         协议路由（自动协商）
-    ├── HttpTransfer        HTTP 上传/下载（Arc<Client> 复用）
-    ├── QuicTransfer        QUIC 传输（quinn + rustls）
-    ├── S3Transfer          S3 上传/下载（AWS SigV4）
-    └── FtpTransfer         FTP 上传/下载（suppaftp async）
+aerosync (CLI)              aerosync-mcp
+       └──────────┬────────────┘
+                  ▼
+          aerosync（根：引擎 + 协议 + Receipt）
+          ├── TransferEngine, FileReceiver, AutoAdapter, …
+          ├── HttpTransfer, QuicTransfer, S3Transfer, FtpTransfer
+          └── wan::rendezvous（feature wan-rendezvous，RFC-004 客户端解析）
+                  │
+     ┌────────────┴────────────┐
+     ▼                         ▼
+aerosync-domain          aerosync-infra
+aerosync-proto            （wire protobuf）
+
+aerosync-rendezvous        独立二进制：HTTP 注册/查询 + SQLite（不链入主 `aerosync`）
 ```
+
+更完整的模块表见 [`docs/ARCHITECTURE_AND_DESIGN.md`](docs/ARCHITECTURE_AND_DESIGN.md)。**v0.3.0** 起 `aerosync-domain` / `aerosync-infra` 为**内部** crate，请通过 `aerosync::core::*` 引用。
 
 ### 并发策略
 
@@ -218,19 +237,10 @@ aerosync (CLI)
 ## 开发
 
 ```bash
-# 运行全量测试（149 个用例）
 cargo test --workspace
-
-# 仅测试核心层
-cargo test -p aerosync-core
-
-# 仅测试协议层
-cargo test -p aerosync-protocols
-
-# 运行流水线集成测试
-cargo test -p aerosync-protocols --test pipeline
-
-# 构建发布版本
+cargo test -p aerosync --lib
+cargo test -p aerosync-rendezvous
+cargo test -p aerosync --test protocols_pipeline
 cargo build --release
 ```
 
