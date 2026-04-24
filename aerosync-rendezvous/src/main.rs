@@ -1,9 +1,11 @@
-//! `aerosync-rendezvous` binary — RFC-004 control-plane server (v0.4 scaffold).
+//! `aerosync-rendezvous` binary — RFC-004 control-plane server (registry + JWT).
 
-use aerosync_rendezvous::{connect_database, serve};
+use aerosync_rendezvous::{connect_database, jwt, serve, AppState};
 use clap::Parser;
+use jsonwebtoken::{DecodingKey, EncodingKey};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(
@@ -16,6 +18,13 @@ struct Cli {
     /// SQLite database file path (created if missing).
     #[arg(long, env = "RENDEZVOUS_DATABASE", default_value = "rendezvous.db")]
     database: PathBuf,
+    /// PKCS#8 PEM path for RSA private key used to sign JWTs (RS256).
+    #[arg(long, env = "RENDEZVOUS_JWT_RSA_PRIVATE_KEY_PATH")]
+    jwt_rsa_private_key: PathBuf,
+    #[arg(long, default_value = "aerosync-rendezvous")]
+    jwt_issuer: String,
+    #[arg(long, default_value_t = 86_400_u64)]
+    jwt_ttl_secs: u64,
 }
 
 #[tokio::main]
@@ -32,6 +41,19 @@ async fn main() -> anyhow::Result<()> {
         .bind
         .parse()
         .map_err(|e| anyhow::anyhow!("--bind: {e}"))?;
+
+    let pem = std::fs::read(&cli.jwt_rsa_private_key)?;
+    let encoding_key: Arc<EncodingKey> = Arc::new(jwt::encoding_key_from_rsa_pem(&pem)?);
+    let decoding_key: Arc<DecodingKey> = Arc::new(jwt::decoding_key_from_private_pkcs8_pem(&pem)?);
+
     let pool = connect_database(cli.database.as_path()).await?;
-    serve(addr, pool).await
+    let state = Arc::new(AppState {
+        pool,
+        jwt_issuer: cli.jwt_issuer,
+        jwt_ttl_secs: cli.jwt_ttl_secs,
+        encoding_key,
+        decoding_key,
+    });
+
+    serve(addr, state).await
 }

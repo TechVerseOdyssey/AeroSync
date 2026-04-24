@@ -1,18 +1,31 @@
 //! WAN rendezvous server library (RFC-004).
 //!
-//! v0.4 **week-1 scaffold**: SQLite schema from RFC §5.4, HTTP `/health` and
-//! `/v1/status`. Registration / JWT / WebSocket signaling follow in later tasks.
+//! Week-1 scope: SQLite schema, RS256 JWT, `/v1/peers/register`, `/heartbeat`,
+//! `/v1/peers/{name}`. Session WS + relay return HTTP 501 stubs.
 
-use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
+pub mod jwt;
+pub mod peers;
+
+use axum::{
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+    Json, Router,
+};
+use jsonwebtoken::{DecodingKey, EncodingKey};
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
 
-/// Shared server state (connection pool).
-#[derive(Clone)]
+/// Shared server state.
 pub struct AppState {
     pub pool: SqlitePool,
+    pub jwt_issuer: String,
+    pub jwt_ttl_secs: u64,
+    pub encoding_key: Arc<EncodingKey>,
+    pub decoding_key: Arc<DecodingKey>,
 }
 
 /// Open or create the SQLite database and apply embedded migrations.
@@ -32,15 +45,6 @@ pub async fn connect_database(database_path: &Path) -> anyhow::Result<SqlitePool
     Ok(pool)
 }
 
-/// Build the axum router (for tests and [`serve`].
-pub fn app_router(pool: SqlitePool) -> Router {
-    let state = AppState { pool };
-    Router::new()
-        .route("/health", get(health))
-        .route("/v1/status", get(status))
-        .with_state(state)
-}
-
 async fn health() -> Json<Value> {
     Json(json!({
         "status": "ok",
@@ -49,7 +53,14 @@ async fn health() -> Json<Value> {
     }))
 }
 
-async fn status(State(state): State<AppState>) -> Result<Json<Value>, (StatusCode, String)> {
+async fn version_info() -> Json<Value> {
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "protocols": ["aerosync-wire/1", "rfc004-rendezvous-v1-scaffold"],
+    }))
+}
+
+async fn status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, (StatusCode, String)> {
     let peers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM peers")
         .fetch_one(&state.pool)
         .await
@@ -67,18 +78,47 @@ async fn status(State(state): State<AppState>) -> Result<Json<Value>, (StatusCod
     })))
 }
 
-/// Bind `addr` and serve until the process is interrupted.
-pub async fn serve(addr: SocketAddr, pool: SqlitePool) -> anyhow::Result<()> {
-    let app = app_router(pool);
+/// Build the axum router.
+pub fn app_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/v1/health", get(health))
+        .route("/v1/version", get(version_info))
+        .route("/v1/status", get(status))
+        .route("/v1/peers/register", post(peers::register_peer))
+        .route("/v1/peers/heartbeat", post(peers::heartbeat))
+        .route("/v1/peers/:name", get(peers::lookup_peer))
+        .route("/v1/sessions/initiate", post(peers::not_implemented_sessions))
+        .route(
+            "/v1/relay/:session_id/up",
+            post(peers::not_implemented_relay),
+        )
+        .route(
+            "/v1/relay/:session_id/down",
+            get(peers::not_implemented_relay),
+        )
+        .with_state(state)
+}
+
+/// Bind `addr` and serve until interrupted.
+pub async fn serve(addr: SocketAddr, state: Arc<AppState>) -> anyhow::Result<()> {
+    let app = app_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("aerosync-rendezvous listening on http://{addr}");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jwt::{decoding_key_from_private_pkcs8_pem, encoding_key_from_rsa_pem};
+    use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+    use rsa::RsaPrivateKey;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -90,11 +130,84 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
-            .fetch_one(&pool)
+        assert_eq!(peers, 0);
+    }
+
+    fn rsa_pem() -> Vec<u8> {
+        let mut rng = rand::thread_rng();
+        let key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        key.to_pkcs8_pem(LineEnding::LF)
+            .unwrap()
+            .as_bytes()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn register_then_lookup() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("rv.db");
+        let pem = rsa_pem();
+        let enc = Arc::new(encoding_key_from_rsa_pem(&pem).unwrap());
+        let dec = Arc::new(decoding_key_from_private_pkcs8_pem(&pem).unwrap());
+
+        let pool = connect_database(&db).await.unwrap();
+        let state = Arc::new(AppState {
+            pool,
+            jwt_issuer: "test-iss".into(),
+            jwt_ttl_secs: 3600,
+            encoding_key: enc,
+            decoding_key: dec,
+        });
+
+        use axum::body::Body;
+        use axum::extract::connect_info::MockConnectInfo;
+        use axum::http::Request;
+        use base64::Engine;
+        use serde_json::json;
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+
+        let pubkey = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+        let body = json!({
+            "name": "alice",
+            "public_key": pubkey,
+            "capabilities": 3,
+            "observed_addr": "10.0.0.1:9999"
+        })
+        .to_string();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/peers/register")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+
+        let app = app_router(state.clone()).layer(MockConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            50_321,
+        ))));
+
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert_eq!(peers, 0);
-        assert_eq!(sessions, 0);
+        let reg: Value = serde_json::from_slice(&body_bytes).unwrap();
+        let jwt = reg["jwt"].as_str().unwrap().to_string();
+
+        let req2 = Request::builder()
+            .method("GET")
+            .uri("/v1/peers/alice")
+            .header("authorization", format!("Bearer {}", jwt))
+            .body(Body::empty())
+            .unwrap();
+        let app2 = app_router(state.clone()).layer(MockConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            50_321,
+        ))));
+        let res2 = app2.oneshot(req2).await.unwrap();
+        assert_eq!(res2.status(), StatusCode::OK);
     }
 }

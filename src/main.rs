@@ -683,8 +683,19 @@ async fn cmd_send(
     // 自动协商协议（host:port 格式时探测对端是否支持 QUIC）
     let dest_url = negotiate_protocol(&destination).await;
 
+    #[cfg(feature = "wan-rendezvous")]
+    let skip_preflight_rendezvous = {
+        let base = destination
+            .split_once('/')
+            .map(|(a, _)| a)
+            .unwrap_or(destination.as_str());
+        aerosync::wan::rendezvous::parse_peer_at_rendezvous(base).is_some()
+    };
+    #[cfg(not(feature = "wan-rendezvous"))]
+    let skip_preflight_rendezvous = false;
+
     // 预检验：探测接收端磁盘空间
-    if !no_preflight {
+    if !no_preflight && !skip_preflight_rendezvous {
         // 从 dest_url 提取 HTTP base（quic:// 时转换为 http://）
         let http_base = extract_http_base(&dest_url, &destination);
         match preflight_check(&http_base, total_size).await {
@@ -740,7 +751,9 @@ async fn cmd_send(
         pinned_server_certs: pin_cert,
         ..QuicConfig::default()
     };
-    let adapter = Arc::new(AutoAdapter::new(http_config, quic_config));
+    let adapter = Arc::new(
+        AutoAdapter::new(http_config, quic_config).with_rendezvous_token_from_env(),
+    );
 
     let engine = TransferEngine::new(config);
     engine.start(adapter).await?;
@@ -991,6 +1004,14 @@ async fn negotiate_protocol(dest: &str) -> String {
         || dest.starts_with("ftp://")
     {
         return dest.to_string();
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    {
+        let base = dest.split_once('/').map(|(a, _)| a).unwrap_or(dest);
+        if aerosync::wan::rendezvous::parse_peer_at_rendezvous(base).is_some() {
+            return dest.to_string();
+        }
     }
 
     // host:port 格式：尝试 HTTP health 探测

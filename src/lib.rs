@@ -25,5 +25,7 @@ pub use crate::core::{
     TransferTask,
 };
 pub use crate::protocols::{AutoAdapter, HttpConfig, HttpTransfer};
+#[cfg(feature = "wan-rendezvous")]
+pub use crate::wan::rendezvous::{parse_peer_at_rendezvous, RendezvousClient};
 #[cfg(feature = "quic")]
 pub use crate::protocols::{QuicConfig, QuicTransfer};

@@ -47,7 +47,7 @@ required-features = ["http", "quic", "mdns", "mcp-helpers"]
 # Default keeps every protocol and helper enabled so the published
 # `aerosync` CLI / MCP binary works exactly as before. Embedders who
 # want a lean library can opt out via `--no-default-features`.
-default = ["http", "quic", "s3", "ftp", "mdns", "mcp-helpers"]
+default = ["http", "quic", "s3", "ftp", "mdns", "mcp-helpers", "wan-rendezvous"]
 
 # HTTP transport (axum + reqwest stack). Currently always-on at the
 # crate level — listed as a feature so future users can write their
@@ -92,6 +92,8 @@ mcp-helpers = []
 # These compile to empty modules today (just `pub mod rendezvous {}`
 # / `pub mod relay {}`) so downstream Cargo.toml files can begin
 # referencing the future feature names without a breaking rename.
+# RFC-004: `peer@rendezvous-host` resolution via `GET /v1/peers/{name}` (requires
+# `AEROSYNC_RENDEZVOUS_TOKEN` + rendezvous-side JWT at lookup time).
 wan-rendezvous = []
 wan-relay = []
 

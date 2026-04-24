@@ -114,7 +114,8 @@ pub async fn recover_pending_transfers(
         };
         let adapter = Arc::new(
             AutoAdapter::new(http_config, QuicConfig::default())
-                .with_resume_store(Arc::clone(&store_clone)),
+                .with_resume_store(Arc::clone(&store_clone))
+                .with_rendezvous_token_from_env(),
         );
 
         let file_path = state.source_path.clone();

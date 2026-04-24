@@ -712,7 +712,8 @@ impl AeroSyncMcpServer {
                 let resume_store = Arc::new(ResumeStore::new(&aerosync_dir));
                 let adapter = Arc::new(
                     AutoAdapter::new(http_config, quic_config)
-                        .with_resume_store(Arc::clone(&resume_store)),
+                        .with_resume_store(Arc::clone(&resume_store))
+                        .with_rendezvous_token_from_env(),
                 );
                 let config = TransferConfig {
                     auth_token: params.token.clone().map(Zeroizing::new),
@@ -986,7 +987,8 @@ impl AeroSyncMcpServer {
                 let resume_store = Arc::new(ResumeStore::new(&aerosync_dir));
                 let adapter = Arc::new(
                     AutoAdapter::new(http_config, quic_config)
-                        .with_resume_store(Arc::clone(&resume_store)),
+                        .with_resume_store(Arc::clone(&resume_store))
+                        .with_rendezvous_token_from_env(),
                 );
                 let config = TransferConfig {
                     auth_token: params.token.clone().map(Zeroizing::new),

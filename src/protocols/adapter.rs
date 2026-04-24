@@ -19,6 +19,8 @@ use crate::protocols::quic::{QuicConfig, QuicTransfer};
 #[cfg(feature = "s3")]
 use crate::protocols::s3::{S3Config, S3Transfer};
 use crate::protocols::traits::{TransferProgress as ProtoProgress, TransferProtocol};
+#[cfg(feature = "wan-rendezvous")]
+use crate::wan::rendezvous::RendezvousClient;
 
 pub struct AutoAdapter {
     http_config: HttpConfig,
@@ -47,6 +49,8 @@ pub struct AutoAdapter {
     /// `Processing` and a separate orchestration layer is expected
     /// to apply the terminal event by hand.
     engine_receipt_inbox: Option<mpsc::UnboundedSender<HttpReceiptAck>>,
+    #[cfg(feature = "wan-rendezvous")]
+    rendezvous: Option<RendezvousClient>,
 }
 
 impl AutoAdapter {
@@ -67,6 +71,8 @@ impl AutoAdapter {
             ftp_config: None,
             resume_store: None,
             engine_receipt_inbox: None,
+            #[cfg(feature = "wan-rendezvous")]
+            rendezvous: None,
         }
     }
 
@@ -88,6 +94,8 @@ impl AutoAdapter {
             ftp_config: None,
             resume_store: None,
             engine_receipt_inbox: None,
+            #[cfg(feature = "wan-rendezvous")]
+            rendezvous: None,
         }
     }
 
@@ -161,6 +169,59 @@ impl AutoAdapter {
         self.ftp_config = Some(cfg);
         self
     }
+
+    /// RFC-004: Bearer JWT used for `GET /v1/peers/{name}` (lookup scope).
+    #[cfg(feature = "wan-rendezvous")]
+    pub fn with_rendezvous_token(mut self, bearer_token: String) -> Self {
+        self.rendezvous = Some(RendezvousClient::new(
+            Arc::clone(&self.shared_client),
+            bearer_token,
+        ));
+        self
+    }
+
+    /// Install rendezvous lookup when `AEROSYNC_RENDEZVOUS_TOKEN` is non-empty.
+    #[cfg(feature = "wan-rendezvous")]
+    pub fn with_rendezvous_token_from_env(self) -> Self {
+        match std::env::var("AEROSYNC_RENDEZVOUS_TOKEN") {
+            Ok(token) if !token.trim().is_empty() => self.with_rendezvous_token(token),
+            _ => self,
+        }
+    }
+
+    async fn resolve_task_destination(&self, task: &TransferTask) -> Result<TransferTask> {
+        #[cfg(feature = "wan-rendezvous")]
+        if let Some(rv) = &self.rendezvous {
+            let dest = task.destination.trim();
+            let (prefix, rel_path) = match dest.find('/') {
+                Some(i) => (&dest[..i], &dest[i + 1..]),
+                None => (dest, ""),
+            };
+            if let Some((peer_name, authority)) =
+                crate::wan::rendezvous::parse_peer_at_rendezvous(prefix)
+            {
+                let rendezvous_base = format!("http://{}", authority.trim_start_matches('/'));
+                let info = rv.lookup_peer(&rendezvous_base, &peer_name).await?;
+                let addr = info.observed_addr.ok_or_else(|| {
+                    AeroSyncError::InvalidConfig(
+                        "rendezvous: peer has no observed_addr yet".to_string(),
+                    )
+                })?;
+                let addr = addr
+                    .trim()
+                    .trim_start_matches("http://")
+                    .trim_start_matches("https://");
+                let mut out = task.clone();
+                out.destination = if rel_path.is_empty() {
+                    format!("http://{addr}/upload")
+                } else {
+                    format!("http://{addr}/upload/{rel_path}")
+                };
+                return Ok(out);
+            }
+        }
+        Ok(task.clone())
+    }
 }
 
 #[async_trait]
@@ -170,6 +231,7 @@ impl ProtocolAdapter for AutoAdapter {
         task: &TransferTask,
         progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
     ) -> Result<()> {
+        let task = self.resolve_task_destination(task).await?;
         // S3 路由
         #[cfg(feature = "s3")]
         if task.destination.starts_with("s3://") {
@@ -189,7 +251,7 @@ impl ProtocolAdapter for AutoAdapter {
                     });
                 }
             });
-            return s3.upload_file(task, tx).await;
+            return s3.upload_file(&task, tx).await;
         }
 
         // FTP 路由
@@ -211,7 +273,7 @@ impl ProtocolAdapter for AutoAdapter {
                     });
                 }
             });
-            return ft.upload_file(task, tx).await;
+            return ft.upload_file(&task, tx).await;
         }
 
         #[cfg(feature = "quic")]
@@ -229,7 +291,7 @@ impl ProtocolAdapter for AutoAdapter {
                     });
                 }
             });
-            return qt.upload_file(task, tx).await;
+            return qt.upload_file(&task, tx).await;
         }
 
         // HTTP（包括 http:// 和 host:port 规范化后的地址）— also the
@@ -247,7 +309,7 @@ impl ProtocolAdapter for AutoAdapter {
                 });
             }
         });
-        let normalized = normalize_http_upload_task(task);
+        let normalized = normalize_http_upload_task(&task);
         ht.upload_file(&normalized, tx).await
     }
 
@@ -256,6 +318,7 @@ impl ProtocolAdapter for AutoAdapter {
         task: &TransferTask,
         progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
     ) -> Result<()> {
+        let task = self.resolve_task_destination(task).await?;
         // S3 路由
         #[cfg(feature = "s3")]
         if task.destination.starts_with("s3://") {
@@ -274,7 +337,7 @@ impl ProtocolAdapter for AutoAdapter {
                     });
                 }
             });
-            return s3.download_file(task, tx).await;
+            return s3.download_file(&task, tx).await;
         }
 
         // FTP 路由
@@ -295,7 +358,7 @@ impl ProtocolAdapter for AutoAdapter {
                     });
                 }
             });
-            return ft.download_file(task, tx).await;
+            return ft.download_file(&task, tx).await;
         }
 
         #[cfg(feature = "quic")]
@@ -312,7 +375,7 @@ impl ProtocolAdapter for AutoAdapter {
                     });
                 }
             });
-            return qt.download_file(task, tx).await;
+            return qt.download_file(&task, tx).await;
         }
 
         let ht = HttpTransfer::new_with_client(
@@ -329,7 +392,7 @@ impl ProtocolAdapter for AutoAdapter {
                 });
             }
         });
-        ht.download_file(task, tx).await
+        ht.download_file(&task, tx).await
         // NB: download path deliberately doesn't wire the receipt
         // sink — receipt acks are an upload-side concept (RFC-002 §6).
     }
@@ -344,6 +407,7 @@ impl ProtocolAdapter for AutoAdapter {
         state: &mut ResumeState,
         progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
     ) -> Result<()> {
+        let task = self.resolve_task_destination(task).await?;
         // S3/FTP/QUIC 不支持分片，fallback 到普通上传。
         // The matched-scheme list is gated so we don't false-positive
         // on a feature that isn't compiled in (the upload() fallback
@@ -352,7 +416,7 @@ impl ProtocolAdapter for AutoAdapter {
             || task.destination.starts_with("s3://") && cfg!(feature = "s3")
             || task.destination.starts_with("ftp://") && cfg!(feature = "ftp");
         if needs_fallback {
-            return self.upload(task, progress_tx).await;
+            return self.upload(&task, progress_tx).await;
         }
 
         // 从完整 URL 中提取 base_url（scheme + host + port）

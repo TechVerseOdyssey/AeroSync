@@ -91,9 +91,12 @@ impl PyClient {
 /// `AutoAdapter::new` shape unconditionally — there is no `quic`
 /// feature on the `aerosync-py` crate itself to gate on.
 fn build_default_adapter(engine: &TransferEngine) -> Arc<AutoAdapter> {
-    let adapter = AutoAdapter::new(HttpConfig::default(), QuicConfig::default());
     let inbox = engine.http_receipt_inbox();
-    Arc::new(adapter.with_engine_receipt_inbox(inbox))
+    Arc::new(
+        AutoAdapter::new(HttpConfig::default(), QuicConfig::default())
+            .with_engine_receipt_inbox(inbox)
+            .with_rendezvous_token_from_env(),
+    )
 }
 
 /// Idempotent: build (if not already built) the [`AutoAdapter`] and
