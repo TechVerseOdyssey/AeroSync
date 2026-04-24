@@ -643,6 +643,8 @@ impl PyClient {
         trace_id=None,
         content_type_contains=None
     ))]
+    // PyO3 keyword args map 1:1; count exceeds clippy::too_many_arguments.
+    #[allow(clippy::too_many_arguments)]
     fn history<'py>(
         &self,
         py: Python<'py>,
