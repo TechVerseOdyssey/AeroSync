@@ -171,6 +171,8 @@ async fn tool_set_and_schemas_match_golden_snapshot() {
 
         let existing = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read snapshot {}: {e}", path.display()));
+        // Windows checkouts (CRLF) must match the canonical \n used by `rendered`.
+        let existing = existing.replace("\r\n", "\n");
         if existing != rendered {
             drift_report.push(format!(
                 "── {} ──\n--- snapshot ({})\n+++ live\n{}",

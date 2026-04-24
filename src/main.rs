@@ -751,9 +751,8 @@ async fn cmd_send(
         pinned_server_certs: pin_cert,
         ..QuicConfig::default()
     };
-    let adapter = Arc::new(
-        AutoAdapter::new(http_config, quic_config).with_rendezvous_token_from_env(),
-    );
+    let adapter =
+        Arc::new(AutoAdapter::new(http_config, quic_config).with_rendezvous_token_from_env());
 
     let engine = TransferEngine::new(config);
     engine.start(adapter).await?;

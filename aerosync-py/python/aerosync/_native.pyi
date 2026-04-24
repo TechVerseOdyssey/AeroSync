@@ -31,6 +31,9 @@ def receiver(
     idle_timeout: float | None = ...,
 ) -> Receiver: ...
 def discover(timeout: float = ...) -> Awaitable[list[Peer]]: ...
+def recover(
+    journal_path: str | os.PathLike[str] | None = ...,
+) -> Awaitable[list[RecoverableReceipt]]: ...
 
 # ── Records (frozen `#[pyclass]`) ─────────────────────────────────────
 
@@ -81,6 +84,20 @@ class HistoryEntry:
         receipt_state: str | None = ...,
     ) -> None: ...
     def __repr__(self) -> str: ...
+
+class RecoverableReceipt:
+    """Recoverable (non-terminal) row from the SQLite receipt journal (RFC-002)."""
+
+    receipt_id: str
+    side: str
+    state: str
+    is_terminal: bool
+    reason: str | None
+    code: int | None
+    history_id: str | None
+    filename: str | None
+    peer: str | None
+    last_event_at: int
 
 # ── Receipt ───────────────────────────────────────────────────────────
 

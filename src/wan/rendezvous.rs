@@ -51,9 +51,10 @@ impl RendezvousClient {
                 AeroSyncError::InvalidConfig(format!("rendezvous lookup request failed: {e}"))
             })?;
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| {
-            AeroSyncError::InvalidConfig(format!("rendezvous lookup body: {e}"))
-        })?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AeroSyncError::InvalidConfig(format!("rendezvous lookup body: {e}")))?;
         if !status.is_success() {
             return Err(AeroSyncError::InvalidConfig(format!(
                 "rendezvous lookup HTTP {status}: {text}"

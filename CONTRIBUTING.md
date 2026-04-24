@@ -39,7 +39,10 @@ tools) — please add coverage when you add or change behaviour.
 
 ## Style
 
-- `cargo fmt --all` before committing (CI enforces).
+- `cargo fmt --all` before committing (CI enforces). To run the same check
+  automatically on every `git commit`, set once per clone:
+  `git config core.hooksPath .githooks` (this repo’s `.githooks/pre-commit`
+  runs `cargo fmt --all -- --check` like CI).
 - `cargo clippy --workspace --all-targets -- -D warnings` must pass.
 - Avoid adding new dependencies without a clear reason; mention them in
   the PR description.

@@ -88,7 +88,10 @@ pub fn app_router(state: Arc<AppState>) -> Router {
         .route("/v1/peers/register", post(peers::register_peer))
         .route("/v1/peers/heartbeat", post(peers::heartbeat))
         .route("/v1/peers/:name", get(peers::lookup_peer))
-        .route("/v1/sessions/initiate", post(peers::not_implemented_sessions))
+        .route(
+            "/v1/sessions/initiate",
+            post(peers::not_implemented_sessions),
+        )
         .route(
             "/v1/relay/:session_id/up",
             post(peers::not_implemented_relay),
@@ -183,10 +186,8 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
 
-        let app = app_router(state.clone()).layer(MockConnectInfo(SocketAddr::from((
-            [127, 0, 0, 1],
-            50_321,
-        ))));
+        let app = app_router(state.clone())
+            .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 50_321))));
 
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -203,10 +204,8 @@ mod tests {
             .header("authorization", format!("Bearer {}", jwt))
             .body(Body::empty())
             .unwrap();
-        let app2 = app_router(state.clone()).layer(MockConnectInfo(SocketAddr::from((
-            [127, 0, 0, 1],
-            50_321,
-        ))));
+        let app2 = app_router(state.clone())
+            .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 50_321))));
         let res2 = app2.oneshot(req2).await.unwrap();
         assert_eq!(res2.status(), StatusCode::OK);
     }

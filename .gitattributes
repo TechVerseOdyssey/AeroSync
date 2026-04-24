@@ -1,0 +1,3 @@
+# MCP golden snapshots are compared as UTF-8 with \n; force LF in checkouts
+# on Windows (core.autocrlf) so CI and local `cargo test` stay deterministic.
+aerosync-mcp/tests/snapshots/*.json text eol=lf

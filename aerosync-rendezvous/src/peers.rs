@@ -65,8 +65,12 @@ fn peer_id_from_pubkey(pubkey: &[u8]) -> String {
 }
 
 fn authorization_bearer(headers: &HeaderMap) -> Option<&str> {
-    let hv = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
-    hv.strip_prefix("Bearer ").or_else(|| hv.strip_prefix("bearer "))
+    let hv = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    hv.strip_prefix("Bearer ")
+        .or_else(|| hv.strip_prefix("bearer "))
 }
 
 fn observed_from_connect(addr: SocketAddr) -> String {
@@ -90,25 +94,23 @@ pub async fn register_peer(
     let observed = body
         .observed_addr
         .clone()
-        .or_else(|| headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).map(|s| {
-            s.split(',')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string()
-        }))
+        .or_else(|| {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.split(',').next().unwrap_or("").trim().to_string())
+        })
         .filter(|s| !s.is_empty())
         .or_else(|| Some(observed_from_connect(remote)));
 
     let now = unix_now();
 
-    let existing = sqlx::query(
-        "SELECT peer_id, public_key FROM peers WHERE name = ?1 COLLATE NOCASE",
-    )
-    .bind(&body.name)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(internal)?;
+    let existing =
+        sqlx::query("SELECT peer_id, public_key FROM peers WHERE name = ?1 COLLATE NOCASE")
+            .bind(&body.name)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(internal)?;
 
     match existing {
         Some(row) => {
@@ -176,8 +178,8 @@ pub async fn heartbeat(
     Json(body): Json<HeartbeatRequest>,
 ) -> Result<Json<HeartbeatResponse>, (StatusCode, Json<Value>)> {
     let token = authorization_bearer(&headers).ok_or_else(|| unauthorized())?;
-    let claims =
-        verify_bearer(token, state.decoding_key.as_ref(), &state.jwt_issuer).map_err(|_| unauthorized())?;
+    let claims = verify_bearer(token, state.decoding_key.as_ref(), &state.jwt_issuer)
+        .map_err(|_| unauthorized())?;
 
     let observed = body.observed_addr.clone();
     let now = unix_now();
@@ -286,17 +288,11 @@ fn unix_now() -> u64 {
 }
 
 fn bad_req(msg: &'static str) -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({ "error": msg })),
-    )
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": msg })))
 }
 
 fn conflict(msg: &'static str) -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::CONFLICT,
-        Json(json!({ "error": msg })),
-    )
+    (StatusCode::CONFLICT, Json(json!({ "error": msg })))
 }
 
 fn unauthorized() -> (StatusCode, Json<Value>) {
