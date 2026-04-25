@@ -445,6 +445,15 @@ impl PyIncomingFile {
         self.receipt.as_ref().map(|r| r.id().to_string())
     }
 
+    /// v0.4+ wire `Metadata.session_id` when the sender included it.
+    /// `None` for legacy transfers (same UUID string shape as `Receipt.session_id`).
+    #[getter]
+    fn session_id(&self) -> Option<String> {
+        self.receipt
+            .as_ref()
+            .and_then(|r| r.session_id().map(|s| s.to_string()))
+    }
+
     /// Receiver-side receipt state as a string (mirrors
     /// `Receipt.state` on the sender side). Returns `None` if no
     /// receipt is attached (legacy code paths that don't go through

@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   入站统一登记); `received_ids_for_session` for batch correlation. Root `SessionId` re-export.
 - **Python `Receiver`:** `await received_ids_for_session(session_id)` mirrors the Rust
   `FileReceiver` method (list of `ReceivedFile` UUID strings, arrival order).
+- **Python `IncomingFile`:** `session_id` property (aligned with `Receipt.session_id` / wire
+  metadata).
 
 > RFC-004 **WAN** 其余条目（R3 中继、完整打洞/信令、28 项任务等）仍按 RFC 分阶段，不在本批次。
 
