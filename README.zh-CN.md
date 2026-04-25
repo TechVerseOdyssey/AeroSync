@@ -190,6 +190,36 @@ aerosync send ./file.csv ftp://ftpserver:21/data/file.csv
 
 若设置环境变量 **`AEROSYNC_RENDEZVOUS_TOKEN`**，可将目标写为 **`peer@rendezvous主机:端口`**（**不要**加 `http://` 前缀）。客户端会向 rendezvous 发起 `GET /v1/peers/{name}`，再用返回的地址走原有 HTTP/QUIC 发送流程。控制面需单独运行：`cargo run -p aerosync-rendezvous -- --jwt-rsa-private-key ./key.pem`（详见 [`aerosync-rendezvous/README.md`](aerosync-rendezvous/README.md) 与 [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md)）。
 
+### WAN 故障排查（R2 标签）
+
+当 `peer@rendezvous-host:port` 走 R2 打洞路径时，错误会带稳定标签：
+
+- **`[R2_NO_TOKEN]`**：发送端没有 lookup token。设置 `AEROSYNC_RENDEZVOUS_TOKEN`（多租户还需 `AEROSYNC_RENDEZVOUS_NAMESPACE`）。
+- **`[R2_PEER_UNSEEN]`**：目标 peer 还没有 `observed_addr`。先启动接收端并完成 heartbeat/register，再重试。
+- **`[R2_INITIATE]`**：`POST /v1/sessions/initiate` 失败（常见是 JWT/namespace/session 权限不匹配）。
+- **`[R2_SIGNALING]`**：在 `punch_at` 前信令 WebSocket 失败（对端未参与、WS 被拦截、时序问题）。
+- **`[R2_CANDIDATE_EMPTY]`**：信令没有返回可用的远端 socket 地址。
+- **`[R2_WARMUP]` / `[R2_SOCKET]`**：本地 UDP 暖包/套接字初始化失败。
+
+快速排查：
+
+```bash
+# 发送端是否已设置 token
+echo "${AEROSYNC_RENDEZVOUS_TOKEN:+set}"
+
+# rendezvous 健康检查
+curl -sSf http://<rendezvous-host>:<port>/v1/health
+
+# 查看目标 peer 是否在线（替换 token + peer）
+curl -sSf -H "Authorization: Bearer $AEROSYNC_RENDEZVOUS_TOKEN" \
+  "http://<rendezvous-host>:<port>/v1/peers/<peer_name>"
+```
+
+Python SDK 对应异常映射：
+- `r2_no_token` -> `ConfigError`
+- `r2_peer_unseen` -> `PeerNotFoundError`
+- `r2_negotiation` -> `ConnectionError`
+
 ## 断点续传
 
 大文件（默认 >64MB）自动启用分片上传，每片 32MB。状态保存在 `.aerosync/<task_id>.json`。

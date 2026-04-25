@@ -282,6 +282,36 @@ aerosync send ./file.csv ftp://ftpserver:21/data/file.csv
 
 If **`AEROSYNC_RENDEZVOUS_TOKEN`** is set, destinations of the form **`peer@rendezvous-host:port`** (no `http://` prefix) are sent to the rendezvous HTTP API (`GET /v1/peers/{name}`) and rewritten to the peer’s registered `http://…/upload` URL. You still need a reachable path to that address (see [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md)). Run the control-plane server: `cargo run -p aerosync-rendezvous -- --jwt-rsa-private-key ./key.pem` (see [`aerosync-rendezvous/README.md`](aerosync-rendezvous/README.md)).
 
+### WAN troubleshooting (R2 tags)
+
+When `peer@rendezvous-host:port` uses the R2 punch path, errors include stable tags:
+
+- **`[R2_NO_TOKEN]`** — sender has no lookup token. Set `AEROSYNC_RENDEZVOUS_TOKEN` (and `AEROSYNC_RENDEZVOUS_NAMESPACE` when using tenant namespaces).
+- **`[R2_PEER_UNSEEN]`** — target peer has no `observed_addr` yet. Start receiver + heartbeat/register the target, then retry.
+- **`[R2_INITIATE]`** — `POST /v1/sessions/initiate` failed (JWT/namespace/session policy mismatch are common causes).
+- **`[R2_SIGNALING]`** — WebSocket signaling failed before `punch_at` (peer not participating, WS blocked, or timing issue).
+- **`[R2_CANDIDATE_EMPTY]`** — signaling returned no usable remote socket address.
+- **`[R2_WARMUP]` / `[R2_SOCKET]`** — local UDP warmup/socket setup failed.
+
+Quick checks:
+
+```bash
+# token is set on sender
+echo "${AEROSYNC_RENDEZVOUS_TOKEN:+set}"
+
+# rendezvous health
+curl -sSf http://<rendezvous-host>:<port>/v1/health
+
+# receiver is registered/online (replace token + peer)
+curl -sSf -H "Authorization: Bearer $AEROSYNC_RENDEZVOUS_TOKEN" \
+  "http://<rendezvous-host>:<port>/v1/peers/<peer_name>"
+```
+
+Python SDK maps these tags to typed exceptions:
+- `r2_no_token` -> `ConfigError`
+- `r2_peer_unseen` -> `PeerNotFoundError`
+- `r2_negotiation` -> `ConnectionError`
+
 ## Resumable transfers
 
 Files larger than 64 MB automatically use chunked upload (32 MB per chunk). State is stored under `~/.aerosync/.aerosync/<task_id>.json`.
