@@ -44,6 +44,8 @@ tools) — please add coverage when you add or change behaviour.
   `git config core.hooksPath .githooks` (this repo’s `.githooks/pre-commit`
   runs `cargo fmt --all -- --check` like CI).
 - `cargo clippy --workspace --all-targets -- -D warnings` must pass.
+- Run `./scripts/rust-gate.sh` before pushing to execute the same
+  Rust quality gate used by hooks/CI (`fmt`, `clippy -D warnings`, tests).
 - Avoid adding new dependencies without a clear reason; mention them in
   the PR description.
 - Prefer small, focused commits with an [imperative subject line](https://cbea.ms/git-commit/).

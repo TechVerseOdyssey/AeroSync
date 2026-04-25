@@ -223,8 +223,8 @@ pub async fn session_websocket(
                 msg = socket.recv() => {
                     let Some(m) = msg else { break };
                     match m {
-                        Ok(Message::Text(t)) => {
-                            if reg.on_client_text(&id, role, &t).is_err() { break; }
+                        Ok(Message::Text(t)) if reg.on_client_text(&id, role, &t).is_err() => {
+                            break;
                         }
                         Ok(Message::Close(_)) | Err(_) => break,
                         _ => {}

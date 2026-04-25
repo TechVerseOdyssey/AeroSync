@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Strong local gate before push: lint + tests.
+set -e
+cd "$(git rev-parse --show-toplevel)" || exit 1
+./scripts/rust-gate.sh clippy test

@@ -60,7 +60,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - run: ./scripts/rust-gate.sh fmt
 
   clippy:
     name: clippy
@@ -73,7 +73,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ci-clippy
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: ./scripts/rust-gate.sh clippy
 
   msrv:
     name: MSRV (1.89)
