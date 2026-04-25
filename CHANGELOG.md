@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   job: targeted R2 tests plus a feature-sliced clippy gate
   (`http,quic,wan-rendezvous`) to keep coverage high without running a second
   full-workspace matrix.
+- **`punch_signaling` async tests** cover stable `[R2_TIMEOUT_WS]` /
+  `[R2_TIMEOUT_PUNCH]` paths; `error_advice` + **Python** (`[r2_timeout_…]`, `[R2_SOCKET]`)
+  stay aligned; **AutoAdapter** asserts stable `[R2_TIMEOUT_CONNECT]`.
 
 ### Added (v0.4 — Engine ↔ `TransferSession` + wire `session_id`, Phase 3.4e–g)
 

@@ -53,6 +53,7 @@ pub fn engine_err_to_py(err: EngineErr) -> PyErr {
         || msg_lower.contains("[r2_candidate_empty]")
         || msg_lower.contains("[r2_warmup]")
         || msg_lower.contains("[r2_socket]")
+        || msg_lower.contains("[r2_timeout_")
     {
         return new_err::<ConnectionError>(msg, "r2_negotiation");
     }
@@ -237,6 +238,19 @@ mod tests {
     #[test]
     fn maps_r2_candidate_empty_to_connection_error() {
         let e = EngineErr::Network("[R2_CANDIDATE_EMPTY] no remote candidate".into());
+        let py_err = engine_err_to_py(e);
+        assert_eq!(class_name(&py_err), "ConnectionError");
+        Python::attach(|py| {
+            let code: String = py_err.value(py).getattr("code").unwrap().extract().unwrap();
+            assert_eq!(code, "r2_negotiation");
+        });
+    }
+
+    #[test]
+    fn maps_r2_timeout_punch_to_connection_error_with_r2_negotiation_code() {
+        let e = EngineErr::Network(
+            "[R2_TIMEOUT_PUNCH] signaling did not deliver punch_at within 1 ms".into(),
+        );
         let py_err = engine_err_to_py(e);
         assert_eq!(class_name(&py_err), "ConnectionError");
         Python::attach(|py| {

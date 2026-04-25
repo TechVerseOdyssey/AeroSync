@@ -216,6 +216,11 @@ fn parse_incoming(line: &str) -> Result<Option<Incoming>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     #[test]
     fn ws_url_from_http_base() {
@@ -226,5 +231,57 @@ mod tests {
         )
         .unwrap();
         assert!(s.starts_with("ws://127.0.0.1:8787/v1/sessions/x/ws?token="));
+    }
+
+    /// Server accepts TCP but never completes the WebSocket HTTP upgrade, so
+    /// `connect_async` blocks until the client budget elapses.
+    #[tokio::test]
+    async fn exchange_fails_r2_timeout_ws_when_handshake_stalls() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let _stalled = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("accept");
+            std::future::pending::<()>().await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let err = exchange_candidates_and_wait_punch_with_timeouts(
+            &format!("ws://{server_addr}/"),
+            "192.0.2.1:1",
+            vec![],
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("[R2_TIMEOUT_WS]"), "got: {s}");
+    }
+
+    /// WebSocket is up and candidates are sent, but the peer never supplies
+    /// `punch_at` before `punch_wait_timeout` elapses.
+    #[tokio::test]
+    async fn exchange_fails_r2_timeout_punch_when_punch_at_missing() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let _srv = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut ws = accept_async(stream).await.expect("ws accept");
+            if let Some(Ok(WsMessage::Text(_))) = ws.next().await {
+                // no remote.candidates, no punch_at
+            }
+            std::future::pending::<()>().await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let err = exchange_candidates_and_wait_punch_with_timeouts(
+            &format!("ws://{server_addr}/"),
+            "192.0.2.1:1",
+            vec!["10.0.0.1:1".to_string()],
+            Duration::from_secs(3),
+            Duration::from_millis(200),
+        )
+        .await
+        .unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("[R2_TIMEOUT_PUNCH]"), "got: {s}");
     }
 }

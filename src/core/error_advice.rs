@@ -45,6 +45,8 @@ pub fn advice_for(err: &AeroSyncError) -> Option<ErrorAdvice> {
         || msg_lower.contains("[r2_signaling]")
         || msg_lower.contains("[r2_candidate_empty]")
         || msg_lower.contains("[r2_warmup]")
+        || msg_lower.contains("[r2_socket]")
+        || msg_lower.contains("[r2_timeout_")
     {
         return Some(ErrorAdvice {
             summary: "WAN R2 negotiation failed before QUIC data transfer started",
@@ -263,6 +265,22 @@ mod tests {
         let err = AeroSyncError::Network("[R2_SIGNALING] ws closed".to_string());
         let adv = advice_for(&err).unwrap();
         assert!(adv.summary.contains("R2 negotiation"));
+    }
+
+    #[test]
+    fn test_advice_r2_timeout_punch() {
+        let err = AeroSyncError::Network(
+            "[R2_TIMEOUT_PUNCH] signaling did not deliver punch_at within 1 ms".to_string(),
+        );
+        let adv = advice_for(&err).unwrap();
+        assert!(adv.summary.to_lowercase().contains("negotiation"));
+    }
+
+    #[test]
+    fn test_advice_r2_socket() {
+        let err = AeroSyncError::Network("[R2_SOCKET] UDP clone: ...".to_string());
+        let adv = advice_for(&err).unwrap();
+        assert!(adv.summary.to_lowercase().contains("negotiation"));
     }
 
     #[test]

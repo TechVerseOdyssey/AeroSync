@@ -1197,7 +1197,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "wan-rendezvous")]
+    #[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
     #[tokio::test]
     async fn test_r2_stage_timeout_error_code_is_stable() {
         let err = run_r2_stage_with_timeout(
@@ -1215,6 +1215,28 @@ mod tests {
             AeroSyncError::Network(s) => {
                 assert!(s.contains("[R2_TIMEOUT_INITIATE]"), "got: {s}");
                 assert!(s.contains("after"), "got: {s}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
+    #[tokio::test]
+    async fn test_r2_connect_stage_timeout_error_code_is_stable() {
+        let err = run_r2_stage_with_timeout(
+            StdDuration::from_millis(5),
+            "R2_TIMEOUT_CONNECT",
+            "QUIC connect/upload did not complete".to_string(),
+            async {
+                tokio::time::sleep(StdDuration::from_millis(40)).await;
+                Ok::<(), AeroSyncError>(())
+            },
+        )
+        .await
+        .unwrap_err();
+        match err {
+            AeroSyncError::Network(s) => {
+                assert!(s.contains("[R2_TIMEOUT_CONNECT]"), "got: {s}");
             }
             other => panic!("unexpected error: {other:?}"),
         }
