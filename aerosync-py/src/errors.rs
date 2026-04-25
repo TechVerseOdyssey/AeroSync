@@ -25,8 +25,8 @@
 //! callers writing `dict[str, str]` literals expect ValueError.
 
 use crate::exceptions::{
-    new_err, AeroSyncError, AuthError, ConfigError, ConnectionError, EngineError, TimeoutError,
-    TransferFailed,
+    new_err, AeroSyncError, AuthError, ConfigError, ConnectionError, EngineError,
+    PeerNotFoundError, TimeoutError, TransferFailed,
 };
 use aerosync::core::metadata::MetadataError;
 use aerosync::core::AeroSyncError as EngineErr;
@@ -41,6 +41,21 @@ use pyo3::PyErr;
 /// matrix is documented in this module's preamble.
 pub fn engine_err_to_py(err: EngineErr) -> PyErr {
     let msg = err.to_string();
+    let msg_lower = msg.to_lowercase();
+    if msg_lower.contains("[r2_no_token]") {
+        return new_err::<ConfigError>(msg, "r2_no_token");
+    }
+    if msg_lower.contains("[r2_peer_unseen]") || msg_lower.contains("target peer") {
+        return new_err::<PeerNotFoundError>(msg, "r2_peer_unseen");
+    }
+    if msg_lower.contains("[r2_initiate]")
+        || msg_lower.contains("[r2_signaling]")
+        || msg_lower.contains("[r2_candidate_empty]")
+        || msg_lower.contains("[r2_warmup]")
+        || msg_lower.contains("[r2_socket]")
+    {
+        return new_err::<ConnectionError>(msg, "r2_negotiation");
+    }
     match err {
         // FileIo and Storage are both filesystem-flavoured failures.
         // RFC-001 §5.8 has no dedicated FileError class; bucketing
@@ -175,6 +190,24 @@ mod tests {
         });
         let py_err = timeout_to_py(err);
         assert_eq!(class_name(&py_err), "TimeoutError");
+    }
+
+    #[test]
+    fn maps_r2_no_token_to_config_error() {
+        let e = EngineErr::InvalidConfig("[R2_NO_TOKEN] no token".into());
+        let py_err = engine_err_to_py(e);
+        assert_eq!(class_name(&py_err), "ConfigError");
+        Python::attach(|py| {
+            let code: String = py_err.value(py).getattr("code").unwrap().extract().unwrap();
+            assert_eq!(code, "r2_no_token");
+        });
+    }
+
+    #[test]
+    fn maps_r2_signaling_to_connection_error() {
+        let e = EngineErr::Network("[R2_SIGNALING] ws failed".into());
+        let py_err = engine_err_to_py(e);
+        assert_eq!(class_name(&py_err), "ConnectionError");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::protocols::quic_receipt::{
 use crate::protocols::traits::{TransferProgress, TransferProtocol};
 use aerosync_proto::ReceiptFrame;
 use async_trait::async_trait;
-use quinn::{ClientConfig, Connection, Endpoint};
+use quinn::{ClientConfig, Connection, Endpoint, EndpointConfig, TokioRuntime};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName as PkiServerName, UnixTime};
 use rustls::{ClientConfig as TlsClientConfig, DigitallySignedStruct, SignatureScheme};
@@ -185,66 +185,35 @@ impl Default for QuicConfig {
 
 impl QuicTransfer {
     pub fn new(config: QuicConfig) -> Result<Self> {
-        ensure_crypto_provider_installed();
-
-        let verifier = if !config.pinned_server_certs.is_empty() {
-            let certs: Result<Vec<Vec<u8>>> = config
-                .pinned_server_certs
-                .iter()
-                .map(|p| {
-                    std::fs::read(p).map_err(|e| {
-                        AeroSyncError::InvalidConfig(format!(
-                            "Cannot read pinned cert {}: {}",
-                            p.display(),
-                            e
-                        ))
-                    })
-                })
-                .collect();
-            PinnedCertVerifier::with_pinned(certs?)
-        } else {
-            PinnedCertVerifier::dev_mode()
-        };
-
-        // rustls 0.23: builder no longer has with_safe_defaults(); the crypto
-        // provider installed above supplies the default cipher suites/kx.
-        let mut tls_config = TlsClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(verifier)
-            .with_no_client_auth();
-
-        tls_config.alpn_protocols = config
-            .alpn_protocols
-            .iter()
-            .map(|s| s.as_bytes().to_vec())
-            .collect();
-
-        let mut transport = quinn::TransportConfig::default();
-        transport.max_idle_timeout(Some(
-            std::time::Duration::from_millis(config.max_idle_timeout)
-                .try_into()
-                .unwrap(),
-        ));
-        transport.keep_alive_interval(Some(std::time::Duration::from_millis(
-            config.keep_alive_interval,
-        )));
-
-        // quinn 0.11: ClientConfig wraps rustls QuicClientConfig via the
-        // quinn::crypto::rustls bridge instead of taking raw rustls::ClientConfig.
-        let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
-            .map_err(|e| AeroSyncError::Network(format!("QUIC TLS config error: {}", e)))?;
-        let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
-        client_config.transport_config(Arc::new(transport));
-
+        let client_config = build_quic_client_config(&config)?;
         let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())
             .map_err(|e| AeroSyncError::Network(e.to_string()))?;
         endpoint.set_default_client_config(client_config);
+        Self::new_with_endpoint(config, endpoint)
+    }
 
+    /// Construct a transfer from a caller-prepared endpoint.
+    pub fn new_with_endpoint(config: QuicConfig, endpoint: Endpoint) -> Result<Self> {
         Ok(Self {
             endpoint,
             config,
             receipt_sink: None,
         })
+    }
+
+    /// Construct a transfer bound to a caller-provided UDP socket.
+    /// Used by RFC-004 R2 hole punching so warmup and QUIC share one tuple.
+    pub fn new_with_socket(config: QuicConfig, socket: std::net::UdpSocket) -> Result<Self> {
+        let client_config = build_quic_client_config(&config)?;
+        let mut endpoint = Endpoint::new(
+            EndpointConfig::default(),
+            None,
+            socket,
+            Arc::new(TokioRuntime),
+        )
+        .map_err(|e| AeroSyncError::Network(format!("QUIC endpoint from socket: {e}")))?;
+        endpoint.set_default_client_config(client_config);
+        Self::new_with_endpoint(config, endpoint)
     }
 
     /// Builder: install a sink that receives every inbound
@@ -493,6 +462,55 @@ impl QuicTransfer {
         file.flush().await?;
         Ok(())
     }
+}
+
+fn build_quic_client_config(config: &QuicConfig) -> Result<ClientConfig> {
+    ensure_crypto_provider_installed();
+
+    let verifier = if !config.pinned_server_certs.is_empty() {
+        let certs: Result<Vec<Vec<u8>>> = config
+            .pinned_server_certs
+            .iter()
+            .map(|p| {
+                std::fs::read(p).map_err(|e| {
+                    AeroSyncError::InvalidConfig(format!(
+                        "Cannot read pinned cert {}: {}",
+                        p.display(),
+                        e
+                    ))
+                })
+            })
+            .collect();
+        PinnedCertVerifier::with_pinned(certs?)
+    } else {
+        PinnedCertVerifier::dev_mode()
+    };
+
+    let mut tls_config = TlsClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    tls_config.alpn_protocols = config
+        .alpn_protocols
+        .iter()
+        .map(|s| s.as_bytes().to_vec())
+        .collect();
+
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(
+        std::time::Duration::from_millis(config.max_idle_timeout)
+            .try_into()
+            .unwrap(),
+    ));
+    transport.keep_alive_interval(Some(std::time::Duration::from_millis(
+        config.keep_alive_interval,
+    )));
+
+    let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
+        .map_err(|e| AeroSyncError::Network(format!("QUIC TLS config error: {}", e)))?;
+    let mut client_config = ClientConfig::new(Arc::new(quic_crypto));
+    client_config.transport_config(Arc::new(transport));
+    Ok(client_config)
 }
 
 /// Drain inbound [`ReceiptFrame`] messages off the bidi receipt

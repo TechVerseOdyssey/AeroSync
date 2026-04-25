@@ -7,8 +7,10 @@ use crate::core::{AeroSyncError, Result};
 use aerosync_domain::storage::ResumeStorage;
 use async_trait::async_trait;
 use reqwest::Client;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 #[cfg(feature = "ftp")]
@@ -21,6 +23,11 @@ use crate::protocols::s3::{S3Config, S3Transfer};
 use crate::protocols::traits::{TransferProgress as ProtoProgress, TransferProtocol};
 #[cfg(feature = "wan-rendezvous")]
 use crate::wan::rendezvous::RendezvousClient;
+#[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
+use crate::wan::{
+    hole_punch::udp_punch_warmup,
+    punch_signaling::{exchange_candidates_and_wait_punch, RemoteCandidates},
+};
 
 pub struct AutoAdapter {
     http_config: HttpConfig,
@@ -214,7 +221,7 @@ impl AutoAdapter {
 
     async fn resolve_task_destination(&self, task: &TransferTask) -> Result<TransferTask> {
         #[cfg(feature = "wan-rendezvous")]
-        if let Some(rv) = &self.rendezvous {
+        {
             let dest = task.destination.trim();
             let (prefix, rel_path) = match dest.find('/') {
                 Some(i) => (&dest[..i], &dest[i + 1..]),
@@ -223,11 +230,18 @@ impl AutoAdapter {
             if let Some((peer_name, authority)) =
                 crate::wan::rendezvous::parse_peer_at_rendezvous(prefix)
             {
+                let Some(rv) = &self.rendezvous else {
+                    return Err(AeroSyncError::InvalidConfig(
+                        "[R2_NO_TOKEN] destination uses peer@rendezvous but no lookup token is configured; set AEROSYNC_RENDEZVOUS_TOKEN".to_string(),
+                    ));
+                };
                 let rendezvous_base = format!("http://{}", authority.trim_start_matches('/'));
                 let info = rv.lookup_peer(&rendezvous_base, &peer_name).await?;
                 let addr = info.observed_addr.ok_or_else(|| {
                     AeroSyncError::InvalidConfig(
-                        "rendezvous: peer has no observed_addr yet".to_string(),
+                        format!(
+                            "[R2_PEER_UNSEEN] rendezvous peer `{peer_name}` has no observed_addr yet; ensure receiver is online and heartbeating"
+                        ),
                     )
                 })?;
                 let addr = addr
@@ -245,6 +259,96 @@ impl AutoAdapter {
         }
         Ok(task.clone())
     }
+
+    /// RFC-004 R2 upload path (phase-1): for `peer@rendezvous-host:port` without
+    /// a path suffix, attempt `initiate_session -> WS candidates/punch_at -> QUIC`.
+    /// Returns `None` when the task is not an R2 candidate so the caller can keep
+    /// existing routing/fallback logic untouched.
+    #[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
+    async fn try_r2_upload(
+        &self,
+        task: &TransferTask,
+        progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
+    ) -> Option<Result<()>> {
+        let rv = self.rendezvous.as_ref()?;
+        let dest = task.destination.trim();
+        let (prefix, rel_path) = match dest.find('/') {
+            Some(i) => (&dest[..i], &dest[i + 1..]),
+            None => (dest, ""),
+        };
+        let (peer_name, authority) = crate::wan::rendezvous::parse_peer_at_rendezvous(prefix)?;
+        if !rel_path.is_empty() {
+            return None;
+        }
+
+        let rendezvous_base = format!("http://{}", authority.trim_start_matches('/'));
+        let fut = async {
+            let init = rv
+                .initiate_session(&rendezvous_base, &peer_name)
+                .await
+                .map_err(|e| {
+                    AeroSyncError::Network(format!(
+                        "[R2_INITIATE] initiate_session failed for `{peer_name}`: {e}"
+                    ))
+                })?;
+            let ws_url = rv
+                .signaling_websocket_url(&rendezvous_base, &init.signaling.websocket_path)
+                .map_err(|e| {
+                    AeroSyncError::Network(format!("R2 signaling URL build failed: {e}"))
+                })?;
+
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+                .map_err(|e| AeroSyncError::Network(format!("R2 UDP bind: {e}")))?;
+            socket
+                .set_nonblocking(true)
+                .map_err(|e| AeroSyncError::Network(format!("R2 UDP nonblocking: {e}")))?;
+            let local = socket
+                .local_addr()
+                .map_err(|e| AeroSyncError::Network(format!("R2 UDP local addr: {e}")))?;
+            let local_s = local.to_string();
+            let (punch, remotes) = exchange_candidates_and_wait_punch(
+                &ws_url,
+                &local_s,
+                vec![local_s.clone()],
+            )
+            .await
+            .map_err(|e| {
+                AeroSyncError::Network(format!(
+                    "[R2_SIGNALING] signaling/punch failed: {e}. The receiver must also participate in signaling."
+                ))
+            })?;
+
+            let remote = pick_remote_candidate(&remotes).ok_or_else(|| {
+                AeroSyncError::Network(
+                    "[R2_CANDIDATE_EMPTY] signaling returned no parseable remote candidate addr"
+                        .to_string(),
+                )
+            })?;
+            wait_until_punch_time_ms(punch.timestamp_ms).await;
+            let warm_socket = socket
+                .try_clone()
+                .map_err(|e| AeroSyncError::Network(format!("[R2_SOCKET] UDP clone: {e}")))?;
+            udp_punch_warmup(&warm_socket, &[remote], 3)
+                .map_err(|e| AeroSyncError::Network(format!("[R2_WARMUP] UDP warmup: {e}")))?;
+
+            let mut qc = self.quic_config_base.clone();
+            qc.server_addr = remote;
+            qc.server_name = remote.ip().to_string();
+            let qt = QuicTransfer::new_with_socket(qc, socket)?;
+            let (tx, mut rx) = mpsc::unbounded_channel::<ProtoProgress>();
+            let ptx = progress_tx.clone();
+            tokio::spawn(async move {
+                while let Some(p) = rx.recv().await {
+                    let _ = ptx.send(ProtocolProgress {
+                        bytes_transferred: p.bytes_transferred,
+                        transfer_speed: p.transfer_speed,
+                    });
+                }
+            });
+            qt.upload_file(task, tx).await
+        };
+        Some(fut.await)
+    }
 }
 
 #[async_trait]
@@ -254,6 +358,11 @@ impl ProtocolAdapter for AutoAdapter {
         task: &TransferTask,
         progress_tx: mpsc::UnboundedSender<ProtocolProgress>,
     ) -> Result<()> {
+        #[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
+        if let Some(r) = self.try_r2_upload(task, progress_tx.clone()).await {
+            return r;
+        }
+
         let task = self.resolve_task_destination(task).await?;
         // S3 路由
         #[cfg(feature = "s3")]
@@ -506,6 +615,35 @@ fn extract_base_url(url: &str) -> Result<String> {
     })
 }
 
+#[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
+fn pick_remote_candidate(remotes: &[RemoteCandidates]) -> Option<SocketAddr> {
+    for r in remotes {
+        if let Ok(a) = r.server_reflexive.trim().parse::<SocketAddr>() {
+            return Some(a);
+        }
+        for l in &r.local {
+            if let Ok(a) = l.trim().parse::<SocketAddr>() {
+                return Some(a);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
+async fn wait_until_punch_time_ms(target_ms: u64) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if target_ms <= now {
+        return;
+    }
+    let delta = target_ms - now;
+    let capped = delta.min(2_000);
+    tokio::time::sleep(StdDuration::from_millis(capped)).await;
+}
+
 #[cfg(feature = "quic")]
 fn resolve_quic_config(destination: &str, base: &QuicConfig) -> Result<QuicConfig> {
     let stripped = destination.strip_prefix("quic://").ok_or_else(|| {
@@ -665,6 +803,45 @@ mod tests {
             Err(crate::core::AeroSyncError::Network(_)) => {}
             Err(e) => panic!("Unexpected error: {:?}", e),
             Ok(_) => panic!("Should not succeed without server"),
+        }
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    #[test]
+    fn test_pick_remote_candidate_prefers_server_reflexive() {
+        let remotes = vec![RemoteCandidates {
+            from: "target".to_string(),
+            server_reflexive: "127.0.0.1:7789".to_string(),
+            local: vec!["10.0.0.1:9999".to_string()],
+        }];
+        let picked = pick_remote_candidate(&remotes).unwrap();
+        assert_eq!(picked, "127.0.0.1:7789".parse().unwrap());
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    #[tokio::test]
+    async fn test_peer_at_destination_without_token_is_config_error() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("r2.bin");
+        tokio::fs::write(&file_path, b"data").await.unwrap();
+        let task = TransferTask {
+            id: uuid::Uuid::new_v4(),
+            source_path: file_path,
+            destination: "alice@127.0.0.1:8787".to_string(),
+            is_upload: true,
+            file_size: 4,
+            sha256: None,
+            metadata: None,
+        };
+        let adapter = AutoAdapter::new(HttpConfig::default(), default_quic_config());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = adapter.upload(&task, tx).await.unwrap_err();
+        match err {
+            crate::core::AeroSyncError::InvalidConfig(s) => {
+                assert!(s.contains("[R2_NO_TOKEN]"));
+            }
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 }

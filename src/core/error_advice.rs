@@ -20,6 +20,42 @@ pub fn advice_for(err: &AeroSyncError) -> Option<ErrorAdvice> {
     let msg = err.to_string();
     let msg_lower = msg.to_lowercase();
 
+    // ── 0. RFC-004 R2 (rendezvous + punch) tagged failures ──────────────────
+    if msg_lower.contains("[r2_no_token]") {
+        return Some(ErrorAdvice {
+            summary: "R2 rendezvous token is missing for `peer@rendezvous` destination",
+            suggestions: &[
+                "Set `AEROSYNC_RENDEZVOUS_TOKEN` in the sender environment",
+                "Use a token issued by your rendezvous (`POST /v1/peers/register` / heartbeat)",
+                "If multitenant, also set `AEROSYNC_RENDEZVOUS_NAMESPACE` to match JWT `ns`",
+            ],
+        });
+    }
+    if msg_lower.contains("[r2_peer_unseen]") {
+        return Some(ErrorAdvice {
+            summary: "Target peer is registered but has no reachable observed address yet",
+            suggestions: &[
+                "Start the receiver and ensure it is heartbeating to rendezvous",
+                "Re-register / heartbeat the target peer so `observed_addr` is populated",
+                "Retry once both sides are online",
+            ],
+        });
+    }
+    if msg_lower.contains("[r2_initiate]")
+        || msg_lower.contains("[r2_signaling]")
+        || msg_lower.contains("[r2_candidate_empty]")
+        || msg_lower.contains("[r2_warmup]")
+    {
+        return Some(ErrorAdvice {
+            summary: "WAN R2 negotiation failed before QUIC data transfer started",
+            suggestions: &[
+                "Verify both peers can reach the same rendezvous and use valid JWTs",
+                "Check clock skew and WebSocket reachability to `/v1/sessions/{id}/ws`",
+                "If this keeps failing, retry from a simpler network (e.g. IPv6/public) first",
+            ],
+        });
+    }
+
     // ── 1. Connection refused ────────────────────────────────────────────────
     if msg_lower.contains("connection refused")
         || msg_lower.contains("econnrefused")
@@ -213,6 +249,20 @@ mod tests {
         let adv = advice_for(&err).unwrap();
         assert!(adv.summary.contains("receiver is not running"));
         assert!(!adv.suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_advice_r2_missing_token() {
+        let err = AeroSyncError::InvalidConfig("[R2_NO_TOKEN] missing".to_string());
+        let adv = advice_for(&err).unwrap();
+        assert!(adv.summary.contains("token"));
+    }
+
+    #[test]
+    fn test_advice_r2_signaling_failure() {
+        let err = AeroSyncError::Network("[R2_SIGNALING] ws closed".to_string());
+        let adv = advice_for(&err).unwrap();
+        assert!(adv.summary.contains("R2 negotiation"));
     }
 
     #[test]
