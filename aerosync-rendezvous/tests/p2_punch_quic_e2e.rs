@@ -113,7 +113,8 @@ async fn p2_signaling_punch_and_quic_local_e2e() {
             "server_reflexive": addr_a.to_string(),
             "local": []
         })
-        .to_string(),
+        .to_string()
+        .into(),
     ))
     .await
     .unwrap();
@@ -123,7 +124,8 @@ async fn p2_signaling_punch_and_quic_local_e2e() {
             "server_reflexive": addr_b.to_string(),
             "local": []
         })
-        .to_string(),
+        .to_string()
+        .into(),
     ))
     .await
     .unwrap();
@@ -232,7 +234,7 @@ async fn next_text_frame(
         .unwrap()
         .unwrap();
     match msg {
-        WsMessage::Text(s) => s,
+        WsMessage::Text(s) => s.to_string(),
         other => panic!("expected text frame, got {other:?}"),
     }
 }

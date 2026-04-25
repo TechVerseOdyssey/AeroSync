@@ -181,6 +181,37 @@ def test_receiver_factory_accepts_config_kwarg(tmp_path: Path) -> None:
     assert r.name == "alice"
 
 
+def test_receiver_rendezvous_missing_token_raises_typed_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AEROSYNC_RENDEZVOUS_TOKEN", raising=False)
+    cfg = aerosync.Config(rendezvous_url="http://127.0.0.1:8787")
+
+    async def run() -> None:
+        async with aerosync.receiver(
+            name="alice", listen="127.0.0.1:0", save_dir=tmp_path, config=cfg
+        ):
+            pass
+
+    with pytest.raises(aerosync.ConfigError) as exc:
+        asyncio.run(run())
+    assert getattr(exc.value, "code", "") == "r2_no_token"
+
+
+def test_receiver_rendezvous_heartbeat_failure_is_connection_error(tmp_path: Path) -> None:
+    cfg = aerosync.Config(rendezvous_url="http://127.0.0.1:1", auth_token="dummy-jwt")
+
+    async def run() -> None:
+        async with aerosync.receiver(
+            name="alice", listen="127.0.0.1:0", save_dir=tmp_path, config=cfg
+        ):
+            pass
+
+    with pytest.raises(aerosync.ConnectionError) as exc:
+        asyncio.run(run())
+    assert getattr(exc.value, "code", "") == "r2_negotiation"
+
+
 def test_client_factory_accepts_none_config() -> None:
     """`config=None` is identical to omitting the kwarg."""
     a = aerosync.client(config=None)

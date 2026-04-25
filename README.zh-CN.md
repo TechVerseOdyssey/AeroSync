@@ -201,6 +201,12 @@ aerosync send ./file.csv ftp://ftpserver:21/data/file.csv
 - **`[R2_CANDIDATE_EMPTY]`**：信令没有返回可用的远端 socket 地址。
 - **`[R2_WARMUP]` / `[R2_SOCKET]`**：本地 UDP 暖包/套接字初始化失败。
 
+当前范围/限制（v0.3.0-rc）：
+- 只有目标是裸格式 `peer@rendezvous-host:port` 时才会尝试 R2 信令+打洞。
+  若带路径后缀（例如 `peer@host:port/path/file.bin`），客户端会走 lookup +
+  目的地址改写（HTTP `/upload/...`），不会进入 R2 信令流程。
+- 目前还没有自动 R3 中继回退；R2 失败会直接以带上述标签的传输错误返回。
+
 快速排查：
 
 ```bash

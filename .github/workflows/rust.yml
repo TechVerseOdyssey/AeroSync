@@ -75,6 +75,27 @@ jobs:
           key: ci-clippy
       - run: ./scripts/rust-gate.sh clippy
 
+  r2-wan-readiness:
+    name: R2 WAN readiness (targeted)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-r2-wan-readiness
+      - name: Targeted R2 failure-path tests
+        run: |
+          cargo test -p aerosync --lib --no-default-features --features http,quic,wan-rendezvous test_peer_at_destination_without_token_is_config_error --verbose
+          cargo test -p aerosync --lib --no-default-features --features http,quic,wan-rendezvous test_r2_peer_unseen_with_path_suffix_is_tagged --verbose
+          cargo test -p aerosync --lib --no-default-features --features http,quic,wan-rendezvous test_r2_initiate_failure_is_tagged --verbose
+          cargo test -p aerosync --lib --no-default-features --features http,quic,wan-rendezvous test_r2_signaling_close_before_punch_is_tagged --verbose
+          cargo test -p aerosync --lib --no-default-features --features http,quic,wan-rendezvous test_r2_candidate_empty_is_tagged --verbose
+      - name: Clippy gate (R2 feature slice)
+        run: cargo clippy -p aerosync --tests --no-default-features --features http,quic,wan-rendezvous -- -D warnings
+
   msrv:
     name: MSRV (1.89)
     runs-on: ubuntu-latest

@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`aerosync-rendezvous`:** in-memory hub per session — relays `candidates`
   and broadcasts synchronized `punch_at`. R3 byte relay still **HTTP 501**.
 
+### Added (release-readiness coverage: R2 WAN failures)
+
+- **Rust targeted tests (`src/protocols/adapter.rs`)** now exercise tagged R2
+  failure paths in-process with a local mock rendezvous server:
+  `R2_NO_TOKEN`, `R2_PEER_UNSEEN`, `R2_INITIATE`, `R2_SIGNALING`
+  (WebSocket closes before `punch_at`), and `R2_CANDIDATE_EMPTY`.
+- **Python error mapping tests (`aerosync-py/src/errors.rs`)** now explicitly
+  assert `R2_PEER_UNSEEN`, `R2_INITIATE`, and `R2_CANDIDATE_EMPTY` map to the
+  documented typed SDK exceptions / error codes.
+- **CI (`.github/workflows/rust.yml`)** adds a focused `R2 WAN readiness`
+  job: targeted R2 tests plus a feature-sliced clippy gate
+  (`http,quic,wan-rendezvous`) to keep coverage high without running a second
+  full-workspace matrix.
+
 ### Added (v0.4 — Engine ↔ `TransferSession` + wire `session_id`, Phase 3.4e–g)
 
 - **Domain / wire:** `Metadata.session_id` (proto field `10`); `MetadataJson` + builder path;

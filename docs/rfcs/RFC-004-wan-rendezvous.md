@@ -61,6 +61,10 @@ blurb below matches the **tree as of 2026-04**; for release notes use
   **Wire-up** of a shared `UdpSocket` + `quinn::Endpoint` into
   `QuicTransfer` / `AutoAdapter` (§6.3) is not done yet. R3 relay is still
   **HTTP 501** on the server.
+- **Release-readiness tests (2026-04):** focused in-tree tests cover tagged R2
+  failure paths (`R2_NO_TOKEN`, `R2_PEER_UNSEEN`, `R2_INITIATE`,
+  `R2_SIGNALING`, `R2_CANDIDATE_EMPTY`) and keep behavior stable while R2/R3
+  data-plane integration remains in progress.
 
 ### Not yet implemented (vs this RFC)
 

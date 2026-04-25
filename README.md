@@ -293,6 +293,13 @@ When `peer@rendezvous-host:port` uses the R2 punch path, errors include stable t
 - **`[R2_CANDIDATE_EMPTY]`** — signaling returned no usable remote socket address.
 - **`[R2_WARMUP]` / `[R2_SOCKET]`** — local UDP warmup/socket setup failed.
 
+Current scope/limits (v0.3.0-rc line):
+- R2 signaling+punch is attempted only for bare `peer@rendezvous-host:port` destinations.
+  If a path suffix is present (for example `peer@host:port/path/file.bin`), the client does
+  lookup + direct upload URL rewrite and does not enter the R2 signaling path.
+- There is no automatic R3 relay fallback yet; R2 failures currently surface as transfer errors
+  with the tags above.
+
 Quick checks:
 
 ```bash
