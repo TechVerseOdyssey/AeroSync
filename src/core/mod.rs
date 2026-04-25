@@ -95,6 +95,7 @@ pub use aerosync_domain::storage::{
     HistoryStorage, ReceiptJournalRecord, ReceiptJournalStorage, ReceiptSide, RecoverableReceipt,
     ResumeStorage,
 };
+pub use aerosync_infra::history_sqlite::SqliteHistoryStore;
 pub use audit::{
     AuditEntry, AuditEvent, AuditLogger, AuditRecord, AuditResult, Direction as AuditDirection,
 };

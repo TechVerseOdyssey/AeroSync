@@ -51,11 +51,81 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-// Test-only: HashMap is used by metadata-filter unit tests below.
-// (After Phase 2.1b moved the HistoryQuery struct out of this file,
-// HashMap is no longer needed in lib code.)
-#[cfg(test)]
-use std::collections::HashMap;
+/// Apply [`HistoryQuery`] filters in memory, sort by `completed_at`
+/// descending, then apply `limit`. Shared by the JSONL
+/// [`HistoryStore`] and [`crate::history_sqlite::SqliteHistoryStore`].
+pub fn filter_history_entries(mut all: Vec<HistoryEntry>, q: &HistoryQuery) -> Vec<HistoryEntry> {
+    if let Some(ref dir) = q.direction {
+        all.retain(|e| &e.direction == dir);
+    }
+    if let Some(ref proto) = q.protocol {
+        all.retain(|e| &e.protocol == proto);
+    }
+    if q.success_only {
+        all.retain(|e| e.success);
+    }
+    if !q.metadata_eq.is_empty() {
+        all.retain(|e| match &e.metadata {
+            Some(m) => q
+                .metadata_eq
+                .iter()
+                .all(|(k, v)| m.user_metadata.get(k).map(|x| x == v).unwrap_or(false)),
+            None => false,
+        });
+    }
+    if let Some(ref tid) = q.trace_id {
+        all.retain(|e| {
+            e.metadata
+                .as_ref()
+                .and_then(|m| m.trace_id.as_deref())
+                .map(|x| x == tid)
+                .unwrap_or(false)
+        });
+    }
+    if let Some(lc) = q.lifecycle {
+        let target_label = match lc {
+            Lifecycle::Unspecified => None,
+            Lifecycle::Transient => Some("transient"),
+            Lifecycle::Durable => Some("durable"),
+            Lifecycle::Ephemeral => Some("ephemeral"),
+        };
+        if let Some(label) = target_label {
+            all.retain(|e| {
+                e.metadata
+                    .as_ref()
+                    .and_then(|m| m.lifecycle.as_deref())
+                    .map(|x| x == label)
+                    .unwrap_or(false)
+            });
+        }
+    }
+    if let Some(since) = q.since {
+        let cutoff = since.timestamp().max(0) as u64;
+        all.retain(|e| e.completed_at >= cutoff);
+    }
+    if let Some(until) = q.until {
+        let cutoff = until.timestamp().max(0) as u64;
+        all.retain(|e| e.completed_at <= cutoff);
+    }
+    if let Some(ref needle) = q.content_type_contains {
+        if !needle.is_empty() {
+            let needle_lc = needle.to_lowercase();
+            all.retain(|e| {
+                e.metadata
+                    .as_ref()
+                    .map(|m| m.content_type.to_lowercase().contains(&needle_lc))
+                    .unwrap_or(false)
+            });
+        }
+    }
+
+    all.sort_by_key(|e| std::cmp::Reverse(e.completed_at));
+
+    if q.limit > 0 && all.len() > q.limit {
+        all.truncate(q.limit);
+    }
+    all
+}
 
 /// JSONL 格式传输历史存储
 pub struct HistoryStore {
@@ -134,83 +204,8 @@ impl HistoryStore {
     /// truncated to `limit`. See [`HistoryQuery`] for the per-field
     /// semantics and the SQLite-migration trade-off note.
     pub async fn query(&self, q: &HistoryQuery) -> Result<Vec<HistoryEntry>> {
-        let mut all = self.read_all().await?;
-
-        if let Some(ref dir) = q.direction {
-            all.retain(|e| &e.direction == dir);
-        }
-        if let Some(ref proto) = q.protocol {
-            all.retain(|e| &e.protocol == proto);
-        }
-        if q.success_only {
-            all.retain(|e| e.success);
-        }
-        if !q.metadata_eq.is_empty() {
-            all.retain(|e| match &e.metadata {
-                Some(m) => q
-                    .metadata_eq
-                    .iter()
-                    .all(|(k, v)| m.user_metadata.get(k).map(|x| x == v).unwrap_or(false)),
-                None => false,
-            });
-        }
-        if let Some(ref tid) = q.trace_id {
-            all.retain(|e| {
-                e.metadata
-                    .as_ref()
-                    .and_then(|m| m.trace_id.as_deref())
-                    .map(|x| x == tid)
-                    .unwrap_or(false)
-            });
-        }
-        if let Some(lc) = q.lifecycle {
-            let target_label = match lc {
-                Lifecycle::Unspecified => None,
-                Lifecycle::Transient => Some("transient"),
-                Lifecycle::Durable => Some("durable"),
-                Lifecycle::Ephemeral => Some("ephemeral"),
-            };
-            if let Some(label) = target_label {
-                all.retain(|e| {
-                    e.metadata
-                        .as_ref()
-                        .and_then(|m| m.lifecycle.as_deref())
-                        .map(|x| x == label)
-                        .unwrap_or(false)
-                });
-            } else {
-                // `Lifecycle::Unspecified` is a "match anything with
-                // no lifecycle hint" probe — treat as no-op rather
-                // than silently dropping every record. This mirrors
-                // the proto-level meaning (default value).
-            }
-        }
-        if let Some(since) = q.since {
-            let cutoff = since.timestamp().max(0) as u64;
-            all.retain(|e| e.completed_at >= cutoff);
-        }
-        if let Some(until) = q.until {
-            let cutoff = until.timestamp().max(0) as u64;
-            all.retain(|e| e.completed_at <= cutoff);
-        }
-        if let Some(ref needle) = q.content_type_contains {
-            if !needle.is_empty() {
-                let needle_lc = needle.to_lowercase();
-                all.retain(|e| {
-                    e.metadata
-                        .as_ref()
-                        .map(|m| m.content_type.to_lowercase().contains(&needle_lc))
-                        .unwrap_or(false)
-                });
-            }
-        }
-
-        all.sort_by_key(|e| std::cmp::Reverse(e.completed_at));
-
-        if q.limit > 0 && all.len() > q.limit {
-            all.truncate(q.limit);
-        }
-        Ok(all)
+        let all = self.read_all().await?;
+        Ok(filter_history_entries(all, q))
     }
 
     /// Patch the [`Metadata`] envelope onto an existing record
@@ -560,6 +555,7 @@ impl HistoryStorage for HistoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     async fn tmp_store() -> (HistoryStore, TempDir) {

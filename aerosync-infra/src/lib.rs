@@ -100,6 +100,13 @@ pub mod receipt_journal;
 /// same back-compat pattern as Phase 2.2 (`resume`).
 pub mod history;
 
+/// SQLite [`aerosync_domain::storage::HistoryStorage`] (RFC-003 §7;
+/// `docs/ARCHITECTURE_AND_DESIGN.md` §12.2). Opt-in: callers open
+/// [`history_sqlite::SqliteHistoryStore`] instead of JSONL
+/// [`history::HistoryStore`]; the root engine still defaults to JSONL
+/// until a config switch lands.
+pub mod history_sqlite;
+
 // ── Phase 4 modules ───────────────────────────────────────────────────
 //
 // pub mod config;
