@@ -45,7 +45,7 @@ pub mod runtime;
 
 use client::PyClient;
 use receipt::{PyReceipt, PyReceiptWatcher};
-use receiver::{PyIncomingFile, PyReceiver};
+use receiver::{PyIncomingFile, PyReceiver, RendezvousConfig};
 use records::{PyHistoryEntry, PyPeer, PyProgress, PyRecoverableReceipt};
 
 /// Returns the PyPI package version (= `Cargo.toml` version).
@@ -133,9 +133,26 @@ fn make_receiver(
             Some(std::time::Duration::from_secs_f64(secs))
         }
     };
+    let rendezvous = resolved.rendezvous_url.as_ref().map(|base_url| {
+        let token = resolved
+            .auth_token
+            .clone()
+            .or_else(|| std::env::var("AEROSYNC_RENDEZVOUS_TOKEN").ok())
+            .unwrap_or_default();
+        let namespace = std::env::var("AEROSYNC_RENDEZVOUS_NAMESPACE")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        RendezvousConfig {
+            base_url: base_url.clone(),
+            bearer_token: token,
+            namespace,
+        }
+    });
     let address = format!("{}:{}", cfg.bind_address, cfg.http_port);
     let inner = FileReceiver::new(cfg);
-    Ok(PyReceiver::with_idle_timeout(inner, name, address, idle))
+    Ok(PyReceiver::with_idle_timeout_and_rendezvous(
+        inner, name, address, idle, rendezvous,
+    ))
 }
 
 /// `await aerosync.discover(timeout=5.0)` — returns a list of [`PyPeer`].

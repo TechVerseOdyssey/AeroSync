@@ -26,7 +26,7 @@ use crate::wan::rendezvous::RendezvousClient;
 #[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
 use crate::wan::{
     hole_punch::udp_punch_warmup,
-    punch_signaling::{exchange_candidates_and_wait_punch, RemoteCandidates},
+    punch_signaling::{exchange_candidates_and_wait_punch_with_timeouts, RemoteCandidates},
 };
 
 pub struct AutoAdapter {
@@ -61,6 +61,15 @@ pub struct AutoAdapter {
 }
 
 impl AutoAdapter {
+    #[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
+    const R2_INITIATE_TIMEOUT: StdDuration = StdDuration::from_secs(8);
+    #[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
+    const R2_WS_CONNECT_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+    #[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
+    const R2_PUNCH_TIMEOUT: StdDuration = StdDuration::from_secs(8);
+    #[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
+    const R2_CONNECT_TIMEOUT: StdDuration = StdDuration::from_secs(8);
+
     #[cfg(feature = "quic")]
     pub fn new(http_config: HttpConfig, quic_config_base: QuicConfig) -> Self {
         // 构建一个共享的 reqwest::Client，连接池在所有上传/下载请求间复用
@@ -223,10 +232,7 @@ impl AutoAdapter {
         #[cfg(feature = "wan-rendezvous")]
         {
             let dest = task.destination.trim();
-            let (prefix, rel_path) = match dest.find('/') {
-                Some(i) => (&dest[..i], &dest[i + 1..]),
-                None => (dest, ""),
-            };
+            let (prefix, rel_path) = split_destination_prefix_and_path(dest);
             if let Some((peer_name, authority)) =
                 crate::wan::rendezvous::parse_peer_at_rendezvous(prefix)
             {
@@ -249,6 +255,13 @@ impl AutoAdapter {
                     .trim_start_matches("http://")
                     .trim_start_matches("https://");
                 let mut out = task.clone();
+                // Explicit path-suffix fallback semantics:
+                // - `peer@rv-host`           -> `http://<observed>/upload`
+                // - `peer@rv-host/path/tail` -> `http://<observed>/upload/path/tail`
+                //
+                // R2 punch/QUIC path intentionally only handles the no-suffix shape
+                // (see `try_r2_upload`), so any suffix keeps the historical HTTP upload
+                // behavior through rendezvous lookup without changing user-visible URLs.
                 out.destination = if rel_path.is_empty() {
                     format!("http://{addr}/upload")
                 } else {
@@ -272,25 +285,32 @@ impl AutoAdapter {
     ) -> Option<Result<()>> {
         let rv = self.rendezvous.as_ref()?;
         let dest = task.destination.trim();
-        let (prefix, rel_path) = match dest.find('/') {
-            Some(i) => (&dest[..i], &dest[i + 1..]),
-            None => (dest, ""),
-        };
+        let (prefix, rel_path) = split_destination_prefix_and_path(dest);
         let (peer_name, authority) = crate::wan::rendezvous::parse_peer_at_rendezvous(prefix)?;
         if !rel_path.is_empty() {
+            // Any `peer@host/path` destination is explicitly NOT an R2
+            // punch candidate. We return `None` so caller falls back to
+            // `resolve_task_destination` and preserves `/upload/{path}`.
             return None;
         }
 
         let rendezvous_base = format!("http://{}", authority.trim_start_matches('/'));
         let fut = async {
-            let init = rv
-                .initiate_session(&rendezvous_base, &peer_name)
-                .await
-                .map_err(|e| {
-                    AeroSyncError::Network(format!(
-                        "[R2_INITIATE] initiate_session failed for `{peer_name}`: {e}"
-                    ))
-                })?;
+            let init = run_r2_stage_with_timeout(
+                Self::R2_INITIATE_TIMEOUT,
+                "R2_TIMEOUT_INITIATE",
+                format!("initiate_session timed out for `{peer_name}`"),
+                rv.initiate_session(&rendezvous_base, &peer_name),
+            )
+            .await
+            .map_err(|e| match e {
+                AeroSyncError::Network(s) if s.contains("[R2_TIMEOUT_INITIATE]") => {
+                    AeroSyncError::Network(s)
+                }
+                other => AeroSyncError::Network(format!(
+                    "[R2_INITIATE] initiate_session failed for `{peer_name}`: {other}"
+                )),
+            })?;
             let ws_url = rv
                 .signaling_websocket_url(&rendezvous_base, &init.signaling.websocket_path)
                 .map_err(|e| {
@@ -306,10 +326,12 @@ impl AutoAdapter {
                 .local_addr()
                 .map_err(|e| AeroSyncError::Network(format!("R2 UDP local addr: {e}")))?;
             let local_s = local.to_string();
-            let (punch, remotes) = exchange_candidates_and_wait_punch(
+            let (punch, remotes) = exchange_candidates_and_wait_punch_with_timeouts(
                 &ws_url,
                 &local_s,
                 vec![local_s.clone()],
+                Self::R2_WS_CONNECT_TIMEOUT,
+                Self::R2_PUNCH_TIMEOUT,
             )
             .await
             .map_err(|e| {
@@ -345,7 +367,13 @@ impl AutoAdapter {
                     });
                 }
             });
-            qt.upload_file(task, tx).await
+            run_r2_stage_with_timeout(
+                Self::R2_CONNECT_TIMEOUT,
+                "R2_TIMEOUT_CONNECT",
+                "QUIC connect/upload did not complete".to_string(),
+                qt.upload_file(task, tx),
+            )
+            .await
         };
         Some(fut.await)
     }
@@ -615,19 +643,49 @@ fn extract_base_url(url: &str) -> Result<String> {
     })
 }
 
+/// Split destination into `prefix` and optional `/path/suffix`.
+/// Returns `(prefix, rel_path_without_leading_slash)`.
+///
+/// Examples:
+/// - `alice@rv.example:8787` -> (`alice@rv.example:8787`, ``)
+/// - `alice@rv.example:8787/team/docs` -> (`alice@rv.example:8787`, `team/docs`)
+fn split_destination_prefix_and_path(dest: &str) -> (&str, &str) {
+    match dest.find('/') {
+        Some(i) => (&dest[..i], &dest[i + 1..]),
+        None => (dest, ""),
+    }
+}
+
 #[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
 fn pick_remote_candidate(remotes: &[RemoteCandidates]) -> Option<SocketAddr> {
+    let mut first_reflexive: Option<SocketAddr> = None;
+    let mut first_local: Option<SocketAddr> = None;
+
+    // Policy:
+    // 1) Prefer any parseable IPv6 candidate.
+    // 2) Otherwise prefer server-reflexive.
+    // 3) Finally fall back to first parseable local candidate.
     for r in remotes {
         if let Ok(a) = r.server_reflexive.trim().parse::<SocketAddr>() {
-            return Some(a);
+            if a.is_ipv6() {
+                return Some(a);
+            }
+            if first_reflexive.is_none() {
+                first_reflexive = Some(a);
+            }
         }
         for l in &r.local {
             if let Ok(a) = l.trim().parse::<SocketAddr>() {
-                return Some(a);
+                if a.is_ipv6() {
+                    return Some(a);
+                }
+                if first_local.is_none() {
+                    first_local = Some(a);
+                }
             }
         }
     }
-    None
+    first_reflexive.or(first_local)
 }
 
 #[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
@@ -642,6 +700,24 @@ async fn wait_until_punch_time_ms(target_ms: u64) {
     let delta = target_ms - now;
     let capped = delta.min(2_000);
     tokio::time::sleep(StdDuration::from_millis(capped)).await;
+}
+
+#[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
+async fn run_r2_stage_with_timeout<T, F>(
+    timeout: StdDuration,
+    timeout_code: &'static str,
+    timeout_message: String,
+    fut: F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    tokio::time::timeout(timeout, fut).await.map_err(|_| {
+        AeroSyncError::Network(format!(
+            "[{timeout_code}] {timeout_message} after {} ms",
+            timeout.as_millis()
+        ))
+    })?
 }
 
 #[cfg(feature = "quic")]
@@ -819,6 +895,42 @@ mod tests {
     }
 
     #[cfg(feature = "wan-rendezvous")]
+    #[test]
+    fn test_pick_remote_candidate_prefers_ipv6_over_ipv4_reflexive() {
+        let remotes = vec![RemoteCandidates {
+            from: "target".to_string(),
+            server_reflexive: "127.0.0.1:7789".to_string(),
+            local: vec!["[2001:db8::10]:9999".to_string()],
+        }];
+        let picked = pick_remote_candidate(&remotes).unwrap();
+        assert_eq!(picked, "[2001:db8::10]:9999".parse().unwrap());
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    #[test]
+    fn test_pick_remote_candidate_falls_back_to_local_parseable() {
+        let remotes = vec![RemoteCandidates {
+            from: "target".to_string(),
+            server_reflexive: "not-an-addr".to_string(),
+            local: vec!["bad".to_string(), "10.0.0.6:4567".to_string()],
+        }];
+        let picked = pick_remote_candidate(&remotes).unwrap();
+        assert_eq!(picked, "10.0.0.6:4567".parse().unwrap());
+    }
+
+    #[test]
+    fn test_split_destination_prefix_and_path() {
+        assert_eq!(
+            split_destination_prefix_and_path("alice@rv.example.com:8787"),
+            ("alice@rv.example.com:8787", "")
+        );
+        assert_eq!(
+            split_destination_prefix_and_path("alice@rv.example.com:8787/folder/file.bin"),
+            ("alice@rv.example.com:8787", "folder/file.bin")
+        );
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
     #[tokio::test]
     async fn test_peer_at_destination_without_token_is_config_error() {
         use tempfile::tempdir;
@@ -840,6 +952,269 @@ mod tests {
         match err {
             crate::core::AeroSyncError::InvalidConfig(s) => {
                 assert!(s.contains("[R2_NO_TOKEN]"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    #[derive(Clone, Copy)]
+    enum InitiateScript {
+        Success,
+        Fail,
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    #[derive(Clone, Copy)]
+    enum WsScript {
+        CloseImmediately,
+        CandidateEmptyThenPunch,
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    #[derive(Clone)]
+    struct MockRvState {
+        initiate: InitiateScript,
+        ws: WsScript,
+        observed_addr: Option<String>,
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    async fn spawn_mock_rendezvous(state: MockRvState) -> String {
+        use axum::extract::ws::{Message as WsMessage, WebSocketUpgrade};
+        use axum::extract::{Path, State};
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use serde_json::json;
+
+        async fn lookup_peer(
+            Path(name): Path<String>,
+            State(st): State<MockRvState>,
+        ) -> impl IntoResponse {
+            Json(json!({
+                "peer_id": "peer-test",
+                "namespace": "",
+                "name": name,
+                "public_key": "pubkey",
+                "capabilities": 0u64,
+                "observed_addr": st.observed_addr,
+                "last_seen_at": 0i64
+            }))
+        }
+
+        async fn initiate(State(st): State<MockRvState>) -> impl IntoResponse {
+            match st.initiate {
+                InitiateScript::Fail => (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(json!({ "error": "upstream timeout while brokering session" })),
+                )
+                    .into_response(),
+                InitiateScript::Success => Json(json!({
+                    "session_id": "sess-1",
+                    "implementation_status": {},
+                    "signaling": {
+                        "websocket_path": "/v1/sessions/sess-1/ws",
+                        "quic_data_plane": "draft"
+                    },
+                    "stun": null
+                }))
+                .into_response(),
+            }
+        }
+
+        async fn ws_handler(
+            ws: WebSocketUpgrade,
+            State(st): State<MockRvState>,
+        ) -> impl IntoResponse {
+            ws.on_upgrade(move |mut socket| async move {
+                if let Some(Ok(WsMessage::Text(_))) = socket.recv().await {
+                    match st.ws {
+                        WsScript::CloseImmediately => {
+                            let _ = socket.close().await;
+                        }
+                        WsScript::CandidateEmptyThenPunch => {
+                            let _ = socket
+                                .send(WsMessage::Text(
+                                    json!({
+                                        "type": "remote.candidates",
+                                        "from": "target",
+                                        "server_reflexive": "not-a-socket-addr",
+                                        "local": ["also-not-an-addr"]
+                                    })
+                                    .to_string(),
+                                ))
+                                .await;
+                            let _ = socket
+                                .send(WsMessage::Text(
+                                    json!({
+                                        "type": "punch_at",
+                                        "timestamp_ms": 0u64
+                                    })
+                                    .to_string(),
+                                ))
+                                .await;
+                            let _ = socket.close().await;
+                        }
+                    }
+                }
+            })
+        }
+
+        let app = Router::new()
+            .route("/v1/peers/:name", get(lookup_peer))
+            .route("/v1/sessions/initiate", post(initiate))
+            .route("/v1/sessions/:id/ws", get(ws_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    async fn make_upload_task(file_name: &str, destination: String) -> TransferTask {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(file_name);
+        let mut file = tokio::fs::File::create(&path).await.unwrap();
+        file.write_all(b"r2-test").await.unwrap();
+        file.flush().await.unwrap();
+        // Keep the tempdir alive by moving the file out to a stable temp path.
+        let persisted = std::env::temp_dir().join(format!(
+            "aerosync-r2-test-{}-{}.bin",
+            file_name,
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::copy(&path, &persisted).await.unwrap();
+        TransferTask {
+            id: uuid::Uuid::new_v4(),
+            source_path: persisted,
+            destination,
+            is_upload: true,
+            file_size: 7,
+            sha256: None,
+            metadata: None,
+        }
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    #[tokio::test]
+    async fn test_r2_peer_unseen_with_path_suffix_is_tagged() {
+        let base = spawn_mock_rendezvous(MockRvState {
+            initiate: InitiateScript::Success,
+            ws: WsScript::CloseImmediately,
+            observed_addr: None,
+        })
+        .await;
+        let authority = base.trim_start_matches("http://");
+        let task = make_upload_task(
+            "peer-unseen.bin",
+            format!("alice@{authority}/nested/path.bin"),
+        )
+        .await;
+        let adapter = AutoAdapter::new(HttpConfig::default(), default_quic_config())
+            .with_rendezvous_token("token".to_string());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = adapter.upload(&task, tx).await.unwrap_err();
+        match err {
+            crate::core::AeroSyncError::InvalidConfig(s) => {
+                assert!(s.contains("[R2_PEER_UNSEEN]"), "got: {s}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    #[tokio::test]
+    async fn test_r2_initiate_failure_is_tagged() {
+        let base = spawn_mock_rendezvous(MockRvState {
+            initiate: InitiateScript::Fail,
+            ws: WsScript::CloseImmediately,
+            observed_addr: Some("127.0.0.1:9000".to_string()),
+        })
+        .await;
+        let authority = base.trim_start_matches("http://");
+        let task = make_upload_task("initiate-fail.bin", format!("alice@{authority}")).await;
+        let adapter = AutoAdapter::new(HttpConfig::default(), default_quic_config())
+            .with_rendezvous_token("token".to_string());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = adapter.upload(&task, tx).await.unwrap_err();
+        match err {
+            crate::core::AeroSyncError::Network(s) => {
+                assert!(s.contains("[R2_INITIATE]"), "got: {s}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    #[tokio::test]
+    async fn test_r2_signaling_close_before_punch_is_tagged() {
+        let base = spawn_mock_rendezvous(MockRvState {
+            initiate: InitiateScript::Success,
+            ws: WsScript::CloseImmediately,
+            observed_addr: Some("127.0.0.1:9000".to_string()),
+        })
+        .await;
+        let authority = base.trim_start_matches("http://");
+        let task = make_upload_task("signaling-close.bin", format!("alice@{authority}")).await;
+        let adapter = AutoAdapter::new(HttpConfig::default(), default_quic_config())
+            .with_rendezvous_token("token".to_string());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = adapter.upload(&task, tx).await.unwrap_err();
+        match err {
+            crate::core::AeroSyncError::Network(s) => {
+                assert!(s.contains("[R2_SIGNALING]"), "got: {s}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    #[tokio::test]
+    async fn test_r2_candidate_empty_is_tagged() {
+        let base = spawn_mock_rendezvous(MockRvState {
+            initiate: InitiateScript::Success,
+            ws: WsScript::CandidateEmptyThenPunch,
+            observed_addr: Some("127.0.0.1:9000".to_string()),
+        })
+        .await;
+        let authority = base.trim_start_matches("http://");
+        let task = make_upload_task("candidate-empty.bin", format!("alice@{authority}")).await;
+        let adapter = AutoAdapter::new(HttpConfig::default(), default_quic_config())
+            .with_rendezvous_token("token".to_string());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = adapter.upload(&task, tx).await.unwrap_err();
+        match err {
+            crate::core::AeroSyncError::Network(s) => {
+                assert!(s.contains("[R2_CANDIDATE_EMPTY]"), "got: {s}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "wan-rendezvous")]
+    #[tokio::test]
+    async fn test_r2_stage_timeout_error_code_is_stable() {
+        let err = run_r2_stage_with_timeout(
+            StdDuration::from_millis(10),
+            "R2_TIMEOUT_INITIATE",
+            "initiate_session timed out for `alice`".to_string(),
+            async {
+                tokio::time::sleep(StdDuration::from_millis(50)).await;
+                Ok::<(), AeroSyncError>(())
+            },
+        )
+        .await
+        .unwrap_err();
+        match err {
+            AeroSyncError::Network(s) => {
+                assert!(s.contains("[R2_TIMEOUT_INITIATE]"), "got: {s}");
+                assert!(s.contains("after"), "got: {s}");
             }
             other => panic!("unexpected error: {other:?}"),
         }

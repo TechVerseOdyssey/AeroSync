@@ -213,6 +213,8 @@ pub struct FileReceiver {
     https_handle: Option<tokio::task::JoinHandle<()>>,
     #[cfg(feature = "quic")]
     quic_handle: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(feature = "wan-rendezvous")]
+    rendezvous_handle: Option<tokio::task::JoinHandle<()>>,
     reload_handle: Option<tokio::task::JoinHandle<()>>,
     audit_logger: Option<Arc<AuditLogger>>,
     metrics: Arc<Metrics>,
@@ -254,6 +256,8 @@ impl FileReceiver {
             https_handle: None,
             #[cfg(feature = "quic")]
             quic_handle: None,
+            #[cfg(feature = "wan-rendezvous")]
+            rendezvous_handle: None,
             reload_handle: None,
             audit_logger: None,
             metrics: Metrics::new(),
@@ -480,6 +484,26 @@ impl FileReceiver {
             );
         }
 
+        #[cfg(feature = "wan-rendezvous")]
+        {
+            // Optional receiver-side rendezvous lifecycle:
+            // register + heartbeat + pending-session signaling participation.
+            // Entirely env-gated; no env means no-op.
+            self.rendezvous_handle = crate::wan::receiver_lifecycle::spawn_from_env(
+                *self.local_http_addr.lock().unwrap(),
+                {
+                    #[cfg(feature = "quic")]
+                    {
+                        *self.local_quic_addr.lock().unwrap()
+                    }
+                    #[cfg(not(feature = "quic"))]
+                    {
+                        None
+                    }
+                },
+            );
+        }
+
         if config.enable_https {
             let https_cfg = config.clone();
             let status = Arc::clone(&self.status);
@@ -572,6 +596,10 @@ impl FileReceiver {
         }
         #[cfg(feature = "quic")]
         if let Some(h) = self.quic_handle.take() {
+            h.abort();
+        }
+        #[cfg(feature = "wan-rendezvous")]
+        if let Some(h) = self.rendezvous_handle.take() {
             h.abort();
         }
         if let Some(h) = self.reload_handle.take() {

@@ -81,7 +81,8 @@ impl ResolvedConfig {
 
     /// Apply `auth_token`, `state_dir` to a fresh `TransferConfig` and
     /// trigger the (idempotent) tracing-subscriber init for `log_level`.
-    /// `rendezvous_url` is currently a no-op — see crate-level note.
+    /// `rendezvous_url` is consumed by the receiver factory for WAN
+    /// heartbeat participation, not by `TransferConfig`.
     pub fn build_transfer_config(&self) -> TransferConfig {
         let mut tc = TransferConfig::default();
         if let Some(tok) = &self.auth_token {

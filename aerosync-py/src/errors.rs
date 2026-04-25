@@ -211,6 +211,41 @@ mod tests {
     }
 
     #[test]
+    fn maps_r2_peer_unseen_to_peer_not_found_error() {
+        let e = EngineErr::InvalidConfig(
+            "[R2_PEER_UNSEEN] rendezvous peer has no observed_addr".into(),
+        );
+        let py_err = engine_err_to_py(e);
+        assert_eq!(class_name(&py_err), "PeerNotFoundError");
+        Python::attach(|py| {
+            let code: String = py_err.value(py).getattr("code").unwrap().extract().unwrap();
+            assert_eq!(code, "r2_peer_unseen");
+        });
+    }
+
+    #[test]
+    fn maps_r2_initiate_to_connection_error() {
+        let e = EngineErr::Network("[R2_INITIATE] initiate_session timeout".into());
+        let py_err = engine_err_to_py(e);
+        assert_eq!(class_name(&py_err), "ConnectionError");
+        Python::attach(|py| {
+            let code: String = py_err.value(py).getattr("code").unwrap().extract().unwrap();
+            assert_eq!(code, "r2_negotiation");
+        });
+    }
+
+    #[test]
+    fn maps_r2_candidate_empty_to_connection_error() {
+        let e = EngineErr::Network("[R2_CANDIDATE_EMPTY] no remote candidate".into());
+        let py_err = engine_err_to_py(e);
+        assert_eq!(class_name(&py_err), "ConnectionError");
+        Python::attach(|py| {
+            let code: String = py_err.value(py).getattr("code").unwrap().extract().unwrap();
+            assert_eq!(code, "r2_negotiation");
+        });
+    }
+
+    #[test]
     fn anyhow_passthrough_lands_on_engine_error() {
         let py_err = anyhow_to_py(anyhow::anyhow!("kaboom"));
         assert_eq!(class_name(&py_err), "EngineError");

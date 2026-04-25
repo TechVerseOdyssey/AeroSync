@@ -110,6 +110,7 @@ pub fn app_router(state: Arc<AppState>) -> Router {
         .route("/v1/peers/heartbeat", post(peers::heartbeat))
         .route("/v1/peers/:name", get(peers::lookup_peer))
         .route("/v1/sessions/initiate", post(sessions::initiate_session))
+        .route("/v1/sessions/pending", get(sessions::pending_sessions))
         .route("/v1/sessions/:id/ws", get(sessions::session_websocket))
         .route(
             "/v1/relay/:session_id/up",

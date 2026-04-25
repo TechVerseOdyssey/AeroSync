@@ -32,6 +32,7 @@ use aerosync::core::receipt::{Event, Receipt, Receiver as RxSide};
 #[cfg(test)]
 use aerosync::core::server::ServerConfig;
 use aerosync::core::server::{FileReceiver, WsEvent};
+use aerosync::core::AeroSyncError as EngineErr;
 use aerosync_domain::session::SessionId;
 use aerosync_proto::{Lifecycle, Metadata};
 use base64::engine::general_purpose::STANDARD as B64_STD;
@@ -39,6 +40,10 @@ use base64::Engine as _;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::Client as HttpClient;
+use serde::Deserialize;
+use serde_json::json;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -103,11 +108,15 @@ pub struct PyReceiver {
     /// async one) so the timeout-check critical section is a couple
     /// of nanoseconds and never crosses an `.await`.
     pub(crate) last_yield_at: Arc<StdMutex<Instant>>,
+    /// Optional rendezvous heartbeat config derived from Python `Config`.
+    pub(crate) rendezvous: Option<RendezvousConfig>,
+    pub(crate) rendezvous_stop: Arc<AtomicBool>,
+    pub(crate) rendezvous_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl PyReceiver {
     pub fn new(inner: FileReceiver, name: Option<String>, address: String) -> Self {
-        Self::with_idle_timeout(inner, name, address, None)
+        Self::with_idle_timeout_and_rendezvous(inner, name, address, None, None)
     }
 
     /// Same as [`PyReceiver::new`] but also sets the optional
@@ -119,6 +128,16 @@ impl PyReceiver {
         name: Option<String>,
         address: String,
         idle_timeout: Option<Duration>,
+    ) -> Self {
+        Self::with_idle_timeout_and_rendezvous(inner, name, address, idle_timeout, None)
+    }
+
+    pub fn with_idle_timeout_and_rendezvous(
+        inner: FileReceiver,
+        name: Option<String>,
+        address: String,
+        idle_timeout: Option<Duration>,
+        rendezvous: Option<RendezvousConfig>,
     ) -> Self {
         let bound_http_addr = inner.local_http_addr_handle();
         let bound_quic_addr = inner.local_quic_addr_handle();
@@ -133,8 +152,75 @@ impl PyReceiver {
             started: Arc::new(AtomicBool::new(false)),
             idle_timeout,
             last_yield_at: Arc::new(StdMutex::new(Instant::now())),
+            rendezvous,
+            rendezvous_stop: Arc::new(AtomicBool::new(false)),
+            rendezvous_task: Arc::new(Mutex::new(None)),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct RendezvousConfig {
+    pub base_url: String,
+    pub bearer_token: String,
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeartbeatResponse {
+    jwt: String,
+}
+
+async fn rendezvous_heartbeat_once(
+    client: &HttpClient,
+    cfg: &RendezvousConfig,
+    observed_addr: &str,
+) -> Result<String, EngineErr> {
+    let mut headers = HeaderMap::new();
+    let auth = format!("Bearer {}", cfg.bearer_token);
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&auth).map_err(|e| {
+            EngineErr::InvalidConfig(format!("[R2_NO_TOKEN] bad bearer token: {e}"))
+        })?,
+    );
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if let Some(ns) = cfg.namespace.as_ref().filter(|s| !s.trim().is_empty()) {
+        headers.insert(
+            "x-aerosync-namespace",
+            HeaderValue::from_str(ns).map_err(|e| {
+                EngineErr::InvalidConfig(format!("[R2_NO_TOKEN] invalid rendezvous namespace: {e}"))
+            })?,
+        );
+    }
+    let endpoint = format!("{}/v1/peers/heartbeat", cfg.base_url.trim_end_matches('/'));
+    let resp = client
+        .post(&endpoint)
+        .headers(headers)
+        .json(&json!({ "observed_addr": observed_addr }))
+        .send()
+        .await
+        .map_err(|e| {
+            EngineErr::Network(format!("[R2_SIGNALING] rendezvous heartbeat failed: {e}"))
+        })?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(EngineErr::Network(format!(
+            "[R2_SIGNALING] rendezvous heartbeat HTTP {status}: {body}"
+        )));
+    }
+    let payload: HeartbeatResponse = resp.json().await.map_err(|e| {
+        EngineErr::Network(format!("[R2_SIGNALING] heartbeat JSON decode failed: {e}"))
+    })?;
+    Ok(payload.jwt)
+}
+
+fn observed_addr_for_r2(
+    http_addr: Option<SocketAddr>,
+    quic_addr: Option<SocketAddr>,
+) -> Option<String> {
+    quic_addr.or(http_addr).map(|a| a.to_string())
 }
 
 #[pymethods]
@@ -203,6 +289,11 @@ impl PyReceiver {
         let ws_rx = Arc::clone(&slf.bind(py).borrow().ws_rx);
         let started = Arc::clone(&slf.bind(py).borrow().started);
         let last_yield_at = Arc::clone(&slf.bind(py).borrow().last_yield_at);
+        let bound_http = Arc::clone(&slf.bind(py).borrow().bound_http_addr);
+        let bound_quic = Arc::clone(&slf.bind(py).borrow().bound_quic_addr);
+        let rendezvous = slf.bind(py).borrow().rendezvous.clone();
+        let rendezvous_stop = Arc::clone(&slf.bind(py).borrow().rendezvous_stop);
+        let rendezvous_task = Arc::clone(&slf.bind(py).borrow().rendezvous_task);
         future_into_py(py, async move {
             let rx = {
                 let guard = inner.lock().await;
@@ -218,6 +309,49 @@ impl PyReceiver {
             // receiver minutes before entering its `async with`
             // block.
             *last_yield_at.lock().unwrap() = Instant::now();
+            if let Some(mut rv) = rendezvous {
+                let observed =
+                    observed_addr_for_r2(*bound_http.lock().unwrap(), *bound_quic.lock().unwrap())
+                        .ok_or_else(|| {
+                            engine_err_to_py(EngineErr::Network(
+                                "[R2_SIGNALING] receiver started but has no bound address"
+                                    .to_string(),
+                            ))
+                        })?;
+                if rv.bearer_token.trim().is_empty() {
+                    return Err(engine_err_to_py(EngineErr::InvalidConfig(
+                        "[R2_NO_TOKEN] receiver rendezvous heartbeat requires auth_token"
+                            .to_string(),
+                    )));
+                }
+                let client = HttpClient::new();
+                let fresh = rendezvous_heartbeat_once(&client, &rv, &observed)
+                    .await
+                    .map_err(engine_err_to_py)?;
+                rv.bearer_token = fresh;
+                rendezvous_stop.store(false, Ordering::SeqCst);
+                let stop = Arc::clone(&rendezvous_stop);
+                let task = tokio::spawn(async move {
+                    let client = HttpClient::new();
+                    let mut cfg = rv;
+                    loop {
+                        if stop.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        if stop.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        match rendezvous_heartbeat_once(&client, &cfg, &observed).await {
+                            Ok(jwt) => cfg.bearer_token = jwt,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "receiver rendezvous heartbeat failed");
+                            }
+                        }
+                    }
+                });
+                *rendezvous_task.lock().await = Some(task);
+            }
             Python::attach(|py| Ok(slf.clone_ref(py)))
         })
     }
@@ -232,7 +366,13 @@ impl PyReceiver {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
         let started = Arc::clone(&self.started);
+        let rendezvous_stop = Arc::clone(&self.rendezvous_stop);
+        let rendezvous_task = Arc::clone(&self.rendezvous_task);
         future_into_py(py, async move {
+            rendezvous_stop.store(true, Ordering::SeqCst);
+            if let Some(handle) = rendezvous_task.lock().await.take() {
+                handle.abort();
+            }
             if started.swap(false, Ordering::SeqCst) {
                 inner.lock().await.stop().await.map_err(engine_err_to_py)?;
             }
@@ -707,5 +847,15 @@ mod tests {
         assert_eq!(py.yielded.load(Ordering::SeqCst), 0);
         py.yielded.store(1, Ordering::SeqCst);
         assert_eq!(py.yielded.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn observed_addr_prefers_quic_when_present() {
+        let http = Some("127.0.0.1:7000".parse::<SocketAddr>().unwrap());
+        let quic = Some("127.0.0.1:9000".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            observed_addr_for_r2(http, quic),
+            Some("127.0.0.1:9000".to_string())
+        );
     }
 }

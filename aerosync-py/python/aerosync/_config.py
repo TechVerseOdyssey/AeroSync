@@ -83,10 +83,12 @@ class Config:
             state, history JSONL, and other per-process artifacts live.
             Defaults to ``~/.config/aerosync`` on Linux/macOS (the
             engine's `dirs_next::config_dir` resolution).
-        rendezvous_url: Optional URL of a rendezvous service for peer
-            discovery beyond mDNS. Reserved for v0.3 — accepted today
-            but currently a no-op (see implementation note in
-            ``client.rs``).
+        rendezvous_url: Optional URL of a rendezvous service. For
+            receiver startup this enables periodic heartbeat
+            participation (`POST /v1/peers/heartbeat`) when an
+            auth token is available; sender `to="peer@host:port"`
+            resolution still uses the authority from the destination
+            string plus the rendezvous token.
         log_level: Initial verbosity for the binding's
             ``tracing-subscriber``. One of ``trace`` / ``debug`` /
             ``info`` / ``warn`` / ``error`` / ``off``. Applied at most

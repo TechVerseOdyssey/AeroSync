@@ -81,22 +81,78 @@ pub async fn exchange_candidates_and_wait_punch(
     server_reflexive: &str,
     local_addrs: Vec<String>,
 ) -> Result<(PunchAt, Vec<RemoteCandidates>)> {
-    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
-        .await
-        .map_err(|e| AeroSyncError::Network(format!("R2 signaling WebSocket connect: {e}")))?;
+    exchange_candidates_and_wait_punch_with_timeouts(
+        ws_url,
+        server_reflexive,
+        local_addrs,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(8),
+    )
+    .await
+}
+
+/// Like [`exchange_candidates_and_wait_punch`] but with explicit per-stage timeouts.
+///
+/// Timeout/failure codes are deterministic so caller-side mapping can stay stable:
+/// - `[R2_TIMEOUT_WS]` for initial WebSocket connect/send budget
+/// - `[R2_TIMEOUT_PUNCH]` for waiting `remote.candidates`/`punch_at`
+pub async fn exchange_candidates_and_wait_punch_with_timeouts(
+    ws_url: &str,
+    server_reflexive: &str,
+    local_addrs: Vec<String>,
+    ws_connect_timeout: std::time::Duration,
+    punch_wait_timeout: std::time::Duration,
+) -> Result<(PunchAt, Vec<RemoteCandidates>)> {
+    let (mut ws, _) =
+        tokio::time::timeout(ws_connect_timeout, tokio_tungstenite::connect_async(ws_url))
+            .await
+            .map_err(|_| {
+                AeroSyncError::Network(format!(
+                    "[R2_TIMEOUT_WS] signaling websocket connect timed out after {} ms",
+                    ws_connect_timeout.as_millis()
+                ))
+            })?
+            .map_err(|e| AeroSyncError::Network(format!("R2 signaling WebSocket connect: {e}")))?;
 
     let hello = json!({
         "type": "candidates",
         "server_reflexive": server_reflexive,
         "local": local_addrs
     });
-    ws.send(WsMessage::Text(hello.to_string()))
-        .await
-        .map_err(|e| AeroSyncError::Network(format!("R2 signaling send candidates: {e}")))?;
+    tokio::time::timeout(
+        ws_connect_timeout,
+        ws.send(WsMessage::Text(hello.to_string().into())),
+    )
+    .await
+    .map_err(|_| {
+        AeroSyncError::Network(format!(
+            "[R2_TIMEOUT_WS] signaling candidates send timed out after {} ms",
+            ws_connect_timeout.as_millis()
+        ))
+    })?
+    .map_err(|e| AeroSyncError::Network(format!("R2 signaling send candidates: {e}")))?;
 
     let mut remotes: Vec<RemoteCandidates> = Vec::new();
+    let deadline = tokio::time::Instant::now() + punch_wait_timeout;
 
-    while let Some(frm) = ws.next().await {
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(AeroSyncError::Network(format!(
+                "[R2_TIMEOUT_PUNCH] signaling did not deliver punch_at within {} ms",
+                punch_wait_timeout.as_millis()
+            )));
+        }
+        let wait = deadline.saturating_duration_since(now);
+        let frm = tokio::time::timeout(wait, ws.next()).await.map_err(|_| {
+            AeroSyncError::Network(format!(
+                "[R2_TIMEOUT_PUNCH] signaling did not deliver punch_at within {} ms",
+                punch_wait_timeout.as_millis()
+            ))
+        })?;
+        let Some(frm) = frm else {
+            break;
+        };
         let m = match frm {
             Ok(m) => m,
             Err(e) => {

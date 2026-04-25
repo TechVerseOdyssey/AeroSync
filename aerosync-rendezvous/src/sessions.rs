@@ -57,6 +57,17 @@ pub struct WsQuery {
     pub token: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct PendingSessionsResponse {
+    pub sessions: Vec<PendingSession>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PendingSession {
+    pub session_id: String,
+    pub websocket_path: String,
+}
+
 fn validate_target_namespace(s: &str) -> Result<String, (StatusCode, Json<Value>)> {
     if s.is_empty() {
         return Ok(String::new());
@@ -234,4 +245,37 @@ pub async fn session_websocket(
         }
         reg.disconnect(&id, role);
     }))
+}
+
+/// Poll pending sessions for the authenticated target peer.
+/// Used by receiver-side agents to auto-join R2 signaling without manual scripts.
+pub async fn pending_sessions(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<PendingSessionsResponse>, (StatusCode, Json<Value>)> {
+    let token = authorization_bearer(&headers).ok_or_else(peers::unauthorized)?;
+    let claims = verify_bearer(token, state.decoding_key.as_ref(), &state.jwt_issuer)
+        .map_err(|_| peers::unauthorized())?;
+    let namespace = peers::parse_namespace_from_headers(&headers)?;
+    if namespace != claims.ns {
+        return Err(peers::forbidden());
+    }
+    let rows = sqlx::query(
+        "SELECT session_id FROM sessions
+         WHERE target_id = ?1 AND state IN ('pending','punching')
+         ORDER BY created_at ASC LIMIT 32",
+    )
+    .bind(&claims.sub)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(peers::internal)?;
+    let sessions = rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String, _>("session_id").ok())
+        .map(|session_id| PendingSession {
+            websocket_path: format!("/v1/sessions/{session_id}/ws"),
+            session_id,
+        })
+        .collect();
+    Ok(Json(PendingSessionsResponse { sessions }))
 }

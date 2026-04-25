@@ -8,6 +8,8 @@ pub mod hole_punch;
 #[cfg(feature = "wan-rendezvous")]
 pub mod punch_signaling;
 #[cfg(feature = "wan-rendezvous")]
+pub mod receiver_lifecycle;
+#[cfg(feature = "wan-rendezvous")]
 pub mod rendezvous;
 
 #[cfg(feature = "wan-relay")]
