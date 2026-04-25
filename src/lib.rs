@@ -21,11 +21,20 @@ pub mod wan;
 pub use crate::core::AeroSyncMdns;
 pub use crate::core::{
     AeroSyncError, AuditLogger, AuthConfig, AuthManager, FileManager, FileReceiver, HistoryStore,
-    ProgressMonitor, Result, ResumeStore, ServerConfig, SessionId, TlsConfig, TransferConfig,
-    TransferEngine, TransferTask,
+    ProgressMonitor, Result, ResumeStore, ServerConfig, SessionId, SqliteHistoryStore, TlsConfig,
+    TransferConfig, TransferEngine, TransferTask,
 };
 pub use crate::protocols::{AutoAdapter, HttpConfig, HttpTransfer};
 #[cfg(feature = "quic")]
 pub use crate::protocols::{QuicConfig, QuicTransfer};
+#[cfg(all(feature = "wan-rendezvous", feature = "quic"))]
+pub use crate::wan::hole_punch::udp_punch_warmup;
 #[cfg(feature = "wan-rendezvous")]
-pub use crate::wan::rendezvous::{parse_peer_at_rendezvous, RendezvousClient};
+pub use crate::wan::punch_signaling::{
+    exchange_candidates_and_wait_punch, rendezvous_signaling_websocket_url, PunchAt,
+    RemoteCandidates,
+};
+#[cfg(feature = "wan-rendezvous")]
+pub use crate::wan::rendezvous::{
+    parse_peer_at_rendezvous, InitiateSessionResponse, InitiateSessionSignaling, RendezvousClient,
+};

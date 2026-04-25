@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (§12.2 — SQLite `HistoryStorage`)
+
+- **`aerosync_infra::history_sqlite::SqliteHistoryStore`:** `HistoryStorage` over
+  `history.db` (WAL, one JSON row per [`HistoryEntry`]). Shared filter logic
+  with JSONL via `history::filter_history_entries`. Re-exported as
+  `aerosync::SqliteHistoryStore`. The transfer engine still defaults to JSONL
+  `HistoryStore` until a config switch wires `Arc<dyn HistoryStorage>`.
+
+### Added (RFC-004 P2 / R2 control + client hooks)
+
+- **`RendezvousClient`:** `initiate_session*`, `signaling_websocket_url` (builds
+  `ws://` / `wss://` + `?token=` for the response’s `signaling.websocket_path`).
+- **`aerosync::exchange_candidates_and_wait_punch`:** WebSocket `candidates` →
+  `remote.candidates` + `punch_at` (needs `tokio-tungstenite` with native roots
+  for WSS). **`aerosync::udp_punch_warmup`:** one-byte UDP warm-up (requires
+  `quic` + `wan-rendezvous`); `QuicTransfer` / `AutoAdapter` R2 wiring TBD.
+- **`aerosync-rendezvous`:** in-memory hub per session — relays `candidates`
+  and broadcasts synchronized `punch_at`. R3 byte relay still **HTTP 501**.
+
 ### Added (v0.4 — Engine ↔ `TransferSession` + wire `session_id`, Phase 3.4e–g)
 
 - **Domain / wire:** `Metadata.session_id` (proto field `10`); `MetadataJson` + builder path;

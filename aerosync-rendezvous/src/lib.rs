@@ -1,12 +1,14 @@
 //! WAN rendezvous server library (RFC-004).
 //!
 //! Week-1 scope: SQLite schema, RS256 JWT, `/v1/peers/register`, `/heartbeat`,
-//! `/v1/peers/{name}`. P2: `POST /v1/sessions/initiate` + `GET /v1/sessions/{id}/ws` (signaling stub);
-//! relay remains HTTP 501 with structured body until R3.
+//! `/v1/peers/{name}`. P2: `POST /v1/sessions/initiate` + `GET /v1/sessions/{id}/ws`
+//! (R2: relay `candidates` + `punch_at`); R3 relay remains HTTP 501 with
+//! structured body.
 
 pub mod jwt;
 pub mod peers;
 pub mod sessions;
+pub mod signaling;
 
 use axum::routing::post;
 use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
@@ -19,6 +21,8 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::signaling::SignalingRegistry;
+
 /// Per-IP register rate: ~4/s sustained, burst 12 (abuse + tenant-squatting pressure release).
 pub type RegisterRatelimit = governor::DefaultKeyedRateLimiter<IpAddr>;
 
@@ -30,6 +34,8 @@ pub struct AppState {
     pub encoding_key: Arc<EncodingKey>,
     pub decoding_key: Arc<DecodingKey>,
     pub register_ratelimit: Arc<RegisterRatelimit>,
+    /// R2 WebSocket candidate relay + `punch_at` (§6.2).
+    pub signaling: Arc<SignalingRegistry>,
 }
 
 /// Open or create the SQLite database and apply embedded migrations.
@@ -174,6 +180,7 @@ mod tests {
             encoding_key: enc,
             decoding_key: dec,
             register_ratelimit: default_register_ratelimit(),
+            signaling: Arc::new(SignalingRegistry::new()),
         });
 
         use axum::body::Body;

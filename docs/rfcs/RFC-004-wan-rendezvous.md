@@ -53,13 +53,21 @@ blurb below matches the **tree as of 2026-04**; for release notes use
 - **Python `Config.rendezvous_url` (and similar hooks):** reserved; week-1
   lookup uses the **`peer@host:port` destination** plus env token, not a
   separate base-URL field on `Config`.
+- **P2 R2 (2026-04 follow-up):** `RendezvousClient::initiate_session*`
+  and `RendezvousClient::signaling_websocket_url` feed `POST` + `GET` …
+  `GET /v1/sessions/{id}/ws?token=…`. The rendezvous now **relays** `candidates`
+  and issues **`punch_at`**; the `aerosync` crate adds
+  `exchange_candidates_and_wait_punch` and `udp_punch_warmup` (quic + wan).
+  **Wire-up** of a shared `UdpSocket` + `quinn::Endpoint` into
+  `QuicTransfer` / `AutoAdapter` (§6.3) is not done yet. R3 relay is still
+  **HTTP 501** on the server.
 
 ### Not yet implemented (vs this RFC)
 
-- **UDP hole punching**, end-to-end candidate exchange, and a **working**
-  byte relay with accounting (R3) — **relay** routes 501; WS is only a
-  **stub** (no production ICE/relay yet; see
-  [RFC-004-p2-protocol-security.md](./RFC-004-p2-protocol-security.md)).
+- **R2 data plane:** `AutoAdapter` / CLI does not yet use R2 signaling and
+  `quinn::Endpoint` socket reuse in one automatic send path. **R3** byte relay
+  with accounting — **relay** routes 501; see
+  [RFC-004-p2-protocol-security.md](./RFC-004-p2-protocol-security.md).
 - **Identity/ACL** beyond “JWT from our RSA key + register-time name/key”;
   **§13.1 MCP tools** (`register_peer` server-side, etc.) as a first-class
   product surface.

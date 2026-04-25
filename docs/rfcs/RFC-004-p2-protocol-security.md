@@ -26,7 +26,12 @@ Clients may use **STUN** for ICE-like discovery; **TURN** remains the standard r
 ## 3. Compatibility with HTTP 501 (existing routes)
 
 - **`POST /v1/sessions/initiate`** — **implemented** (creates a `sessions` row, returns `session_id` and `signaling.websocket_path`). Hole punch and R3 are still **not** implemented; `implementation_status` describes that.
-- **`GET /v1/sessions/{id}/ws`** — **stub**: accepts WebSocket upgrade, validates JWT and session membership, sends one `aerosync.signaling.ready` JSON message. No candidate relay yet.
+- **`GET /v1/sessions/{id}/ws`** — **implemented (R2 control plane)**: WebSocket
+  upgrade, JWT + session membership; relays JSON `candidates` between the two
+  members as `remote.candidates` and, once both have sent, broadcasts a
+  `punch_at` with `timestamp_ms` (≈+200ms wall clock). The UDP/QUIC data path
+  still runs on the agents (`aerosync::exchange_candidates_and_wait_punch` +
+  `aerosync::udp_punch_warmup` with a shared `UdpSocket` before QUIC, RFC §6.3).
 - **`/v1/relay/...`** — **still 501**; response includes `rfc`, `stun_policy`, and `billing_tenant` keys so agents can branch without parsing free-text errors.
 
 ## 4. Public rendezvous hardening

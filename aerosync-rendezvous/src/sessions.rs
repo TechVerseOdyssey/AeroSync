@@ -3,6 +3,7 @@
 use crate::jwt::verify_bearer;
 use crate::peers;
 use crate::peers::authorization_bearer;
+use crate::signaling::PeerRole;
 use crate::AppState;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::Query;
@@ -141,7 +142,7 @@ pub async fn initiate_session(
     Ok(Json(InitiateResponse {
         session_id: session_id.clone(),
         implementation_status: P2Status {
-            ice_lite: "not_implemented_server_side; client_uses_stun_for_reflexive_if_deployed",
+            ice_lite: "ws_relay_of_candidates_and_punch_at; client_udp_quic_data_plane_ongoing",
             r3_relay: "not_implemented;_relay_routes_still_501",
         },
         signaling: SignalingInfo {
@@ -179,14 +180,58 @@ pub async fn session_websocket(
         return Err(peers::forbidden());
     }
 
+    let role = if peer == a {
+        PeerRole::Initiator
+    } else {
+        PeerRole::Target
+    };
+    let signaling = Arc::clone(&state.signaling);
     let sid = session_id;
+
     Ok(ws.on_upgrade(move |mut socket| async move {
         use axum::extract::ws::Message;
-        let hello = json!({
-            "type": "aerosync.signaling.ready",
-            "session_id": sid,
-            "p2": "ws_signaling_stub"
-        });
-        let _ = socket.send(Message::Text(hello.to_string())).await;
+        use tokio::sync::mpsc;
+
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let init = match signaling.register_peer(&sid, role, out_tx) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(%e, session_id = %sid, "signaling register");
+                let _ = socket
+                    .send(Message::Text(
+                        json!({"type":"aerosync.signaling.error","error":e}).to_string(),
+                    ))
+                    .await;
+                return;
+            }
+        };
+        for line in init {
+            if socket.send(Message::Text(line)).await.is_err() {
+                signaling.disconnect(&sid, role);
+                return;
+            }
+        }
+
+        let reg = Arc::clone(&signaling);
+        let id = sid.clone();
+        loop {
+            tokio::select! {
+                t = out_rx.recv() => {
+                    let Some(text) = t else { break };
+                    if socket.send(Message::Text(text)).await.is_err() { break; }
+                }
+                msg = socket.recv() => {
+                    let Some(m) = msg else { break };
+                    match m {
+                        Ok(Message::Text(t)) => {
+                            if reg.on_client_text(&id, role, &t).is_err() { break; }
+                        }
+                        Ok(Message::Close(_)) | Err(_) => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        reg.disconnect(&id, role);
     }))
 }

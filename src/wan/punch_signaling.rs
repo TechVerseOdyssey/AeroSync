@@ -1,0 +1,174 @@
+//! R2 client: WebSocket signaling toward [`super::super::RendezvousClient`].
+//!
+//! Pairs with `aerosync-rendezvous`’s `GET /v1/sessions/{id}/ws?token=…` to relay
+//! `candidates`, receive `remote.candidates`, and obtain a server-synchronized
+//! `punch_at` (RFC-004 §6.2) before a UDP/QUIC data path.
+
+use crate::core::{AeroSyncError, Result};
+use futures::{SinkExt, StreamExt};
+use serde::Deserialize;
+use serde_json::json;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use url::Url;
+
+/// `GET …/ws?token=` uses the same JWT as `Authorization: Bearer` on HTTP APIs.
+pub fn rendezvous_signaling_websocket_url(
+    rendezvous_http_base: &str,
+    websocket_path: &str,
+    query_token: &str,
+) -> Result<String> {
+    let b = rendezvous_http_base.trim().trim_end_matches('/');
+    if b.is_empty() {
+        return Err(AeroSyncError::InvalidConfig(
+            "empty rendezvous base URL".to_string(),
+        ));
+    }
+    // Join base + path into one absolute URL, then switch scheme to ws(s).
+    let p = if websocket_path.starts_with('/') {
+        websocket_path
+    } else {
+        // rare; avoid double-slash
+        return Err(AeroSyncError::InvalidConfig(
+            "signaling `websocket_path` should start with `/` (RFC-004 P2 response)".to_string(),
+        ));
+    };
+    let joined = if b.contains("://") {
+        format!("{b}{p}")
+    } else {
+        format!("http://{b}{p}")
+    };
+    let u = Url::parse(&joined).map_err(|e| {
+        AeroSyncError::InvalidConfig(format!("invalid rendezvous or WS path URL: {e}"))
+    })?;
+    let scheme = match u.scheme() {
+        "https" => "wss",
+        "http" => "ws",
+        other => {
+            return Err(AeroSyncError::InvalidConfig(format!(
+                "expected http(s) rendezvous base, got scheme {other}"
+            )));
+        }
+    };
+    let enc = urlencoding::encode(query_token);
+    let mut wu = u;
+    wu.set_scheme(scheme)
+        .map_err(|()| AeroSyncError::InvalidConfig("cannot set ws(s) scheme".to_string()))?;
+    wu.set_query(None);
+    wu.set_fragment(None);
+    let out = format!("{wu}?token={enc}");
+    Ok(out)
+}
+
+/// Parsed `remote.candidates` from the peer.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteCandidates {
+    /// `"initiator"` or `"target"` (R2 relay).
+    pub from: String,
+    pub server_reflexive: String,
+    pub local: Vec<String>,
+}
+
+/// Synchronized `punch_at` from the rendezvous (Unix epoch ms, wall clock).
+#[derive(Debug, Clone, Deserialize)]
+pub struct PunchAt {
+    pub timestamp_ms: u64,
+}
+
+/// Send this peer’s `candidates`, collect `remote.candidates` lines, and block until `punch_at`
+/// (or the WebSocket closes or returns an error frame).
+pub async fn exchange_candidates_and_wait_punch(
+    ws_url: &str,
+    server_reflexive: &str,
+    local_addrs: Vec<String>,
+) -> Result<(PunchAt, Vec<RemoteCandidates>)> {
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
+        .await
+        .map_err(|e| AeroSyncError::Network(format!("R2 signaling WebSocket connect: {e}")))?;
+
+    let hello = json!({
+        "type": "candidates",
+        "server_reflexive": server_reflexive,
+        "local": local_addrs
+    });
+    ws.send(WsMessage::Text(hello.to_string()))
+        .await
+        .map_err(|e| AeroSyncError::Network(format!("R2 signaling send candidates: {e}")))?;
+
+    let mut remotes: Vec<RemoteCandidates> = Vec::new();
+
+    while let Some(frm) = ws.next().await {
+        let m = match frm {
+            Ok(m) => m,
+            Err(e) => {
+                return Err(AeroSyncError::Network(format!(
+                    "R2 signaling WebSocket read: {e}"
+                )))
+            }
+        };
+        if let WsMessage::Text(s) = m {
+            if let Some(ev) = parse_incoming(&s)? {
+                match ev {
+                    Incoming::Remote(r) => remotes.push(r),
+                    Incoming::Punch(p) => {
+                        return Ok((p, remotes));
+                    }
+                }
+            }
+        }
+    }
+    Err(AeroSyncError::Network(
+        "R2 signaling closed before punch_at".to_string(),
+    ))
+}
+
+enum Incoming {
+    Remote(RemoteCandidates),
+    Punch(PunchAt),
+}
+
+fn parse_incoming(line: &str) -> Result<Option<Incoming>> {
+    let v: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+        AeroSyncError::InvalidConfig(format!("R2 signaling bad JSON: {e}; line={line:?}"))
+    })?;
+    let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    if ty == "aerosync.signaling.ready" || ty.is_empty() {
+        return Ok(None);
+    }
+    if ty == "aerosync.signaling.error" {
+        let s = v.get("error").and_then(|e| e.as_str()).unwrap_or("unknown");
+        return Err(AeroSyncError::InvalidConfig(format!(
+            "R2 signaling error: {s}"
+        )));
+    }
+    if ty == "remote.candidates" {
+        let r: RemoteCandidates = serde_json::from_value(v)
+            .map_err(|e| AeroSyncError::InvalidConfig(format!("R2 remote.candidates: {e}")))?;
+        return Ok(Some(Incoming::Remote(r)));
+    }
+    if ty == "punch_at" {
+        let t = v
+            .get("timestamp_ms")
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| {
+                AeroSyncError::InvalidConfig("punch_at missing timestamp_ms".to_string())
+            })?;
+        return Ok(Some(Incoming::Punch(PunchAt { timestamp_ms: t })));
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ws_url_from_http_base() {
+        let s = rendezvous_signaling_websocket_url(
+            "http://127.0.0.1:8787",
+            "/v1/sessions/x/ws",
+            "tok%20en",
+        )
+        .unwrap();
+        assert!(s.starts_with("ws://127.0.0.1:8787/v1/sessions/x/ws?token="));
+    }
+}

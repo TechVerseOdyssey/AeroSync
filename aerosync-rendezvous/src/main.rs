@@ -1,5 +1,6 @@
 //! `aerosync-rendezvous` binary — RFC-004 control-plane server (registry + JWT).
 
+use aerosync_rendezvous::signaling::SignalingRegistry;
 use aerosync_rendezvous::{connect_database, default_register_ratelimit, jwt, serve, AppState};
 use clap::Parser;
 use jsonwebtoken::{DecodingKey, EncodingKey};
@@ -54,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
         encoding_key,
         decoding_key,
         register_ratelimit: default_register_ratelimit(),
+        signaling: Arc::new(SignalingRegistry::new()),
     });
 
     serve(addr, state).await

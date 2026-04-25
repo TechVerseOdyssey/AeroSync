@@ -48,3 +48,9 @@ rand = "0.8"
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = "0.5"
+reqwest = { workspace = true }
+tokio-tungstenite = "0.20"
+futures-util = "0.3"
+quinn = { workspace = true }
+rustls = { workspace = true }
+rcgen = { version = "0.13", features = ["pem"] }

@@ -128,7 +128,8 @@ dirs-next = "2"
 # need it.
 mdns-sd = { version = "0.10", optional = true }
 hostname = "0.3"
-tokio-tungstenite = "0.20"
+# `rustls-tls-native-roots` enables WSS to HTTPS rendezvous hosts in `wan::punch_signaling`.
+tokio-tungstenite = { version = "0.20", features = ["rustls-tls-native-roots"] }
 
 # Protocol deps (formerly aerosync-protocols)
 rand = "0.8"
@@ -202,7 +203,8 @@ libc = "0.2"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
-tokio-tungstenite = "0.20"
+# `rustls-tls-native-roots` enables WSS to HTTPS rendezvous hosts in `wan::punch_signaling`.
+tokio-tungstenite = { version = "0.20", features = ["rustls-tls-native-roots"] }
 # Workspace-internal dep used only by `tests/receipts_e2e.rs` to drive the
 # MCP `cancel_receipt` tool function directly (no out-of-process MCP server).
 # Path-only — adds nothing to the external dependency surface or `cargo deny`
