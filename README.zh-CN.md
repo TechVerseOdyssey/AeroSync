@@ -16,7 +16,7 @@
 - **完整性校验**：SHA-256 端到端验证
 - **认证**：HMAC-SHA256 Bearer Token
 - **配置文件**：TOML 格式，CLI 参数优先覆盖
-- **RFC-004 / WAN（分阶段落地）** — 独立工作区成员 **`aerosync-rendezvous`**（自托管控制面：SQLite 注册、JWT、`/v1/peers/*` API，见 [`aerosync-rendezvous/README.md`](aerosync-rendezvous/README.md)）。主程序支持在设置环境变量 **`AEROSYNC_RENDEZVOUS_TOKEN`** 后，将目标写为 **`peer@rendezvous主机:端口`** 以经 rendezvous 查询对端 `observed_addr` 再传输。运维说明（**中英文**）：[`docs/operations/rendezvous.md`](docs/operations/rendezvous.md)。**NAT 打洞、信令、可用中继** 等仍按 [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md) 规划在 v0.4+，详见 RFC **Implementation status** 与根目录 `CHANGELOG` [Unreleased]。
+- **RFC-004 / WAN（分阶段）** — 工作区成员 **`aerosync-rendezvous`**（SQLite 注册、JWT、[`/v1/peers/*`](aerosync-rendezvous/README.md)）。在设置 **`AEROSYNC_RENDEZVOUS_TOKEN`** 后可用 **`peer@rendezvous:端口`**。对**无路径后缀** 的 `peer@` 可走 **R2 打洞+QUIC**；失败会带稳定 **`[R2_*]`** 标签。当前发版**不包含自动 R3 字节中继**；**实网 SLO/矩阵、回滚**见 [`wan-r2-field-matrix.md`](docs/operations/wan-r2-field-matrix.md)、[`wan-r2-release-ops.md`](docs/operations/wan-r2-release-ops.md)（**运维总览**仍见 [`rendezvous.md`](docs/operations/rendezvous.md) 与 [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md) / `CHANGELOG` [Unreleased]）。
 
 ## 安装
 
@@ -205,7 +205,9 @@ aerosync send ./file.csv ftp://ftpserver:21/data/file.csv
 - 只有目标是裸格式 `peer@rendezvous-host:port` 时才会尝试 R2 信令+打洞。
   若带路径后缀（例如 `peer@host:port/path/file.bin`），客户端会走 lookup +
   目的地址改写（HTTP `/upload/...`），不会进入 R2 信令流程。
-- 目前还没有自动 R3 中继回退；R2 失败会直接以带上述标签的传输错误返回。
+- 本发版**没有**自动 R3 中继回退；R2 失败以带上述标签的传输错误返回。发布期边界
+  与回退手段见 [`wan-r2-release-ops.md`](docs/operations/wan-r2-release-ops.md)；
+  实网矩阵与 SLO 统计用 [`wan-r2-field-matrix.md`](docs/operations/wan-r2-field-matrix.md)。
 
 快速排查：
 

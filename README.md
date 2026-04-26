@@ -21,7 +21,7 @@
 | `rclone`   |   ✓    |     ✗     |         ✗         |          ✗           |            ✗             |
 | **AeroSync** | **✓**  |   **✓**   |       **✓**       |        **✓**         |          **✓**           |
 
-Designed for the use case nothing else covers cleanly: **one agent on machine A asks another agent on machine B "send me that 30 GB dataset"**, and it just works — full **LAN** story (QUIC + mDNS discovery, HTTP fallback), **resumable**, with a **single binary** on each side. For **WAN**, [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md) is rolling out in stages: a separate **`aerosync-rendezvous`** server (registry + JWT) and optional **`peer@rendezvous-host:port`** resolution in the main CLI/SDK (**week 1**, env `AEROSYNC_RENDEZVOUS_TOKEN`) are available on `main`; NAT hole punching, signaling, and a working relay are still **roadmapped for v0.4+** (see RFC *Implementation status*).
+Designed for the use case nothing else covers cleanly: **one agent on machine A asks another agent on machine B "send me that 30 GB dataset"**, and it just works — full **LAN** story (QUIC + mDNS discovery, HTTP fallback), **resumable**, with a **single binary** on each side. For **WAN**, [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md) is rolling out in stages: the self-hosted **`aerosync-rendezvous`** (registry + JWT) plus **`peer@rendezvous-host:port`** in the main CLI/SDK (`AEROSYNC_RENDEZVOUS_TOKEN`) are the baseline. **R2** (signaling + `punch_at` + direct QUIC over the punched path) is implemented for **bare** `peer@` destinations; failures carry stable **`[R2_*]`** tags. **R3 (byte relay)** is not automatic in the current line — see [field matrix](docs/operations/wan-r2-field-matrix.md) and [release/rollback](docs/operations/wan-r2-release-ops.md).
 
 ## Status (v0.3.0-rc1)
 
@@ -30,7 +30,7 @@ Designed for the use case nothing else covers cleanly: **one agent on machine A 
 - **Receipt protocol** ([RFC-002](docs/rfcs/RFC-002-receipt-protocol.md)) — sender knows when receiver actually processed; 7-state machine, HTTP SSE control plane (`GET /v1/receipts/:id/events`), idempotent ack/nack/cancel. v0.2.1 wires the QUIC bidi receipt stream end-to-end (`w3c-quic-receipt-wiring` closed) and adds HTTP wire-level `receipt_ack` echo (RFC-002 §6.4).
 - **Metadata envelope** ([RFC-003](docs/rfcs/RFC-003-metadata-envelope.md)) — every transfer carries structured metadata (`trace_id`, `lifecycle`, free-form `user_metadata`); persisted, queryable, propagated identically over HTTP and QUIC. See [`docs/protocol/metadata-v1.md`](docs/protocol/metadata-v1.md).
 - **MCP** — 11 tools for AI agents (push, pull, history, receipts, receipt waiting/cancel). New in v0.2.1: `request_file` symmetric pull tool. See [`docs/mcp-integration.md`](docs/mcp-integration.md).
-- **RFC-004 (WAN) — staged** — workspace crate [`aerosync-rendezvous`](aerosync-rendezvous/README.md) (self-hosted control plane: SQLite + `/v1/peers/*` + RS256 JWT). The root `aerosync` library can resolve **`name@host:port`** destinations when `AEROSYNC_RENDEZVOUS_TOKEN` is set. This is **not** end-to-end NAT traversal yet; see the RFC, [`docs/operations/rendezvous.md`](docs/operations/rendezvous.md) (ops), and [`CHANGELOG.md`](CHANGELOG.md) [Unreleased].
+- **RFC-004 (WAN) — staged** — workspace crate [`aerosync-rendezvous`](aerosync-rendezvous/README.md) (self-hosted control plane: SQLite + `/v1/peers/*` + RS256 JWT). The root `aerosync` library resolves **`name@host:port`** with `AEROSYNC_RENDEZVOUS_TOKEN` and, for **bare** `peer@` (no path), may run the **R2** punch path with explicit error tags. Real-world success is **not guaranteed** (NAT); treat published SLOs as field-gated. Ops: [`docs/operations/rendezvous.md`](docs/operations/rendezvous.md), [field SLOs / matrix](docs/operations/wan-r2-field-matrix.md), [no R3 + rollback](docs/operations/wan-r2-release-ops.md), and [`CHANGELOG.md`](CHANGELOG.md) [Unreleased].
 
 ## Python SDK quickstart (v0.3.0-rc1)
 
@@ -297,8 +297,9 @@ Current scope/limits (v0.3.0-rc line):
 - R2 signaling+punch is attempted only for bare `peer@rendezvous-host:port` destinations.
   If a path suffix is present (for example `peer@host:port/path/file.bin`), the client does
   lookup + direct upload URL rewrite and does not enter the R2 signaling path.
-- There is no automatic R3 relay fallback yet; R2 failures currently surface as transfer errors
-  with the tags above.
+- There is no automatic R3 relay fallback; R2 failures surface as transfer errors
+  with the tags above. Release expectations, rollback levers, and the “no R3” product boundary:
+  [wan-r2-release-ops.md](docs/operations/wan-r2-release-ops.md). Field SLOs / CSV-style matrix: [wan-r2-field-matrix.md](docs/operations/wan-r2-field-matrix.md).
 
 Quick checks:
 
