@@ -20,6 +20,16 @@
 
 ## 安装
 
+**一键安装（推荐，macOS / Linux，Apple Silicon 与 x86_64 / Linux aarch64 与 x86_64）：** 从 [GitHub Releases](https://github.com/TechVerseOdyssey/AeroSync/releases) 下载预编译包并安装到 `~/.local/bin`（无需 sudo，若目录不可写则会用 `sudo` 写到 `/usr/local/bin`）。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TechVerseOdyssey/AeroSync/master/install.sh | bash
+```
+
+固定版本或安装路径：`AEROSYNC_VERSION=v0.x.x`、`AEROSYNC_PREFIX=/path/to/bin`。其它渠道见英文 [安装说明](docs/install.md)（`cargo install`、手动下载压缩包、Homebrew 等）。
+
+**从源码编译：**
+
 ```bash
 git clone https://github.com/TechVerseOdyssey/AeroSync.git
 cd AeroSync

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`install.sh`:** resolve `latest` via `python3` JSON when available; optional
+  `AEROSYNC_REPO`; validate extracted directory; clearer unsupported-platform
+  message. **README.zh-CN** lists one-line install first.
+
 ### Changed (docs)
 
 - **RFC-004 / CHANGELOG:** `Implementation status` and the R2 entry now match

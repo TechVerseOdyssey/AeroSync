@@ -6,10 +6,13 @@
 # Environment variables:
 #   AEROSYNC_VERSION   pin to a specific tag, e.g. "v0.2.0" (default: latest)
 #   AEROSYNC_PREFIX    install prefix (default: $HOME/.local/bin if writable, else /usr/local/bin via sudo)
+#   AEROSYNC_REPO      override "owner/name" (default: TechVerseOdyssey/AeroSync)
+#
+# Supported: macOS x86_64 + arm64, Linux x86_64 + arm64 (musl prebuilts)
 #
 set -euo pipefail
 
-REPO="TechVerseOdyssey/AeroSync"
+REPO="${AEROSYNC_REPO:-TechVerseOdyssey/AeroSync}"
 VERSION="${AEROSYNC_VERSION:-latest}"
 PREFIX="${AEROSYNC_PREFIX:-}"
 
@@ -26,17 +29,20 @@ case "${uname_s}-${uname_m}" in
   Linux-x86_64)  TARGET="x86_64-unknown-linux-musl" ;;
   Linux-aarch64) TARGET="aarch64-unknown-linux-musl" ;;
   Linux-arm64)   TARGET="aarch64-unknown-linux-musl" ;;
-  *) err "unsupported platform: ${uname_s}-${uname_m}. Try 'cargo install --git https://github.com/${REPO} aerosync aerosync-mcp' instead." ;;
+  *) err "unsupported platform: ${uname_s}-${uname_m} (one-line installer has prebuilts for: macOS x86_64/arm64, Linux x86_64/aarch64). Try: cargo install --locked aerosync aerosync-mcp" ;;
 esac
 info "platform = ${TARGET}"
 
 # ── 2. resolve version + URL ───────────────────────────────────────────────
 if [ "${VERSION}" = "latest" ]; then
   info "resolving latest release tag…"
-  VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep -m1 '"tag_name"' \
-    | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
-  [ -n "${VERSION}" ] || err "could not resolve latest release; pin AEROSYNC_VERSION manually."
+  REL_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")
+  if command -v python3 >/dev/null 2>&1; then
+    VERSION=$(printf '%s' "${REL_JSON}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('tag_name',''))")
+  else
+    VERSION=$(printf '%s' "${REL_JSON}" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+  fi
+  [ -n "${VERSION}" ] || err "could not resolve latest release; pin AEROSYNC_VERSION manually (e.g. v0.3.0)."
 fi
 info "version = ${VERSION}"
 
@@ -67,6 +73,8 @@ fi
 info "extracting…"
 tar -xzf "${TMP}/${ARCHIVE}" -C "${TMP}"
 EXTRACTED="${TMP}/aerosync-${VERSION_NO_V}-${TARGET}"
+[ -d "${EXTRACTED}" ] || err "expected directory missing after extract: ${EXTRACTED} (wrong archive layout or version?)"
+[ -f "${EXTRACTED}/aerosync" ] || err "aerosync binary not found in ${EXTRACTED}"
 
 # ── 4. choose install prefix ────────────────────────────────────────────────
 if [ -z "${PREFIX}" ]; then
