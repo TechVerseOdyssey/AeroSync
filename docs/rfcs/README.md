@@ -36,7 +36,7 @@ Draft  →  Review  →  Accepted  →  Implemented  →  (Superseded)
 
 The first three RFCs above defined the v0.2 "AI file bus" scope. Their
 core behavior has since landed across `v0.2.0`, `v0.2.1`, and the
-`v0.3.0-rc1` documentation freeze, even though the RFC process state
+`v0.3.0` documentation freeze, even though the RFC process state
 still reads **Draft**. See each document's **Implementation status**
 section for drift, deferments, and the current source-of-truth docs.
 

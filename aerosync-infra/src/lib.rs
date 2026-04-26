@@ -7,7 +7,7 @@
 //! [`aerosync_domain`] — JSON / JSONL persistence, the rustls crypto
 //! provider bootstrap, and the audit logger.
 //!
-//! ## Status (v0.3.0-rc1 baseline)
+//! ## Status (v0.3.0 baseline)
 //!
 //! Phase 1 of the refactor lands the **crate skeleton only** —
 //! everything below is a stub. Phase 1 follow-ups will `git mv` files

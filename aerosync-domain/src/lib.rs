@@ -8,7 +8,7 @@
 //! does IO* (`aerosync-infra` + the root `aerosync` crate) is already
 //! clean and load-bearing.
 //!
-//! ## Status (v0.3.0-rc1 baseline)
+//! ## Status (v0.3.0 baseline)
 //!
 //! Phase 1 of the refactor lands the **crate skeleton only** —
 //! everything below is a stub. Phase 1 follow-ups will `git mv` files

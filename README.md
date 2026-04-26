@@ -23,7 +23,7 @@
 
 Designed for the use case nothing else covers cleanly: **one agent on machine A asks another agent on machine B "send me that 30 GB dataset"**, and it just works — full **LAN** story (QUIC + mDNS discovery, HTTP fallback), **resumable**, with a **single binary** on each side. For **WAN**, [RFC-004](docs/rfcs/RFC-004-wan-rendezvous.md) is rolling out in stages: the self-hosted **`aerosync-rendezvous`** (registry + JWT) plus **`peer@rendezvous-host:port`** in the main CLI/SDK (`AEROSYNC_RENDEZVOUS_TOKEN`) are the baseline. **R2** (signaling + `punch_at` + direct QUIC over the punched path) is implemented for **bare** `peer@` destinations; failures carry stable **`[R2_*]`** tags. **R3 (byte relay)** is not automatic in the current line — see [field matrix](docs/operations/wan-r2-field-matrix.md) and [release/rollback](docs/operations/wan-r2-release-ops.md).
 
-## Status (v0.3.0-rc1)
+## Status (v0.3.0)
 
 - **Rust crate** (`aerosync`, `aerosync-mcp`, `aerosync-proto`) — production-shaped APIs, 630+ tests, MIT. v0.3.0 splits the codebase into `aerosync-domain` (pure value objects + state machines) and `aerosync-infra` (filesystem + TLS + audit + history persistence), with the legacy `aerosync::core::*` import paths preserved via re-exports. Both new crates are **internal** for v0.3.0 — they may break in v0.4 — and should not be depended on directly.
 - **Python SDK** (`aerosync` on PyPI) — async-first PyO3 binding, abi3-py39 wheels for macOS / Linux glibc+musl / Windows. First stable in v0.2.0; v0.2.1 hardens HTTP+QUIC metadata propagation, adds `Receiver.idle_timeout`, and lights up the killer-demo round-trip end-to-end.
@@ -32,7 +32,7 @@ Designed for the use case nothing else covers cleanly: **one agent on machine A 
 - **MCP** — 11 tools for AI agents (push, pull, history, receipts, receipt waiting/cancel). New in v0.2.1: `request_file` symmetric pull tool. See [`docs/mcp-integration.md`](docs/mcp-integration.md).
 - **RFC-004 (WAN) — staged** — workspace crate [`aerosync-rendezvous`](aerosync-rendezvous/README.md) (self-hosted control plane: SQLite + `/v1/peers/*` + RS256 JWT). The root `aerosync` library resolves **`name@host:port`** with `AEROSYNC_RENDEZVOUS_TOKEN` and, for **bare** `peer@` (no path), may run the **R2** punch path with explicit error tags. Real-world success is **not guaranteed** (NAT); treat published SLOs as field-gated. Ops: [`docs/operations/rendezvous.md`](docs/operations/rendezvous.md), [field SLOs / matrix](docs/operations/wan-r2-field-matrix.md), [no R3 + rollback](docs/operations/wan-r2-release-ops.md), and [`CHANGELOG.md`](CHANGELOG.md) [Unreleased].
 
-## Python SDK quickstart (v0.3.0-rc1)
+## Python SDK quickstart (v0.3.0)
 
 ```bash
 pip install aerosync

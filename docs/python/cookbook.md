@@ -1,6 +1,6 @@
 # AeroSync Python SDK cookbook
 
-Short copy-paste recipes against `aerosync` ≥ `0.3.0-rc1`. Authoritative API detail remains in
+Short copy-paste recipes against `aerosync` ≥ `0.3.0`. Authoritative API detail remains in
 [`docs/v0.3.0-frozen-api.md`](../v0.3.0-frozen-api.md) and RFC-001.
 
 ## Send and wait for terminal receipt

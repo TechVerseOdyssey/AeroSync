@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aerosync"
-version = "0.3.0-rc1"
+version = "0.3.0"
 dependencies = [
  "aerosync-domain",
  "aerosync-infra",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "aerosync-domain"
-version = "0.3.0-rc1"
+version = "0.3.0"
 dependencies = [
  "aerosync-proto",
  "async-trait",
@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "aerosync-infra"
-version = "0.3.0-rc1"
+version = "0.3.0"
 dependencies = [
  "aerosync-domain",
  "aerosync-proto",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "aerosync-mcp"
-version = "0.3.0-rc1"
+version = "0.3.0"
 dependencies = [
  "aerosync",
  "aerosync-proto",
@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "aerosync-proto"
-version = "0.3.0-rc1"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "prost",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "aerosync-py"
-version = "0.3.0-rc1"
+version = "0.3.0"
 dependencies = [
  "aerosync",
  "aerosync-domain",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "aerosync-rendezvous"
-version = "0.3.0-rc1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",

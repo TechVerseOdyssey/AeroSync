@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "aerosync"
-version = "0.3.0rc1"
+version = "0.3.0"
 requires-python = ">=3.9"
 description = "AeroSync — file bus for AI agents (Python SDK)"
 license = { text = "MIT" }

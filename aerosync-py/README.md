@@ -49,4 +49,4 @@ both READMEs are a lie.
 - Release / publish dance for maintainers: [`docs/python/RELEASE-CHECKLIST.md`](../docs/python/RELEASE-CHECKLIST.md).
 - Type stubs (PEP 561 `py.typed`, `mypy --strict` clean): [`python/aerosync/_native.pyi`](python/aerosync/_native.pyi).
 
-Current: **v0.3.0-rc1** (matches the workspace `[package].version` in `Cargo.toml`).
+Current: **v0.3.0** (matches the workspace `[package].version` in `Cargo.toml`).

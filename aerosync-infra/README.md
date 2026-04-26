@@ -15,7 +15,7 @@ concrete IO-bound impls of the trait abstractions defined in
 
 ## Status
 
-`v0.3.0-rc1` skeleton — see
+`v0.3.0` skeleton — see
 [v0.3.0 refactor plan](https://github.com/TechVerseOdyssey/AeroSync/blob/main/docs/v0.3.0-refactor-plan.md)
 Phase 1.
 

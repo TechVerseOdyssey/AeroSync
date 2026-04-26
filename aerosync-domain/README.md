@@ -12,7 +12,7 @@ code lives here.
 
 ## Status
 
-`v0.3.0-rc1` skeleton — Phase 1 of the
+`v0.3.0` skeleton — Phase 1 of the
 [v0.3.0 refactor plan](https://github.com/TechVerseOdyssey/AeroSync/blob/main/docs/v0.3.0-refactor-plan.md)
 ships the crate boundary; subsequent micro-PRs migrate file contents
 in via `git mv` so blame survives.
