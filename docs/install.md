@@ -70,6 +70,12 @@ cargo build --release
 # binaries: target/release/aerosync, target/release/aerosync-mcp
 ```
 
+**Package for one platform (tarball + SHA-256, same layout as GitHub Release):** after a
+`release` build, run `./scripts/package-local-release.sh` — outputs to `dist/`
+(ignored by git). Use with `AEROSYNC_VERSION_TAG=v0.3.0` so the folder name matches
+the Git tag you will attach on GitHub. Other architectures still come from **CI** when
+you push a `v*.*.*` tag.
+
 ## Verifying the install
 
 ```bash

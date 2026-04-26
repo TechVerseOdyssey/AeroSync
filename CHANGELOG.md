@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`scripts/package-local-release.sh`:** on the current host, `cargo build --release`
+  for `aerosync` + `aerosync-mcp` and write `dist/aerosync-<ver>-<triple>.tar.gz` +
+  `.sha256` (install.sh–compatible) for manual GitHub Release upload; see
+  `docs/install.md`.
+
 ### Changed
 
 - **`install.sh`:** resolve `latest` via `python3` JSON when available; optional
