@@ -62,9 +62,17 @@ binary.
 **Client-side** tags are the primary support signal for “why R2 did not
 connect”.
 
+**Client-side R2 stage logs (optional):** with `RUST_LOG` including
+`aerosync::wan::r2=info`, the sender logs milestones (`initiate_session ok`,
+`signaling returned punch_at…`, `quic upload completed…`) and a **warn** line on
+failure; use for field trials and the [field report](wan-r2-field-report-template.md).
+
 ## Related
 
 - [Field test matrix and SLOs](./wan-r2-field-matrix.md)  
+- [SLO goals (pre-public numbers)](./wan-r2-slo-goals.md)  
+- [Field report template](./wan-r2-field-report-template.md)  
+- [Stable release checklist](./wan-r2-stable-release-checklist.md)  
 - [Rendezvous ops](./rendezvous.md)  
 - [RFC-004](../rfcs/RFC-004-wan-rendezvous.md)  
 
@@ -118,9 +126,16 @@ connect”.
 - **后续发版**若提供 R3，会单独在 RFC-004/CHANGELOG/ README 中声明，并避免与
   本节的“无自动中继”表述冲突。
 
+**发送端 R2 阶段日志（可选）：** 环境变量中设置
+`RUST_LOG` 包含 `aerosync::wan::r2=info`，可看到 initiate、信令、QUIC 成功等
+里程碑及失败时 **warn** 行，便于实网与 [实网报告](./wan-r2-field-report-template.md) 对照。
+
 ## 另见
 
 - [实网矩阵与成功率（M7）](./wan-r2-field-matrix.md)  
+- [SLO 目标（对外写数字前）](./wan-r2-slo-goals.md)  
+- [实网报告模板](./wan-r2-field-report-template.md)  
+- [稳定版发版清单](./wan-r2-stable-release-checklist.md)  
 - [Rendezvous 运维](./rendezvous.md)（中英对照同目录）  
 - [RFC-004](../rfcs/RFC-004-wan-rendezvous.md)
 

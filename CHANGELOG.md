@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AutoAdapter::try_r2_upload` + `QuicTransfer::new_with_socket` on `main`;
   R3 auto-fallback and relay **501** are called out explicitly (no contradiction
   with the §6.4 table).
+- **Stable SLO / field validation:** [wan-r2-slo-goals.md](docs/operations/wan-r2-slo-goals.md)
+  (scope), [wan-r2-field-report-template.md](docs/operations/wan-r2-field-report-template.md)
+  (report), [wan-r2-stable-release-checklist.md](docs/operations/wan-r2-stable-release-checklist.md);
+  [ARCHITECTURE_AND_DESIGN.md](docs/ARCHITECTURE_AND_DESIGN.md) §12.1 split **R2 已落地** vs
+  **RFC-004 其余未结**; [wan-r2-release-ops](docs/operations/wan-r2-release-ops.md) documents
+  `RUST_LOG=aerosync::wan::r2=info` for R2 stage logs.
+
+### Changed (R2 observability)
+
+- **Sender R2 path:** `tracing` events on `aerosync::wan::r2` (initiate ok, signaling
+  + `punch_at`, QUIC upload ok, `warn` on failure) for field trials and support.
 
 ### Added (§12.2 — SQLite `HistoryStorage`)
 

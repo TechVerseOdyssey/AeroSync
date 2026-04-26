@@ -28,6 +28,8 @@ use crate::wan::{
     hole_punch::udp_punch_warmup,
     punch_signaling::{exchange_candidates_and_wait_punch_with_timeouts, RemoteCandidates},
 };
+#[cfg(all(feature = "quic", feature = "wan-rendezvous"))]
+use tracing;
 
 pub struct AutoAdapter {
     http_config: HttpConfig,
@@ -311,6 +313,12 @@ impl AutoAdapter {
                     "[R2_INITIATE] initiate_session failed for `{peer_name}`: {other}"
                 )),
             })?;
+            tracing::info!(
+                target: "aerosync::wan::r2",
+                peer = %peer_name,
+                session_id = %init.session_id,
+                "r2: initiate_session ok"
+            );
             let ws_url = rv
                 .signaling_websocket_url(&rendezvous_base, &init.signaling.websocket_path)
                 .map_err(|e| {
@@ -339,6 +347,11 @@ impl AutoAdapter {
                     "[R2_SIGNALING] signaling/punch failed: {e}. The receiver must also participate in signaling."
                 ))
             })?;
+            tracing::info!(
+                target: "aerosync::wan::r2",
+                peer = %peer_name,
+                "r2: signaling returned punch_at and remote candidates"
+            );
 
             let remote = pick_remote_candidate(&remotes).ok_or_else(|| {
                 AeroSyncError::Network(
@@ -367,15 +380,32 @@ impl AutoAdapter {
                     });
                 }
             });
-            run_r2_stage_with_timeout(
+            let upload = run_r2_stage_with_timeout(
                 Self::R2_CONNECT_TIMEOUT,
                 "R2_TIMEOUT_CONNECT",
                 "QUIC connect/upload did not complete".to_string(),
                 qt.upload_file(task, tx),
             )
-            .await
+            .await;
+            if upload.is_ok() {
+                tracing::info!(
+                    target: "aerosync::wan::r2",
+                    peer = %peer_name,
+                    "r2: quic upload completed on punched path"
+                );
+            }
+            upload
         };
-        Some(fut.await)
+        let res = fut.await;
+        if let Err(ref e) = res {
+            tracing::warn!(
+                target: "aerosync::wan::r2",
+                peer = %peer_name,
+                error = %e,
+                "r2: upload path failed"
+            );
+        }
+        Some(res)
     }
 }
 

@@ -1,5 +1,10 @@
 # WAN R2 field test matrix and success rates (M7)
 
+**Stable release with published percentages:** also fill
+[`wan-r2-slo-goals.md`](./wan-r2-slo-goals.md) and
+[`wan-r2-field-report-template.md`](./wan-r2-field-report-template.md), then
+[`wan-r2-stable-release-checklist.md`](./wan-r2-stable-release-checklist.md).
+
 This runbook is for **product / QA** to validate the release promise for direct
 R2 (rendezvous + signaling + UDP/QUIC punch): explicit `[R2_*]` errors on
 failure, **no automatic R3 byte relay** in the current line (see
@@ -66,6 +71,10 @@ using rendezvous config fields from the SDK.
 ---
 
 # 实网 R2 验证矩阵与成功率（M7）
+
+**若发布稳定版并对外写比例：** 同时填写 [SLO 目标页](./wan-r2-slo-goals.md)、
+[实网报告模板](./wan-r2-field-report-template.md)，并过
+[稳定版发版清单](./wan-r2-stable-release-checklist.md)。
 
 供 **产品/QA** 在对外承诺「WAN 直连 + 失败带 `[R2_*]` 标签、**不自动 R3 中继**」
 前做**统计**使用；目标为同环境下的大样本 SLO 参考，而非单次测试。

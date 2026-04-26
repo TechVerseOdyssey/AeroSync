@@ -25,7 +25,7 @@ Downstream AeroSync senders use the stored `observed_addr` to build `http://{obs
 ## Related
 
 - [RFC-004 implementation status](../rfcs/RFC-004-wan-rendezvous.md#implementation-status-2026-04-24)
-- **R2 / WAN release operations** (no R3 auto-relay, rollback levers, field SLOs): [wan-r2-release-ops.md](./wan-r2-release-ops.md) and [wan-r2-field-matrix.md](./wan-r2-field-matrix.md)
+- **R2 / WAN release operations** (no R3 auto-relay, rollback levers, field SLOs): [wan-r2-release-ops.md](./wan-r2-release-ops.md), [wan-r2-field-matrix.md](./wan-r2-field-matrix.md), [SLO goals](./wan-r2-slo-goals.md), [field report template](./wan-r2-field-report-template.md), [stable release checklist](./wan-r2-stable-release-checklist.md)
 - Main CLI / env: `AEROSYNC_RENDEZVOUS_TOKEN`, optional **`AEROSYNC_RENDEZVOUS_NAMESPACE`** (P2 multitenant; must match the JWT `ns` claim), destination `name@host:port` — [README.md](../../README.md) and [README.zh-CN.md](../../README.zh-CN.md)
 
 ---
@@ -57,5 +57,5 @@ AeroSync 主程序会把 rendezvous 返回的 `observed_addr` 拼成 `http://…
 ## 另见
 
 - [RFC-004 实现状态](../rfcs/RFC-004-wan-rendezvous.md#implementation-status-2026-04-24)
-- **R2 / WAN 发布运维**（无 R3 自动中继、回退手段、实网 SLO）：[wan-r2-release-ops.md](./wan-r2-release-ops.md)（含中英）、[实网矩阵](./wan-r2-field-matrix.md)
+- **R2 / WAN 发布运维**（无 R3 自动中继、实网 SLO、报告模板、发版清单）：[wan-r2-release-ops.md](./wan-r2-release-ops.md)、[实网矩阵](./wan-r2-field-matrix.md)、[SLO 目标](./wan-r2-slo-goals.md)、[实网报告模板](./wan-r2-field-report-template.md)、[稳定版检查清单](./wan-r2-stable-release-checklist.md)
 - 主项目 README [英文](../../README.md) / [中文](../../README.zh-CN.md) 中的 `AEROSYNC_RENDEZVOUS_TOKEN`、可选 **`AEROSYNC_RENDEZVOUS_NAMESPACE`**（P2 多租户，须与 JWT `ns` 一致）与 `peer@host:port` 说明
