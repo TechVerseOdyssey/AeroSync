@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (docs)
+
+- **RFC-004 / CHANGELOG:** `Implementation status` and the R2 entry now match
+  `AutoAdapter::try_r2_upload` + `QuicTransfer::new_with_socket` on `main`;
+  R3 auto-fallback and relay **501** are called out explicitly (no contradiction
+  with the §6.4 table).
+
 ### Added (§12.2 — SQLite `HistoryStorage`)
 
 - **`aerosync_infra::history_sqlite::SqliteHistoryStore`:** `HistoryStorage` over
@@ -15,14 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aerosync::SqliteHistoryStore`. The transfer engine still defaults to JSONL
   `HistoryStore` until a config switch wires `Arc<dyn HistoryStorage>`.
 
-### Added (RFC-004 P2 / R2 control + client hooks)
+### Added (RFC-004 P2 / R2 control + data path)
 
 - **`RendezvousClient`:** `initiate_session*`, `signaling_websocket_url` (builds
   `ws://` / `wss://` + `?token=` for the response’s `signaling.websocket_path`).
 - **`aerosync::exchange_candidates_and_wait_punch`:** WebSocket `candidates` →
   `remote.candidates` + `punch_at` (needs `tokio-tungstenite` with native roots
   for WSS). **`aerosync::udp_punch_warmup`:** one-byte UDP warm-up (requires
-  `quic` + `wan-rendezvous`); `QuicTransfer` / `AutoAdapter` R2 wiring TBD.
+  `quic` + `wan-rendezvous`).
+- **`AutoAdapter` R2 upload path (features `quic` + `wan-rendezvous`):** for
+  **bare** `peer@rendezvous-host:port` (no path suffix), `try_r2_upload` runs
+  initiate → signaling → `punch_at` → warmup → **`QuicTransfer::new_with_socket`**
+  (shared `UdpSocket` / `quinn` endpoint) so the NAT-punch data plane matches
+  §6.3; failures use stable **`[R2_*]`** tags. **No** automatic R3 relay.
 - **`aerosync-rendezvous`:** in-memory hub per session — relays `candidates`
   and broadcasts synchronized `punch_at`. R3 byte relay still **HTTP 501**.
 

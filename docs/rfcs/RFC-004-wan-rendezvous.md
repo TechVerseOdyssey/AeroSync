@@ -11,10 +11,10 @@
 | Depends on | RFC-002 (Receipt), RFC-003 (Metadata) |
 | Supersedes | none |
 
-## Implementation status (2026-04-24)
+## Implementation status (2026-04-26)
 
 This RFC remains **Draft**; the target release line is **v0.4.0**. The
-blurb below matches the **tree as of 2026-04**; for release notes use
+blurb below matches **`main` as of 2026-04-26**; for release notes use
 `CHANGELOG.md` [Unreleased] in addition to this section.
 
 ### Implemented in the codebase
@@ -40,9 +40,10 @@ blurb below matches the **tree as of 2026-04**; for release notes use
   - `POST /v1/peers/register`, `POST /v1/peers/heartbeat`, `GET /v1/peers/:name`
     (`:name` is the registered peer name; see handler for conflict rules).
   - P2: optional header **`X-AeroSync-Namespace`**, unique **`(namespace, name)`**,
-    **`POST /v1/sessions/initiate`**, **`GET /v1/sessions/{id}/ws`** (signaling stub;
-    not full ICE/QUIC over WS yet), per-IP **register** rate limit (HTTP 429).
-    Protocol notes and 501/relay story: [`RFC-004-p2-protocol-security.md`](./RFC-004-p2-protocol-security.md).
+    **`POST /v1/sessions/initiate`**, **`GET /v1/sessions/{id}/ws`** — **R2 control
+    plane** (JSON over WebSocket: relay `candidates`, broadcast synchronized
+    `punch_at`; not raw QUIC inside the WebSocket), per-IP **register** rate
+    limit (HTTP 429). Protocol notes and R3/501: [`RFC-004-p2-protocol-security.md`](./RFC-004-p2-protocol-security.md).
   - **Relay** paths `POST/GET /v1/relay/...` still **HTTP 501** (R3) with
     **structured** JSON.
   - Process must be started with a PKCS#8 RSA private key PEM
@@ -53,25 +54,35 @@ blurb below matches the **tree as of 2026-04**; for release notes use
 - **Python `Config.rendezvous_url` (and similar hooks):** reserved; week-1
   lookup uses the **`peer@host:port` destination** plus env token, not a
   separate base-URL field on `Config`.
-- **P2 R2 (2026-04 follow-up):** `RendezvousClient::initiate_session*`
-  and `RendezvousClient::signaling_websocket_url` feed `POST` + `GET` …
-  `GET /v1/sessions/{id}/ws?token=…`. The rendezvous now **relays** `candidates`
-  and issues **`punch_at`**; the `aerosync` crate adds
-  `exchange_candidates_and_wait_punch` and `udp_punch_warmup` (quic + wan).
-  **Wire-up** of a shared `UdpSocket` + `quinn::Endpoint` into
-  `QuicTransfer` / `AutoAdapter` (§6.3) is not done yet. R3 relay is still
-  **HTTP 501** on the server.
-- **Release-readiness tests (2026-04):** focused in-tree tests cover tagged R2
-  failure paths (`R2_NO_TOKEN`, `R2_PEER_UNSEEN`, `R2_INITIATE`,
-  `R2_SIGNALING`, `R2_CANDIDATE_EMPTY`) and keep behavior stable while R2/R3
-  data-plane integration remains in progress.
+- **P2 R2 (client + QUIC data path):** `RendezvousClient::initiate_session*`,
+  `RendezvousClient::signaling_websocket_url`, `exchange_candidates_and_wait_punch`
+  / `exchange_candidates_and_wait_punch_with_timeouts`, and `udp_punch_warmup`
+  (features **`quic`** + **`wan-rendezvous`**). **`AutoAdapter::try_r2_upload`**
+  (`src/protocols/adapter.rs`) implements §6.2–§6.3 for **bare**
+  `peer@rendezvous-host:port` (no path suffix): bind a shared
+  `UdpSocket` → initiate → WebSocket signaling → `punch_at` → UDP warmup →
+  **`QuicTransfer::new_with_socket`** for the upload. Failures surface as stable
+  **`[R2_*]`** messages (CLI `error_advice`, Python typed errors). There is
+  **no** automatic **R3** byte relay on failure in this line. R3 **relay** HTTP
+  routes on the server remain **501**; see [`docs/operations/wan-r2-release-ops.md`](../operations/wan-r2-release-ops.md).
+- **Release-readiness tests:** mock rendezvous in `aerosync` unit tests, local
+  e2e in `aerosync-rendezvous`, timeout coverage in `punch_signaling`, and CI
+  job **`R2 WAN readiness (targeted)`** (`scripts/ci-r2-wan-readiness.sh`) on
+  the `http,quic,wan-rendezvous` feature slice.
 
 ### Not yet implemented (vs this RFC)
 
-- **R2 data plane:** `AutoAdapter` / CLI does not yet use R2 signaling and
-  `quinn::Endpoint` socket reuse in one automatic send path. **R3** byte relay
-  with accounting — **relay** routes 501; see
-  [RFC-004-p2-protocol-security.md](./RFC-004-p2-protocol-security.md).
+- **R3 (relay) data plane and automatic R2 → R3 fallback:** server **`/v1/relay/...`**
+  is still **HTTP 501**; there is no in-tree relay splice, bandwidth accounting,
+  or automatic fallback when R2 fails (§6.4 table “fall back to R3” is **not**
+  implemented in the product line; failures stay on the direct path with
+  `[R2_*]` / QUIC errors). See
+  [RFC-004-p2-protocol-security.md](./RFC-004-p2-protocol-security.md) and
+  [wan-r2-release-ops.md](../operations/wan-r2-release-ops.md).
+- **R2 extras vs §6:** optional post-punch reporting (`punch_succeeded` /
+  `punch_failed` to the server), server-side `punch_at` reskew, and other
+  niceties in the normative JSON over WS are not all implemented; the path
+  above covers **initiate + candidates + `punch_at` + shared-socket QUIC**.
 - **Identity/ACL** beyond “JWT from our RSA key + register-time name/key”;
   **§13.1 MCP tools** (`register_peer` server-side, etc.) as a first-class
   product surface.
@@ -409,6 +420,11 @@ ourselves and pass it to *both* the client + server endpoint.
 | All candidates fail              | 3s after `punch_at`        | Fall back to R3 relay        |
 | Direct QUIC handshake hangs      | quinn idle_timeout (15s)   | Fall back to R3              |
 | Symmetric NAT (port unpredictable)| Implicit (punch fails)    | Fall back to R3              |
+
+**Current product line:** automatic **R2 → R3** fallback in this table is **not**
+implemented; R2 failures are surfaced to the user (see the **Implementation
+status** section at the top of this document and
+[wan-r2-release-ops.md](../operations/wan-r2-release-ops.md)).
 
 ## 7. R3: Relay (TURN-style fallback)
 
