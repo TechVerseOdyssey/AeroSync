@@ -300,6 +300,7 @@ Current scope/limits (v0.3.0-rc line):
 - There is no automatic R3 relay fallback; R2 failures surface as transfer errors
   with the tags above. Release expectations, rollback levers, and the “no R3” product boundary:
   [wan-r2-release-ops.md](docs/operations/wan-r2-release-ops.md). Field SLOs / CSV-style matrix: [wan-r2-field-matrix.md](docs/operations/wan-r2-field-matrix.md).
+  **Two-machine R2 walkthrough:** [wan-r2-two-machine-test.md](docs/operations/wan-r2-two-machine-test.md).
 
 Quick checks:
 

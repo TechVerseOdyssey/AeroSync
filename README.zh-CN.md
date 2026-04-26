@@ -208,6 +208,7 @@ aerosync send ./file.csv ftp://ftpserver:21/data/file.csv
 - 本发版**没有**自动 R3 中继回退；R2 失败以带上述标签的传输错误返回。发布期边界
   与回退手段见 [`wan-r2-release-ops.md`](docs/operations/wan-r2-release-ops.md)；
   实网矩阵与 SLO 统计用 [`wan-r2-field-matrix.md`](docs/operations/wan-r2-field-matrix.md)。
+  **双机 R2 实测步骤：** [`wan-r2-two-machine-test.md`](docs/operations/wan-r2-two-machine-test.md)。
 
 快速排查：
 

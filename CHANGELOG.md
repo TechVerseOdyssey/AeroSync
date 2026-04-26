@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AutoAdapter::try_r2_upload` + `QuicTransfer::new_with_socket` on `main`;
   R3 auto-fallback and relay **501** are called out explicitly (no contradiction
   with the §6.4 table).
+- **Two-machine R2 guide:** [wan-r2-two-machine-test.md](docs/operations/wan-r2-two-machine-test.md)
+  (rendezvous + receiver env + sender `register` + bare `peer@`).
 - **Stable SLO / field validation:** [wan-r2-slo-goals.md](docs/operations/wan-r2-slo-goals.md)
   (scope), [wan-r2-field-report-template.md](docs/operations/wan-r2-field-report-template.md)
   (report), [wan-r2-stable-release-checklist.md](docs/operations/wan-r2-stable-release-checklist.md);

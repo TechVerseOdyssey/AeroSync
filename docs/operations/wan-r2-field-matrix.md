@@ -64,6 +64,7 @@ using rendezvous config fields from the SDK.
 
 ## Related
 
+- [Two-machine R2 step-by-step](./wan-r2-two-machine-test.md)
 - [WAN R2 release / rollback / no R3](./wan-r2-release-ops.md)
 - [Rendezvous ops (TLS, proxy, `X-Forwarded-For`)](./rendezvous.md)
 - [RFC-004 — WAN / rendezvous](../rfcs/RFC-004-wan-rendezvous.md)
@@ -108,5 +109,6 @@ using rendezvous config fields from the SDK.
 
 ## 另见
 
+- [双机 R2 实测步骤](./wan-r2-two-machine-test.md)
 - [发布运维 / 回滚 / 无 R3](./wan-r2-release-ops.md)（本目录中英文对照同文件）
 
